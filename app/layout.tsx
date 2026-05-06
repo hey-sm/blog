@@ -1,4 +1,5 @@
 import { Footer, Layout, Navbar } from 'nextra-theme-docs'
+import { Head } from 'nextra/components'
 import { getPageMap } from 'nextra/page-map'
 import 'nextra-theme-docs/style.css'
 import './globals.css'
@@ -31,6 +32,7 @@ export default async function RootLayout({
 }) {
   return (
     <html lang="zh-CN" dir="ltr" suppressHydrationWarning>
+      <Head />
       <body>
         <Layout
           navbar={navbar}

@@ -1,3 +1,3 @@
 :root {
-  --nextra-content-width: 100%;
+  --nextra-content-width: 100% !important;
 }

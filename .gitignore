@@ -6,6 +6,7 @@ out/
 *.log
 next-env.d.ts
 .vercel
+tsconfig.tsbuildinfo
 
 # Pagefind 搜索索引(build 产物,不入库)
 public/_pagefind/
