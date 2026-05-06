@@ -7,5 +7,8 @@ out/
 next-env.d.ts
 .vercel
 
+# Pagefind 搜索索引(build 产物,不入库)
+public/_pagefind/
+
 # Claude Code 本地配置(机器特定,不入库)
 .claude/settings.local.json

@@ -1,10 +1,9 @@
-import { timeStamp } from "node:console";
-
 export default {
   '*': {
     theme: {
       breadcrumb: false,
-      timestamp:false
+      timestamp: false,
+      copyPage: false
     }
   },
   index: '首页',
