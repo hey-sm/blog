@@ -1,0 +1,208 @@
+---
+title: 简介与心智模型
+description: React 的核心设计理念、声明式渲染、单向数据流与 Reconciler
+---
+
+# 简介与心智模型
+
+React 是 Meta 开源的**用户界面构建库**。它的核心命题可以浓缩为一句话：
+
+> **UI 是状态的纯函数：`UI = f(state)`**
+
+理解 React 之前，必须把这一公式作为不可动摇的前提。所有 API 设计、最佳实践、性能模型，都从此衍生。
+
+## 声明式 vs 命令式
+
+传统 DOM 操作是**命令式**的——逐步告诉浏览器"如何"修改界面：
+
+```js
+const list = document.getElementById('list')
+list.innerHTML = ''                           // 清空
+items.forEach(item => {
+  const li = document.createElement('li')
+  li.textContent = item.name
+  if (item.selected) li.classList.add('active')
+  list.appendChild(li)
+})
+```
+
+React 采用**声明式**风格——只描述"在当前状态下，UI 应该长什么样"：
+
+```tsx
+function List({ items }: { items: Item[] }) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={item.id} className={item.selected ? 'active' : ''}>
+          {item.name}
+        </li>
+      ))}
+    </ul>
+  )
+}
+```
+
+差异不仅在写法，更在心智成本：
+
+| 维度 | 命令式 | 声明式 |
+| ---- | ------ | ------ |
+| 关注点 | 步骤序列 | 最终结果 |
+| 状态同步 | 开发者手动维护 | React 自动 diff & 更新 |
+| 易出错点 | 漏掉某次更新 | 状态计算错误 |
+| 可组合性 | 弱 | 强 |
+
+## 单向数据流
+
+React 严格遵循**自上而下**的数据流：
+
+```text
+state ─┐
+       ├─► props ──► child component
+       ├─► props ──► child component
+       └─► props ──► child component
+```
+
+子组件想改变父组件的状态时，**不能直接写**——必须通过父组件传下来的回调：
+
+```tsx
+function Parent() {
+  const [count, setCount] = useState(0)
+  return <Child count={count} onInc={() => setCount(c => c + 1)} />
+}
+
+function Child({ count, onInc }: { count: number; onInc: () => void }) {
+  return <button onClick={onInc}>{count}</button>
+}
+```
+
+这种约束的代价是少量的样板代码；收益是任何状态变化都有明确的发起源，调试与状态追溯极其简单。
+
+## 虚拟 DOM 与 Reconciler
+
+React 不直接操作真实 DOM——每次渲染产生一棵**虚拟 DOM 树**（实际上是 React Element 对象树），与上一次的树进行 **diff**，仅把差异部分应用到真实 DOM。这一过程称为 **Reconciliation（协调）**。
+
+React 18 起，Reconciler 名为 **Fiber**，是一个支持**可中断渲染**的协程式实现：
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│                         React Render                              │
+│                                                                   │
+│  state change → schedule work → build new fiber tree              │
+│                                                                   │
+│  ┌───────────┐                                                    │
+│  │  Render   │  ① 计算下一帧的 UI 描述（可中断、可丢弃、可重做） │
+│  └─────┬─────┘                                                    │
+│        │                                                          │
+│        ▼                                                          │
+│  ┌───────────┐                                                    │
+│  │  Commit   │  ② 应用到真实 DOM、运行 effects（不可中断）       │
+│  └───────────┘                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Render 阶段被设计成**纯函数**——不应有副作用，可以被打断、丢弃、重做。Commit 阶段才接触 DOM，对应 `useEffect` / `useLayoutEffect` 等副作用钩子的执行时机。
+
+## React 18 / 19 的并发模型
+
+React 18 引入**并发渲染（Concurrent Rendering）**：
+
+- `startTransition` 标记低优先级更新，可被高优先级更新打断
+- `useDeferredValue` 创建滞后值，避免阻塞高频输入
+- `Suspense` 在数据 / 代码加载未完成时挂起子树
+
+React 19（2024 年底稳定）在此基础上推进：
+
+- **Server Components**：在服务器渲染、序列化为 wire format、客户端不打包不执行
+- **Actions**：`<form action={fn}>`，函数副作用与表单 / 状态联动
+- **新 Hook**：`use`、`useOptimistic`、`useFormStatus`、`useActionState`
+- **自动 ref forwarding**：函数组件直接接受 `ref` prop，不再需要 `forwardRef`
+
+详见 [Hooks](/react/hooks) 与 [高级主题](/react/advanced)。
+
+## 组件即函数
+
+React 组件是**接受 props、返回 React Element** 的纯函数：
+
+```tsx
+type ButtonProps = {
+  children: React.ReactNode
+  onClick?: () => void
+  variant?: 'primary' | 'secondary'
+}
+
+function Button({ children, onClick, variant = 'primary' }: ButtonProps) {
+  return (
+    <button className={`btn btn-${variant}`} onClick={onClick}>
+      {children}
+    </button>
+  )
+}
+```
+
+类组件（class components）作为旧 API 仍被支持，但**不再推荐**用于新代码。Hook 提供了类组件的全部能力，且组合性更好。详见 [组件](/react/components#class-组件遗留说明)。
+
+## React 不做什么
+
+理解 React 的边界与理解它本身同样重要。React **不**包含：
+
+| 缺口 | 推荐方案 |
+| ---- | -------- |
+| 路由 | React Router、TanStack Router |
+| 全局状态 | Zustand、Jotai、Redux Toolkit、MobX |
+| 数据请求 | TanStack Query、SWR、Apollo |
+| 样式 | CSS Modules、Tailwind、Panda CSS |
+| 表单 | React Hook Form、Formik |
+| 国际化 | react-i18next、Lingui |
+| SSR / 路由文件约定 | Next.js、Remix、Astro、TanStack Start |
+
+React 自身只关心"组件如何渲染与更新"——其他都交给生态。这种"小核心 + 大生态"是 React 长期保持活力的关键。
+
+## 一段最小示例
+
+```tsx filename="App.tsx"
+import { useState } from 'react'
+
+export default function App() {
+  const [name, setName] = useState('')
+  return (
+    <div>
+      <input
+        value={name}
+        onChange={e => setName(e.target.value)}
+        placeholder="Your name"
+      />
+      <p>{name ? `Hello, ${name}!` : 'Type something…'}</p>
+    </div>
+  )
+}
+```
+
+```tsx filename="main.tsx"
+import { createRoot } from 'react-dom/client'
+import App from './App'
+
+createRoot(document.getElementById('root')!).render(<App />)
+```
+
+执行流程：
+
+1. `createRoot` 创建一个并发根
+2. `render(<App />)` 触发首次 Render
+3. Reconciler 构造 fiber 树 → 提交到 DOM
+4. 用户输入 → `setName` 触发 state 更新
+5. React 重新执行 `App` 函数 → 新 fiber 树 → diff → 局部更新 DOM
+
+整个生命周期没有"修改 DOM"的命令式语句，开发者只描述"在当前 state 下 UI 长什么样"。
+
+## React 心智模型清单
+
+读完本节后，请确认以下命题已成为你的肌肉记忆：
+
+1. **`UI = f(state)`**：UI 永远是状态的派生，不是相反；
+2. **数据流单向**：父 → 子；逆向必须通过回调；
+3. **组件是纯函数**：相同 props + state 必须产生相同输出；
+4. **副作用归位 effect**：DOM 操作、订阅、网络请求、定时器都不在渲染体里直接做；
+5. **不要绕过 React 修改它管理的 DOM**：React 持有 DOM 节点的"账本"，外部修改会引发 hydration / diff 异常；
+6. **Render 可被丢弃**：渲染函数不应假设"一定会被 commit"——Concurrent 模式下可能被中断或重做。
+
+下一章 [工具链](/react/tooling) 会从零搭一个生产级 React 项目骨架。

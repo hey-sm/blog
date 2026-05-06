@@ -1,0 +1,294 @@
+---
+title: 服务端与客户端组件
+description: "React Server Components 与 Client Components 的边界、'use client' 标记、组合模式与 server-only 守卫"
+---
+
+# 服务端与客户端组件
+
+App Router 最核心的设计决策：**默认所有组件都是 Server Component**。
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│              Server Component (默认)                      │
+│                                                           │
+│  • 在服务器上执行，生成 RSC Payload                       │
+│  • JS bundle 不发送到浏览器                               │
+│  • 可直查 DB、读文件系统、访问 secrets                    │
+│  • 不能使用 useState / useEffect / onClick 等交互 API     │
+│                                                           │
+│  ┌─────────────────────────────────────────────────┐     │
+│  │           'use client' Boundary                  │     │
+│  │                                                  │     │
+│  │  • JS bundle 发送到浏览器、hydration              │     │
+│  │  • 可以使用 hooks、事件、浏览器 API               │     │
+│  │  • 不能直接 await / access DB                     │     │
+│  │  • 可以 import 并渲染 Server Components (作为     │     │
+│  │    children，在 Server 端渲染后传入)               │     │
+│  └─────────────────────────────────────────────────┘     │
+└──────────────────────────────────────────────────────────┘
+```
+
+## `'use client'` 指令
+
+```tsx filename="components/Counter.tsx"
+'use client'
+
+import { useState } from 'react'
+
+export function Counter() {
+  const [count, setCount] = useState(0)
+
+  return (
+    <button onClick={() => setCount(c => c + 1)}>
+      Count: {count}
+    </button>
+  )
+}
+```
+
+`'use client'` 做的事情：
+1. 标记该组件及**所有被它 import 的组件**为客户端 bundle
+2. 不标记该组件的 children——children 仍在服务端渲染并通过 slot 传入
+
+### 指令的"传染"不是无限制的
+
+```tsx
+// ServerComponent.tsx — 服务端
+'use server' 不是让你这样用的，但这里的关键是：
+
+// A.tsx — 服务端
+// B.tsx — 'use client'
+import { A } from './A'    // ✗ A 没有 'use client'，但被 B import 了 → A 现在是客户端
+import { C } from './C'    // ✓ C 同样被"拖"到客户端
+```
+
+规则：**`'use client'` 组件 import 的所有组件都变成客户端**。但 children 不受影响。
+
+## 组合模式：Server Component 包裹 Client Component
+
+```tsx filename="app/posts/page.tsx"
+import { PostList } from './PostList'
+import { db } from '@/lib/db'
+
+export default async function PostsPage() {
+  const posts = await db.post.findMany()   // ← 服务端直查 DB
+
+  return <PostList posts={posts} />        // ← 传给客户端组件
+}
+```
+
+```tsx filename="app/posts/PostList.tsx"
+'use client'
+
+import { useState } from 'react'
+
+export function PostList({ posts }: { posts: Post[] }) {
+  const [filter, setFilter] = useState('all')
+
+  const filtered = posts.filter(p =>
+    filter === 'all' ? true : p.category === filter
+  )
+
+  return (
+    <div>
+      <select onChange={e => setFilter(e.target.value)}>
+        <option value="all">All</option>
+        <option value="tech">Tech</option>
+      </select>
+      {filtered.map(p => <PostCard key={p.id} post={p} />)}
+    </div>
+  )
+}
+```
+
+这个模式被称为 **"Server 获取，Client 交互"**：数据在服务端获取、序列化，传给客户端组件用于交互。
+
+## 组合模式：Client Component 包裹 Server Component（通过 children）
+
+```tsx filename="components/ClientShell.tsx"
+'use client'
+
+import { useState } from 'react'
+
+export function ClientShell({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+
+  return (
+    <div className={theme}>
+      <button onClick={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))}>
+        Toggle Theme
+      </button>
+      {children}           {/* ← 在 Server 端已经渲染好的 RSC */}
+    </div>
+  )
+}
+```
+
+```tsx filename="app/layout.tsx"
+import { ClientShell } from '@/components/ClientShell'
+import { ServerContent } from './ServerContent'   // Server Component
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        <ClientShell>
+          <ServerContent />    {/* ← 作为 RSC payload 传入 ClientShell */}
+          {children}
+        </ClientShell>
+      </body>
+    </html>
+  )
+}
+```
+
+这也是为什么 App Router 中 **layout 是 Server Component（不可 async），page 可以是 async Server Component**——children 在 server 端渲染后穿入 layout。
+
+## 客户端组件中不能直接 import Server Component
+
+```tsx
+// ✗ 反模式
+'use client'
+
+import { ServerOnlyComponent } from './ServerOnlyComponent'
+
+export function ClientComponent() {
+  return <ServerOnlyComponent />  // ← ServerOnlyComponent 变成了客户端
+}
+```
+
+改为通过 children / prop 传递：
+
+```tsx
+// ✓ 正确
+'use client'
+
+export function ClientComponent({
+  serverSlot,
+}: {
+  serverSlot: React.ReactNode
+}) {
+  return <div>{serverSlot}</div>
+}
+```
+
+## `server-only` 和 `client-only`
+
+### `server-only`
+
+```bash
+pnpm add server-only
+```
+
+```tsx filename="lib/db.ts"
+import 'server-only'
+
+export const db = createDbClient(process.env.DATABASE_URL)
+```
+
+任何客户端组件 import 此文件 → **编译报错**。防止 DB 连接泄漏到浏览器。
+
+### `client-only`
+
+```bash
+pnpm add client-only
+```
+
+```tsx filename="components/BrowserOnly.tsx"
+import 'client-only'
+
+export function getWindowSize() {
+  return { width: window.innerWidth, height: window.innerHeight }
+}
+```
+
+## 服务端与客户端组件对照表
+
+| 特性 | Server Component | Client Component |
+| ---- | ---------------- | ---------------- |
+| 标记 | 默认（无需指令） | `'use client'` |
+| 执行环境 | Node.js | 浏览器 + Node.js（SSR） |
+| 数据获取 | `async` + `await` 直查 DB | `useEffect` + `fetch` 或 SWR |
+| 交互（onClick, etc.） | ✗ | ✓ |
+| Hooks（useState, etc.） | ✗ | ✓ |
+| `process.env`（私有） | ✓ | ✗（仅 `NEXT_PUBLIC_*`） |
+| 文件系统访问 | ✓ | ✗ |
+| JS bundle | 0 KB 发送 | 全部 bundle |
+| `next/headers` / `next/cookies` | ✓ | ✗ |
+| Context API / Provider | ✗ | ✓ |
+
+## 何时标记为 `'use client'`
+
+标准判定流程：
+
+```text
+1. 组件需要事件处理？(onClick / onChange / onSubmit)  → 'use client'
+2. 组件需要 hooks？(useState / useEffect / useRef)    → 'use client'
+3. 组件只用浏览器 API？(localStorage / location)       → 'use client'
+4. 组件需要 React Context？(useContext / Provider)     → 'use client'
+5. 都不需要                                           → Server Component（默认）
+```
+
+将 `'use client'` 标记在**尽可能叶子**的位置——比如交互组件 `<Button>`、`<Input>` 而非整个页面。
+
+## 陷阱
+
+### 把整个 page 标记为 `'use client'`
+
+```tsx
+// ✗ 滥用：把纯数据页面全标记为 client
+'use client'
+
+export default function PostsPage() {
+  const [posts, setPosts] = useState([])
+
+  useEffect(() => {
+    fetch('/api/posts').then(r => r.json()).then(setPosts)
+  }, [])
+
+  return ...
+}
+```
+
+在此模式下，用户下载了整个页面的 JS bundle，并等待客户端 fetch 才显示内容。改为：
+
+```tsx
+// ✓
+export default async function PostsPage() {
+  const posts = await db.post.findMany()
+  return <PostList posts={posts} />  // PostList 是 'use client'
+}
+```
+
+### `'use client'` 不阻止 SSR
+
+`'use client'` 组件**仍然会在服务器上执行一次**（生成初始 HTML），然后客户端 hydration。这与传统的 SSR 相同——差异只在于 Server Components 完全在服务端执行，不 hydration。
+
+### 在 Server Component 中使用 `useContext`
+
+Context 需要 Provider（即客户端状态），所以不能在 Server Component 中用。但你可以：
+
+- 将数据通过 props 传递（替代 Context）
+- 使用 `headers()` + `cookies()` 获取请求上下文
+- 通过 `children` 将 Server-rendered 内容 insert 到 Client Provider 中
+
+### 大数据作为 props 传递给 Client Component
+
+```tsx
+// 注意：posts 会被序列化到 RSC payload
+<PostList posts={hugePostsArray} />
+```
+
+大量数据传递 → 更大的 RSC payload → 更慢的初始加载。对于大列表，考虑在 Server Component 中分页并将切好的 slice 传给客户端。
+
+## 小结
+
+- 默认是 Server Component：无 JS，可直查 DB，但不能有交互；
+- `'use client'` 是交互边界：标记到叶子组件；
+- 服务端获取数据 → 传给客户端组件用于交互（"Server 获取，Client 交互"）；
+- 通过 `children` props 将 Server Components 嵌入 Client Components，避免整个树客户端化；
+- `server-only` / `client-only` 提供编译期的模块访问保护。

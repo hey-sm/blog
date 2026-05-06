@@ -1,0 +1,172 @@
+---
+title: 生命周期钩子
+description: 组件生命周期、钩子函数与最佳实践
+---
+
+# 生命周期钩子
+
+Vue 组件有完整的生命周期，从创建到销毁。
+
+## 生命周期图示
+
+```text
+创建阶段
+  ↓
+setup() / <script setup>
+  ↓
+onBeforeMount
+  ↓
+onMounted ← DOM 已挂载
+  ↓
+更新阶段（数据变化时）
+  ↓
+onBeforeUpdate
+  ↓
+onUpdated ← DOM 已更新
+  ↓
+卸载阶段
+  ↓
+onBeforeUnmount
+  ↓
+onUnmounted ← 组件已销毁
+```
+
+## Composition API 钩子
+
+```vue
+<script setup lang="ts">
+import {
+  onBeforeMount,
+  onMounted,
+  onBeforeUpdate,
+  onUpdated,
+  onBeforeUnmount,
+  onUnmounted
+} from 'vue'
+
+onBeforeMount(() => {
+  console.log('组件即将挂载')
+})
+
+onMounted(() => {
+  console.log('组件已挂载，DOM 可访问')
+})
+
+onBeforeUpdate(() => {
+  console.log('组件即将更新')
+})
+
+onUpdated(() => {
+  console.log('组件已更新')
+})
+
+onBeforeUnmount(() => {
+  console.log('组件即将卸载')
+})
+
+onUnmounted(() => {
+  console.log('组件已卸载')
+})
+</script>
+```
+
+## Options API 对应
+
+| Composition API | Options API |
+| --------------- | ----------- |
+| `setup()` | `beforeCreate` / `created` |
+| `onBeforeMount` | `beforeMount` |
+| `onMounted` | `mounted` |
+| `onBeforeUpdate` | `beforeUpdate` |
+| `onUpdated` | `updated` |
+| `onBeforeUnmount` | `beforeUnmount` |
+| `onUnmounted` | `unmounted` |
+
+## 常见用例
+
+### onMounted：DOM 操作
+
+```vue
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+const inputRef = ref<HTMLInputElement>()
+
+onMounted(() => {
+  inputRef.value?.focus()
+})
+</script>
+
+<template>
+  <input ref="inputRef">
+</template>
+```
+
+### onMounted：数据请求
+
+```vue
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+const data = ref(null)
+
+onMounted(async () => {
+  const response = await fetch('/api/data')
+  data.value = await response.json()
+})
+</script>
+```
+
+### onUnmounted：清理
+
+```vue
+<script setup lang="ts">
+import { onMounted, onUnmounted } from 'vue'
+
+let timer: number
+
+onMounted(() => {
+  timer = setInterval(() => {
+    console.log('tick')
+  }, 1000)
+})
+
+onUnmounted(() => {
+  clearInterval(timer)
+})
+</script>
+```
+
+## 最佳实践
+
+### ✅ 在 onMounted 中访问 DOM
+
+```vue
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+const el = ref<HTMLElement>()
+
+onMounted(() => {
+  console.log(el.value?.offsetHeight)
+})
+</script>
+```
+
+### ✅ 清理副作用
+
+```vue
+<script setup lang="ts">
+import { onMounted, onUnmounted } from 'vue'
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+})
+</script>
+```
+
+下一章 [事件处理](/vue/event-handling) 详解事件系统。

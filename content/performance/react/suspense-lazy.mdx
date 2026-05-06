@@ -1,0 +1,633 @@
+---
+title: Suspense 与代码分割
+description: React.lazy、Suspense 边界、路由分割、数据预取与瀑布流问题
+---
+
+# Suspense 与代码分割
+
+代码分割（Code Splitting）让首屏只加载必要的 JS——这是 SPA 性能优化最直接的杠杆。`Suspense` 是 React 提供的"占位 / 等待"机制，与 `lazy` / RSC / 数据预取协同，是现代 React 异步加载的核心 API。本章覆盖 lazy 边界设计、路由级分割、数据 Suspense、瀑布流防治。
+
+## 为什么需要代码分割
+
+```text
+单 bundle：
+  /                                          /admin
+   └─ 用户访问首页就下载所有路由代码           └─ 实际用到的代码 ~ 100 KB
+                                                          ↑ 浪费
+
+分割后：
+  /         ──► 100 KB 首屏 chunk
+  /admin    ──► 80 KB（只有访问时才加载）
+  /editor   ──► 200 KB（只有打开编辑器才加载）
+```
+
+中型应用（50+ 路由）不分割，bundle 常达 1-2 MB，慢网用户首屏要 5-10 秒。
+
+## React.lazy
+
+包装一个返回 Promise 的动态 import：
+
+```jsx
+import { lazy, Suspense } from 'react'
+
+const Settings = lazy(() => import('./Settings'))
+
+function App() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button onClick={() => setOpen(true)}>Open Settings</button>
+      {open && (
+        <Suspense fallback={<Spinner />}>
+          <Settings />
+        </Suspense>
+      )}
+    </>
+  )
+}
+```
+
+工作流程：
+
+```text
+用户点击 → setOpen(true) → React 渲染 <Settings />
+   ↓
+  Settings 是 lazy 组件 → 触发 import('./Settings')
+   ↓
+  浏览器下载 Settings.chunk.js
+   ↓
+  下载中：渲染 <Spinner />
+   ↓
+  下载完：替换为真实组件
+```
+
+### lazy 必须搭配 Suspense
+
+```jsx
+const Lazy = lazy(() => import('./Component'))
+
+// ❌ 没 Suspense，组件首次渲染时会抛出
+<Lazy />
+
+// ✅ 包在 Suspense 内
+<Suspense fallback={<Spinner />}>
+  <Lazy />
+</Suspense>
+```
+
+### 路由级分割（最常见用法）
+
+#### React Router
+
+```jsx
+import { lazy } from 'react'
+import { Routes, Route } from 'react-router-dom'
+
+const Home = lazy(() => import('./pages/Home'))
+const About = lazy(() => import('./pages/About'))
+const Admin = lazy(() => import('./pages/Admin'))
+
+function App() {
+  return (
+    <Suspense fallback={<PageLoading />}>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/about" element={<About />} />
+        <Route path="/admin/*" element={<Admin />} />
+      </Routes>
+    </Suspense>
+  )
+}
+```
+
+每个路由生成独立 chunk，只在用户进入该路由时下载。
+
+#### Next.js App Router
+
+每个 `app/路由/page.tsx` 自动是分割点——不需要手动 `lazy`：
+
+```text
+app/
+  ├─ page.tsx          → /
+  ├─ about/page.tsx    → /about    自动 chunk
+  └─ admin/page.tsx    → /admin    自动 chunk
+```
+
+### 命名 chunk
+
+Webpack 魔法注释：
+
+```jsx
+const Settings = lazy(() =>
+  import(/* webpackChunkName: "settings" */ './Settings')
+)
+```
+
+构建产物 `settings.chunk.js` 而非 `123.chunk.js`——便于排查与缓存追踪。
+
+Vite 的等价：
+
+```js
+// vite.config.js
+export default {
+  build: {
+    rollupOptions: {
+      output: {
+        chunkFileNames: 'assets/[name]-[hash].js'
+      }
+    }
+  }
+}
+```
+
+## Suspense 边界设计
+
+> 一个应用应该有**多个 Suspense 边界**——不只是一个全局 fallback。
+
+### 太粗的边界
+
+```jsx
+// ❌ 全局一个 Suspense，任何子树挂起都显示全屏 Spinner
+<Suspense fallback={<FullScreenSpinner />}>
+  <Header />
+  <Sidebar />
+  <Main>
+    <PostList />        {/* 这个挂起会让整页变 Spinner */}
+    <RelatedPosts />
+  </Main>
+</Suspense>
+```
+
+### 合理的细粒度边界
+
+```jsx
+// ✅ 多个边界，按视觉区域分组
+<>
+  <Header />
+  <Sidebar />
+  <Main>
+    <Suspense fallback={<PostListSkeleton />}>
+      <PostList />
+    </Suspense>
+    <Suspense fallback={<RelatedSkeleton />}>
+      <RelatedPosts />
+    </Suspense>
+  </Main>
+</>
+```
+
+`PostList` 加载时，`Header` / `Sidebar` / `RelatedPosts` 正常显示。每个区块独立"等待"。
+
+### 边界粒度的判断
+
+| 粒度 | 适用 |
+| ---- | ---- |
+| 路由级 | 切页时整页加载 |
+| 区域级 | 页面内的独立区块（侧边栏、主内容） |
+| 卡片级 | 卡片内的异步数据 |
+| 字段级 | 极少用，UI 闪烁多 |
+
+经验：**fallback 的 UI 应与即将出现的内容尺寸匹配**——避免布局跳变（CLS）。
+
+### Suspense 的"穿透"
+
+子树中**任意层级**的 lazy / 数据挂起都会被最近的 Suspense 边界捕获：
+
+```jsx
+<Suspense fallback={<Spinner />}>
+  <Outer>
+    <Middle>
+      <Inner>
+        <LazyComponent />     {/* 挂起 */}
+      </Inner>
+    </Middle>
+  </Outer>
+</Suspense>
+```
+
+边界负责"等待并显示 fallback"——不需要每层都加 Suspense。
+
+## 数据 Suspense
+
+React 18+ 与 Next.js / Remix 中，`Suspense` 不再仅服务 lazy，还能等待**异步数据**：
+
+### Next.js App Router
+
+```jsx
+// app/page.tsx (Server Component)
+async function Posts() {
+  const posts = await fetch('https://api.example.com/posts').then(r => r.json())
+  return <ul>{posts.map(p => <li key={p.id}>{p.title}</li>)}</ul>
+}
+
+export default function Page() {
+  return (
+    <>
+      <h1>Blog</h1>
+      <Suspense fallback={<PostsSkeleton />}>
+        <Posts />
+      </Suspense>
+    </>
+  )
+}
+```
+
+服务端流式 SSR：先发送 `<h1>Blog</h1>` 与 fallback，posts 加载完再"流"过来替换。详见 [Server Components](/performance/react/server-components)。
+
+### `use()` hook（React 19）
+
+```jsx
+import { use } from 'react'
+
+function PostList({ promise }) {
+  const posts = use(promise)         // 挂起直到 promise resolve
+  return <ul>{posts.map(p => <li>{p.title}</li>)}</ul>
+}
+
+function Page() {
+  const promise = fetch('/api/posts').then(r => r.json())
+  return (
+    <Suspense fallback={<Skeleton />}>
+      <PostList promise={promise} />
+    </Suspense>
+  )
+}
+```
+
+`use()` 让组件在数据未就绪时主动挂起。
+
+### TanStack Query 的 suspense 模式
+
+```jsx
+import { useSuspenseQuery } from '@tanstack/react-query'
+
+function PostList() {
+  const { data } = useSuspenseQuery({
+    queryKey: ['posts'],
+    queryFn: () => fetch('/api/posts').then(r => r.json())
+  })
+  return <ul>{data.map(p => <li>{p.title}</li>)}</ul>
+}
+
+<Suspense fallback={<Skeleton />}>
+  <PostList />
+</Suspense>
+```
+
+数据加载时挂起，错误时让 ErrorBoundary 接管。比传统的 `isLoading` 三态判断更优雅。
+
+## 瀑布流陷阱
+
+### 问题
+
+```jsx
+function Profile({ id }) {
+  const user = use(fetchUser(id))           // 1. 等用户
+  const posts = use(fetchPosts(user.id))    // 2. 等帖子（必须先有 user.id）
+  const friends = use(fetchFriends(user.id))// 3. 等朋友
+  return <Layout user={user} posts={posts} friends={friends} />
+}
+```
+
+```text
+T+0     ──► 请求 user
+T+200   ◄── user 到达
+T+200   ──► 请求 posts + friends
+T+400   ◄── 都到达
+T+400   渲染
+
+总耗时 400ms（瀑布流：每层等上一层）
+```
+
+### 优化：并行预取
+
+```jsx
+function Profile({ id }) {
+  // 在组件外或 loader 中并行启动
+  const userPromise = fetchUser(id)
+  const postsPromise = userPromise.then(u => fetchPosts(u.id))
+  const friendsPromise = userPromise.then(u => fetchFriends(u.id))
+
+  const user = use(userPromise)
+  const posts = use(postsPromise)
+  const friends = use(friendsPromise)
+
+  return <Layout user={user} posts={posts} friends={friends} />
+}
+```
+
+或使用 Next.js / Remix 的 loader 机制——在路由匹配时**就**启动所有请求：
+
+```ts
+// Next.js App Router
+async function Page({ params }) {
+  // 并行启动
+  const userPromise = fetchUser(params.id)
+  const postsPromise = fetchPosts(params.id)
+  const friendsPromise = fetchFriends(params.id)
+
+  return (
+    <>
+      <Suspense fallback={<UserSkeleton />}>
+        <UserCard promise={userPromise} />
+      </Suspense>
+      <Suspense fallback={<PostsSkeleton />}>
+        <PostList promise={postsPromise} />
+      </Suspense>
+      <Suspense fallback={<FriendsSkeleton />}>
+        <Friends promise={friendsPromise} />
+      </Suspense>
+    </>
+  )
+}
+```
+
+### 动态 import 的瀑布
+
+```jsx
+// ❌ Settings 组件加载完才知道要加载 Editor
+const Settings = lazy(() => import('./Settings'))
+// Settings.tsx
+const Editor = lazy(() => import('./Editor'))    // 二级 lazy
+
+// 路径：进入 Settings → 下载 Settings.js → 解析 → 发现 Editor → 下载 Editor.js
+//      （两层串行下载）
+```
+
+修复：在更高层级启动 Editor 的 import，或者预 import：
+
+```jsx
+// 应用初始化时，hover 时预加载
+<Link
+  to="/settings"
+  onMouseEnter={() => {
+    import('./Settings')
+    import('./Editor')           // 预热
+  }}
+>Settings</Link>
+```
+
+### Next.js / React Router 的 prefetch
+
+`<Link>` 组件视口可见时自动 prefetch 路由的代码与数据：
+
+```jsx
+// Next.js
+import Link from 'next/link'
+<Link href="/settings">Settings</Link>      // 默认 prefetch
+
+// React Router
+import { Link } from 'react-router-dom'
+<Link to="/settings" prefetch="intent">Settings</Link>
+```
+
+详见 [资源预加载 § prefetch](/performance/preload#prefetch)。
+
+## 错误边界
+
+`Suspense` 处理"加载中"，`ErrorBoundary` 处理"加载失败"：
+
+```jsx
+import { ErrorBoundary } from 'react-error-boundary'
+
+<ErrorBoundary fallback={<ErrorView />}>
+  <Suspense fallback={<Spinner />}>
+    <LazyOrAsyncComponent />
+  </Suspense>
+</ErrorBoundary>
+```
+
+React 19 的内置 `ErrorBoundary` 仍是类组件方案——多用社区的 `react-error-boundary`：
+
+```jsx
+import { ErrorBoundary, useErrorBoundary } from 'react-error-boundary'
+
+<ErrorBoundary
+  fallbackRender={({ error, resetErrorBoundary }) => (
+    <div>
+      <p>Error: {error.message}</p>
+      <button onClick={resetErrorBoundary}>Retry</button>
+    </div>
+  )}
+  onError={(error) => {
+    Sentry.captureException(error)
+  }}
+>
+  <Suspense fallback={<Spinner />}>
+    <Component />
+  </Suspense>
+</ErrorBoundary>
+```
+
+## 与 useTransition 的协同
+
+切换路由时，让旧页面留在屏上直到新页面就绪：
+
+```jsx
+function App() {
+  const [page, setPage] = useState('home')
+  const [isPending, startTransition] = useTransition()
+
+  return (
+    <>
+      <Nav onClick={(p) => startTransition(() => setPage(p))} />
+      {isPending && <ProgressBar />}
+      <Suspense fallback={<Skeleton />}>
+        {page === 'home' && <Home />}
+        {page === 'about' && <About />}
+      </Suspense>
+    </>
+  )
+}
+```
+
+不用 `startTransition`：点击 Nav → 整页变 Skeleton → About 加载完替换。
+用 `startTransition`：点击 Nav → 旧 Home 仍在 → About 加载完无缝替换。
+
+体验差异巨大。详见 [并发特性 § 与 Suspense 的协同](/performance/react/concurrent#与-suspense-的协同)。
+
+## 高级模式
+
+### 预加载（Preloading）
+
+`lazy` 返回的对象有 `_payload`——可以提前调用：
+
+```jsx
+const Settings = lazy(() => import('./Settings'))
+
+// 在事件处理器中预加载
+function NavLink({ to, children }) {
+  return (
+    <Link
+      to={to}
+      onMouseEnter={() => {
+        if (to === '/settings') {
+          import('./Settings')   // 预下载，不渲染
+        }
+      }}
+    >{children}</Link>
+  )
+}
+```
+
+或封装：
+
+```jsx
+function lazyWithPreload(importFn) {
+  const Component = lazy(importFn)
+  Component.preload = importFn
+  return Component
+}
+
+const Settings = lazyWithPreload(() => import('./Settings'))
+
+// 使用
+<button onMouseEnter={() => Settings.preload()}>Open Settings</button>
+```
+
+### 条件分割
+
+```jsx
+// 仅在管理员时下载 Admin chunk
+const Admin = lazy(() => import('./Admin'))
+
+function App() {
+  const { user } = useAuth()
+  return (
+    <>
+      <PublicContent />
+      {user?.isAdmin && (
+        <Suspense fallback={<AdminSkeleton />}>
+          <Admin />
+        </Suspense>
+      )}
+    </>
+  )
+}
+```
+
+### 库分割
+
+大型第三方库按需下载：
+
+```jsx
+async function showChart(data) {
+  const { Chart } = await import('chart.js/auto')
+  new Chart(canvas, { type: 'bar', data })
+}
+```
+
+### 命名导出的 lazy
+
+`lazy` 期望默认导出。命名导出需要适配：
+
+```jsx
+// utils.ts
+export const Calculator = () => <div>...</div>
+
+// 使用
+const Calculator = lazy(() =>
+  import('./utils').then(m => ({ default: m.Calculator }))
+)
+```
+
+## 服务端渲染中的 Suspense
+
+```jsx
+// React 18+ renderToPipeableStream 支持 Suspense 流式输出
+import { renderToPipeableStream } from 'react-dom/server'
+
+app.get('/', (req, res) => {
+  const { pipe } = renderToPipeableStream(<App />, {
+    bootstrapScripts: ['/main.js'],
+    onShellReady() {
+      res.setHeader('Content-Type', 'text/html')
+      pipe(res)
+    }
+  })
+})
+```
+
+效果：
+
+- Suspense 外层立即渲染并流式发送
+- 内层数据准备好后再"补"到 HTML
+- 客户端水合也是渐进的
+
+详见 [SSR / SSG / ISR / PPR](/performance/react/ssr#流式-ssr)。
+
+## 性能监控
+
+### 监控 chunk 加载时间
+
+```jsx
+const Settings = lazy(() => {
+  const start = performance.now()
+  return import('./Settings').then(m => {
+    console.log('Settings loaded in', performance.now() - start, 'ms')
+    return m
+  })
+})
+```
+
+或更系统化用 PerformanceObserver：
+
+```jsx
+new PerformanceObserver(list => {
+  for (const entry of list.getEntries()) {
+    if (entry.name.includes('chunk')) {
+      console.log('chunk:', entry.name, entry.duration)
+    }
+  }
+}).observe({ type: 'resource', buffered: true })
+```
+
+### 监控 Suspense 等待时间
+
+```jsx
+function timed(name, fn) {
+  const start = performance.now()
+  return fn().then(result => {
+    performance.mark(`${name}-loaded`)
+    performance.measure(name, { start })
+    return result
+  })
+}
+
+const Settings = lazy(() => timed('settings', () => import('./Settings')))
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 全局一个 Suspense | 任何挂起全屏 fallback | 区域级 Suspense 边界 |
+| Suspense fallback 与内容尺寸不匹配 | CLS 抖动 | 用 Skeleton 占位匹配 |
+| 路由不分割 | 首屏 bundle 巨大 | 路由级 lazy |
+| 数据请求串行（瀑布流） | 总耗时 = 各层之和 | 并行启动 |
+| lazy 内嵌 lazy（多级） | 串行下载 | 上层预加载 |
+| 没 ErrorBoundary | 加载失败白屏 | Suspense + ErrorBoundary 配对 |
+| 切页直接展示 fallback | 闪烁 | startTransition 保留旧 UI |
+| 用 React.memo 也没用 | 父变带动 | Suspense 不保护渲染优化 |
+
+## Suspense 不是性能银弹
+
+需要明确：Suspense 只是**协调"等待"的 UI 机制**——它不会让你的代码加载更快、不会让数据请求更快。它的价值在于：
+
+1. **声明式表达加载状态**（替代 `if (loading) return <Spinner />`）
+2. **协调多个异步源**（同时挂起 / 同时就绪）
+3. **配合并发渲染**（startTransition 保留旧 UI）
+4. **流式 SSR 的基础**
+
+不要认为加了 Suspense 性能就好——真正的性能取决于**你做了多少代码分割、并行预取、缓存**。
+
+## 小结
+
+- React.lazy + Suspense 是代码分割的标准组合，路由级分割是最大杠杆；
+- Suspense 边界应按视觉区域设计——细粒度边界让局部加载不影响全局；
+- Next.js App Router / Remix loader 让数据 + 代码都能"并行预取"，避免瀑布流；
+- 数据 Suspense（use / TanStack Query suspense 模式）替代 `isLoading` 三态判断；
+- ErrorBoundary 与 Suspense 配对——一个处理等待，一个处理失败；
+- startTransition 配合 Suspense 消除"flash of loading"，让导航无缝；
+- 预加载（hover / 视口可见时）是 Suspense 应用的"加速器"，让用户感觉切页是即时的；
+- Suspense 不会让代码加载更快——它只是协调 UI 等待，性能根本仍是分割与缓存。

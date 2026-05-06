@@ -1,0 +1,342 @@
+---
+title: 选择器
+description: 简单 / 组合 / 属性选择器、伪类与现代选择器（:where / :is / :has）
+---
+
+# 选择器
+
+CSS 选择器决定**规则匹配哪些元素**。本章按规范分类：
+
+- **简单选择器**：元素、类、ID、通用、属性
+- **组合选择器**：后代、子代、相邻兄弟、通用兄弟
+- **伪类与伪元素**（详见 [伪类与伪元素](/css/pseudo)）
+- **逻辑组合**：`:is` / `:where` / `:not` / `:has`
+
+## 简单选择器
+
+### 元素 / 通用
+
+```css
+h1 { ... }                                    /* 所有 h1 */
+* { ... }                                     /* 所有元素（避免在大型项目中使用） */
+```
+
+### 类与 ID
+
+```css
+.btn { ... }                                  /* class="btn" */
+#header { ... }                               /* id="header" */
+```
+
+ID 选择器特异性极高，难以覆盖，**生产代码避免使用 ID 做样式钩子**——保留 ID 给 JS 与锚点。
+
+### 属性选择器
+
+```css
+[disabled]            { opacity: 0.5; }       /* 任何 disabled 属性 */
+[type='checkbox']     { accent-color: blue; } /* 精确匹配 */
+[href^='https']       { ... }                 /* 前缀匹配 */
+[href$='.pdf']        { ... }                 /* 后缀匹配 */
+[class*='btn']        { ... }                 /* 子串匹配 */
+[lang|='zh']          { ... }                 /* 'zh' 或以 'zh-' 开头 */
+[data-status~='new']  { ... }                 /* 空格分隔的列表中包含 */
+[data-id='X' i]       { ... }                 /* 大小写不敏感 */
+```
+
+### Tailwind 等价
+
+```html
+<!-- class -->
+<div class="bg-blue-500">...</div>
+
+<!-- 通过 group / peer / data 派生 -->
+<button class="data-[state=open]:bg-blue-100">...</button>
+<input class="peer" />
+<label class="peer-disabled:opacity-50">...</label>
+```
+
+Tailwind 不直接生成"元素选择器"，所有规则都附在 class 上。属性选择器通过 `data-*` 与 `aria-*` 修饰符表达：
+
+```html
+<dialog class="open:bg-white data-[state=closed]:opacity-0">
+<button aria-pressed="true" class="aria-pressed:bg-blue-700">
+```
+
+## 组合选择器
+
+| 写法 | 含义 | 示例 |
+| ---- | ---- | ---- |
+| `A B` | A 的**所有后代** B | `nav a` |
+| `A > B` | A 的**直接子** B | `ul > li` |
+| `A + B` | A 紧邻的**下一个**兄弟 B | `h2 + p` |
+| `A ~ B` | A 之后的**所有**兄弟 B | `h2 ~ p` |
+
+```css
+/* 直接子代：避免误中孙子节点 */
+.menu > li {
+  border-bottom: 1px solid #eee;
+}
+
+/* 段落首字母大字：相邻兄弟 */
+h2 + p::first-line {
+  font-weight: 600;
+}
+
+/* 后续段落缩进 */
+h2 ~ p {
+  text-indent: 1em;
+}
+```
+
+### Tailwind 等价
+
+Tailwind 不直接表达组合关系，需要 **arbitrary variant**：
+
+```html
+<ul class="[&>li]:border-b [&>li]:border-gray-200">
+  <li>Item 1</li>
+</ul>
+
+<h2 class="[&+p]:font-semibold">Title</h2>
+```
+
+`[&>li]:` 是 Tailwind 4 的 arbitrary variant 语法——`&` 代表当前元素，`>li` 是组合关系。生成的 CSS 是 `.foo > li { ... }`。
+
+复杂选择器场景仍建议写到 `@layer components`：
+
+```css
+@layer components {
+  .menu > li:not(:last-child) {
+    border-bottom: 1px solid theme('colors.gray.200');
+  }
+}
+```
+
+## 逻辑组合
+
+### `:is()`
+
+接受选择器列表；匹配任一即生效；**特异性取列表中最高的**：
+
+```css
+:is(h1, h2, h3) { font-family: var(--font-display); }
+/* 等价于但更短：h1, h2, h3 { ... } */
+
+:is(article, section) :is(h2, h3) { ... }
+/* 比"article h2, article h3, section h2, section h3"短得多 */
+```
+
+### `:where()`
+
+与 `:is()` 行为相同，但**特异性永远为 0**：
+
+```css
+:where(h1, h2, h3) { color: var(--text-default); }
+/* 任何 .title { color: red } 都能轻易覆盖 */
+```
+
+适合 reset / normalize / 库基础样式。
+
+### `:not()`
+
+```css
+li:not(:last-child) { border-bottom: 1px solid; }
+button:not(:disabled):hover { background: blue; }
+
+/* 多重 :not（CSS Selectors Level 4） */
+:not(.btn-primary, .btn-danger) { ... }
+```
+
+### `:has()`（CSS Selectors Level 4）
+
+"父选择器"——根据子代 / 兄弟存在性反向匹配：
+
+```css
+/* 含必填字段的表单 */
+form:has(input:required) { ... }
+
+/* 含图片的卡片 */
+.card:has(img) { padding-top: 0; }
+
+/* 当前元素的下一个兄弟是 h2 */
+p:has(+ h2) { margin-bottom: 2em; }
+
+/* 与 :not 组合：没有标题的卡片 */
+.card:not(:has(h2)) { ... }
+```
+
+`:has()` 在 2023 年成为所有现代浏览器的稳定 API，是 CSS 这十年来最具变革性的新增——以前必须靠 JS 解决的"基于子元素改父元素"场景，现在 CSS 一行搞定。
+
+### Tailwind `has-*`
+
+```html
+<form class="has-[input:required]:border-blue-500">
+  <input required />
+</form>
+
+<div class="not-has-[h2]:p-4">
+  <p>No heading here</p>
+</div>
+```
+
+## 选择器特异性算法
+
+```text
+特异性 = (a, b, c, d)
+
+a: 内联 style 数        (0 或 1)
+b: id 选择器数
+c: class / 属性 / 伪类 数
+d: 元素 / 伪元素 数
+
+按字典序比较；前位高者胜
+```
+
+例：
+
+```css
+*                              /* (0, 0, 0, 0) */
+li                             /* (0, 0, 0, 1) */
+ul li                          /* (0, 0, 0, 2) */
+.btn                           /* (0, 0, 1, 0) */
+.btn:hover                     /* (0, 0, 2, 0) */
+.btn[type=submit]              /* (0, 0, 2, 0) */
+#header                        /* (0, 1, 0, 0) */
+#header .nav li                /* (0, 1, 1, 1) */
+style="..."                    /* (1, 0, 0, 0) */
+!important                     /* 覆盖以上所有 */
+```
+
+Tailwind 的 utility 类大多是 `(0, 0, 1, 0)`——所有 utility 在特异性上**完全平等**。冲突时由源码顺序决定（`tailwind-merge` 库基于此规则智能合并）：
+
+```html
+<button class="p-4 p-6">...</button>
+<!-- 两个类都生效，但最终 padding 由 CSS 中后定义的胜出 -->
+```
+
+## 选择器性能
+
+浏览器从右向左匹配选择器：
+
+```css
+.menu li a                     /* 匹配 a → 检查父链是否含 li → 再检查含 .menu */
+```
+
+性能要点：
+
+- **避免过深的后代选择器**：`.x .y .z .a` 比 `.specific-a` 慢
+- **避免 `*` 通配符的后代选择器**：`.x *` 性能差
+- **不必过早优化**：现代浏览器对绝大多数选择器都有高速实现，复杂选择器的性能差异在毫秒级，仅在极端场景（数千 DOM 节点 + 频繁重绘）才显著
+
+## 选择器实战
+
+### 1. 子元素隔行
+
+```css
+tr:nth-child(odd)  { background: #f5f5f5; }
+tr:nth-child(even) { background: #fff; }
+```
+
+### 2. 第一个 / 最后一个
+
+```css
+li:first-child { ... }
+li:last-child  { ... }
+li:only-child  { ... }                        /* 是父元素的唯一子元素 */
+li:nth-child(3) { ... }                        /* 第 3 个 */
+li:nth-child(3n) { ... }                       /* 3 的倍数 */
+li:nth-child(3n+1) { ... }                     /* 1, 4, 7, ... */
+li:nth-last-child(2) { ... }                   /* 倒数第 2 个 */
+```
+
+### 3. 类型 vs 子代
+
+```css
+section h2:first-child       { ... }          /* section 的第一个子元素，且必须是 h2 */
+section h2:first-of-type     { ... }          /* section 中第一个 h2 类型的元素 */
+```
+
+二者差异：`:first-child` 只检查"位置"，`:first-of-type` 检查"在该类型中的位置"。
+
+### 4. 表单状态
+
+```css
+input:required         { border: 1px solid orange; }
+input:invalid          { border: 1px solid red; }
+input:focus-visible    { outline: 2px solid blue; }
+input:placeholder-shown { ... }                /* 显示 placeholder（即未填写）时 */
+input:user-invalid      { ... }                /* 用户已交互且当前值无效（更友好的 :invalid） */
+```
+
+### 5. 链接状态
+
+```css
+a:link    { color: blue; }                    /* 未访问 */
+a:visited { color: purple; }                  /* 已访问（出于隐私限制，可读样式很少） */
+a:hover   { text-decoration: underline; }
+a:active  { color: red; }
+a:focus-visible { outline: 2px solid; }       /* 仅在键盘聚焦时显示 outline */
+```
+
+注意书写顺序 **`:link → :visited → :hover → :focus → :active`**（LVHFA），否则后写的会被覆盖。
+
+### Tailwind 表单状态
+
+```html
+<input class="
+  required:border-orange-500
+  invalid:border-red-500
+  focus-visible:outline-2 focus-visible:outline-blue-500
+  placeholder-shown:bg-gray-50
+" />
+```
+
+## 选择器工程实践
+
+### 1. 类名约定（BEM）
+
+```css
+.card                                          /* Block */
+.card__title                                   /* Element */
+.card--featured                                /* Modifier */
+.card--featured .card__title { color: gold; }
+```
+
+详见 [工程化](/css/methodologies#bem)。
+
+### 2. 避免深层后代
+
+```css
+/* ✗ 难以重用，与 DOM 结构强耦合 */
+.page .sidebar ul li a { ... }
+
+/* ✓ 类名直达，扁平 */
+.nav-link { ... }
+```
+
+### 3. `:where()` 处理重置
+
+```css
+:where(button, input, textarea) {
+  font: inherit;
+}
+/* 任何业务样式都能轻易覆盖 */
+```
+
+### 4. Scope（CSS Scoping，新提案）
+
+```css
+@scope (.card) to (.card-content) {
+  h2 { color: blue; }                          /* 仅在 .card 内、但 .card-content 之前的 h2 */
+}
+```
+
+`@scope` 在 2024 进入大部分浏览器，是 CSS 原生的"作用域"——介于全局 CSS 与 CSS Modules 之间的折中方案。
+
+## 小结
+
+- 选择器的本质是声明"这条规则匹配什么"；
+- 三类基础（元素 / 类 / 属性）+ 四种组合（后代 / 子 / 相邻 / 通用兄弟）+ 现代逻辑（`:is` / `:where` / `:not` / `:has`）足以覆盖 99% 场景；
+- `:has()` 让 CSS 拥有了"父选择器"，是过去十年最重要的新增；
+- Tailwind 的 utility 类全部 `(0, 0, 1, 0)` 特异性，配合 `tailwind-merge` 处理冲突；
+- 复杂选择器场景在 Tailwind 中用 arbitrary variant `[&...]` 表达，或写到 `@layer components`。

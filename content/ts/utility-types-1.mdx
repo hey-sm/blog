@@ -1,0 +1,460 @@
+---
+title: 工具类型（上）
+description: TypeScript 内建工具类型详解：Partial、Required、Readonly、Pick、Omit 源码实现与实战应用
+---
+
+# 工具类型（上）
+
+TypeScript 内置了丰富的工具类型（Utility Types），用于常见的类型转换。理解它们的源码实现是掌握 TypeScript 类型系统的关键。
+
+## Partial\<T\>
+
+将所有属性变为可选：
+
+```ts
+// 源码实现
+type Partial<T> = {
+  [P in keyof T]?: T[P]
+}
+```
+
+### 使用场景
+
+```ts
+interface User {
+  id: number
+  name: string
+  email: string
+  age: number
+}
+
+// ✅ 更新函数：接受部分字段
+function updateUser(id: number, changes: Partial<User>) {
+  // type Partial<User> = {
+  //   id?: number
+  //   name?: string
+  //   email?: string
+  //   age?: number
+  // }
+  return fetch(`/api/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(changes)
+  })
+}
+
+updateUser(1, { name: 'Alice' })                    // ✅
+updateUser(1, { name: 'Alice', email: 'a@b.com' })  // ✅
+updateUser(1, {})                                     // ✅
+```
+
+**React 示例**：
+
+```tsx
+interface Todo {
+  id: number
+  text: string
+  completed: boolean
+  createdAt: Date
+}
+
+function useTodos(initialTodos: Todo[]) {
+  const [todos, setTodos] = useState(initialTodos)
+
+  // ✅ state 更新函数使用 Partial
+  const updateTodo = (id: number, changes: Partial<Todo>) => {
+    setTodos(prev =>
+      prev.map(todo =>
+        todo.id === id ? { ...todo, ...changes } : todo
+      )
+    )
+  }
+
+  return {
+    todos,
+    toggleTodo: (id: number) => {
+      const todo = todos.find(t => t.id === id)!
+      updateTodo(id, { completed: !todo.completed })
+    },
+    editTodo: (id: number, text: string) => {
+      updateTodo(id, { text })
+    }
+  }
+}
+```
+
+## Required\<T\>
+
+将所有属性变为必填：
+
+```ts
+// 源码实现
+type Required<T> = {
+  [P in keyof T]-?: T[P]
+}
+// -? 移除可选修饰符
+```
+
+### 使用场景
+
+```ts
+interface FormValues {
+  name?: string
+  email?: string
+  age?: number
+}
+
+// ✅ 表单提交时确保所有字段存在
+function submitForm(values: Required<FormValues>) {
+  // values: { name: string; email: string; age: number }
+  console.log(values.name.toUpperCase())  // ✅
+}
+
+const form: FormValues = { name: 'Alice' }
+// submitForm(form)  // ❌ 错误：缺少属性
+
+const complete: Required<FormValues> = {
+  name: 'Alice',
+  email: 'alice@example.com',
+  age: 25
+}
+submitForm(complete)  // ✅
+```
+
+**React 示例**：
+
+```tsx
+interface FormConfig<T> {
+  initialValues: Partial<T>
+  onSubmit: (values: Required<T>) => Promise<void>
+  validate?: (values: Required<T>) => Partial<Record<keyof T, string>>
+}
+
+function useForm<T extends Record<string, unknown>>(config: FormConfig<T>) {
+  const [values, setValues] = useState<Partial<T>>(config.initialValues)
+  const [errors, setErrors] = useState<Partial<Record<keyof T, string>>>({})
+
+  const handleSubmit = async () => {
+    const validated = config.validate?.(values as Required<T>) ?? {}
+    if (Object.keys(validated).length > 0) {
+      setErrors(validated)
+      return
+    }
+    await config.onSubmit(values as Required<T>)
+  }
+
+  return { values, errors, setValues, handleSubmit }
+}
+```
+
+## Readonly\<T\>
+
+将所有属性变为只读：
+
+```ts
+// 源码实现
+type Readonly<T> = {
+  readonly [P in keyof T]: T[P]
+}
+```
+
+### 使用场景
+
+```ts
+interface Config {
+  apiUrl: string
+  timeout: number
+  retries: number
+}
+
+// ✅ 冻结配置对象
+function createConfig(config: Config): Readonly<Config> {
+  return Object.freeze(config)
+}
+
+const config = createConfig({
+  apiUrl: '/api',
+  timeout: 5000,
+  retries: 3
+})
+
+config.apiUrl = '/new'     // ❌ 错误：只读
+config.timeout = 3000      // ❌ 错误
+```
+
+**React 示例——不可变 State**：
+
+```tsx
+interface AppState {
+  user: { name: string } | null
+  theme: 'light' | 'dark'
+  sidebarOpen: boolean
+}
+
+// ✅ Context 提供只读 state
+type ReadonlyAppState = Readonly<AppState>
+
+const initialState: ReadonlyAppState = {
+  user: null,
+  theme: 'light',
+  sidebarOpen: false
+}
+
+function useProtectedState() {
+  const [state, setState] = useState<ReadonlyAppState>(initialState)
+
+  // ✅ setState 内部返回新对象
+  const setUser = (user: { name: string } | null) => {
+    setState(prev => ({ ...prev, user }))
+  }
+
+  return { state, setUser } as const
+}
+```
+
+## Pick\<T, K\>
+
+从 T 中选取指定属性构成新类型：
+
+```ts
+// 源码实现
+type Pick<T, K extends keyof T> = {
+  [P in K]: T[P]
+}
+```
+
+### 使用场景
+
+```ts
+interface User {
+  id: number
+  name: string
+  email: string
+  password: string
+  createdAt: Date
+}
+
+// ✅ 公开用户信息：仅选取安全字段
+type PublicUser = Pick<User, 'id' | 'name' | 'createdAt'>
+
+// ✅ 登录表单：仅需要 email 和 password
+type LoginForm = Pick<User, 'email' | 'password'>
+```
+
+**React 示例**：
+
+```tsx
+interface Product {
+  id: number
+  name: string
+  price: number
+  description: string
+  imageUrl: string
+  category: string
+  stock: number
+  sku: string
+}
+
+// ✅ 列表卡片只需要关键信息
+type ProductCardProps = Pick<Product, 'id' | 'name' | 'price' | 'imageUrl'>
+
+function ProductCard({ id, name, price, imageUrl }: ProductCardProps) {
+  return (
+    <div className="card">
+      <img src={imageUrl} alt={name} />
+      <h3>{name}</h3>
+      <span>${price}</span>
+    </div>
+  )
+}
+
+// ✅ 详情页需要更多字段
+type ProductDetailProps = Pick<Product, 'name' | 'price' | 'description' | 'category' | 'stock'>
+
+function ProductDetail(props: ProductDetailProps) {
+  return (/* ... */)
+}
+```
+
+## Omit\<T, K\>
+
+从 T 中排除指定属性构成新类型：
+
+```ts
+// 源码实现
+type Omit<T, K extends keyof any> = {
+  [P in Exclude<keyof T, K>]: T[P]
+}
+// 等价于 Pick<T, Exclude<keyof T, K>>
+```
+
+### 使用场景
+
+```ts
+interface User {
+  id: number
+  name: string
+  email: string
+  password: string
+  createdAt: Date
+  updatedAt: Date
+}
+
+// ✅ 新建用户时排除 id、createdAt、updatedAt
+type CreateUserInput = Omit<User, 'id' | 'createdAt' | 'updatedAt'>
+
+// ✅ 更新用户时排除 id，且所有属性可选
+type UpdateUserInput = Partial<Omit<User, 'id'>>
+```
+
+**React 示例**：
+
+```tsx
+interface FormFieldProps {
+  name: string
+  label: string
+  value: string
+  onChange: (value: string) => void
+  error?: string
+  required?: boolean
+  className?: string
+}
+
+// ✅ 排除 className 和 required，由 HOC 注入
+type WrappedFieldProps = Omit<FormFieldProps, 'className' | 'required'>
+
+function withFormStyles<P extends { className?: string }>(
+  Component: React.ComponentType<P>
+) {
+  return (props: P) => (
+    <Component {...props} className={`form-field ${props.className ?? ''}`} />
+  )
+}
+
+// 外部组件无需关心 className
+function TextInput(props: WrappedFieldProps) {
+  return (/* ... */)
+}
+
+const StyledInput = withFormStyles(TextInput)
+```
+
+## 组合使用
+
+工具类型可以自由组合，形成新的类型：
+
+```ts
+interface Todo {
+  id: number
+  text: string
+  completed: boolean
+  createdAt: Date
+  updatedAt: Date
+  authorId: number
+}
+
+// ✅ 创建 Todo 的输入
+type CreateTodoInput = Pick<Todo, 'text' | 'authorId'> & {
+  completed?: boolean
+}
+
+// ✅ 更新 Todo 的输入
+type UpdateTodoInput = Partial<Pick<Todo, 'text' | 'completed' | 'authorId'>>
+
+// ✅ 对外暴露的 Todo（排除 authorId）
+type PublicTodo = Omit<Todo, 'authorId'>
+
+// ✅ 用于列表展示的 Todo
+type TodoListItem = Pick<Todo, 'id' | 'text' | 'completed' | 'createdAt'>
+```
+
+## 实际场景：API 交互类型
+
+```ts
+// 数据库实体
+interface PostEntity {
+  id: number
+  title: string
+  content: string
+  authorId: number
+  status: 'draft' | 'published' | 'archived'
+  createdAt: Date
+  updatedAt: Date
+  deletedAt: Date | null
+}
+
+// ✅ 创建：Omit 排除服务端字段
+type CreatePostDTO = Omit<PostEntity, 'id' | 'createdAt' | 'updatedAt' | 'deletedAt'>
+
+// ✅ 更新：部分更新
+type UpdatePostDTO = Partial<Omit<PostEntity, 'id' | 'createdAt' | 'authorId'>>
+
+// ✅ 列表显示
+type PostSummary = Pick<PostEntity, 'id' | 'title' | 'authorId' | 'status' | 'createdAt'>
+
+// ✅ 公开 API 返回
+type PostResponse = Readonly<Omit<PostEntity, 'deletedAt'>>
+```
+
+## 陷阱
+
+### 1. Omit 对不在 T 中的 key 不报错
+
+```ts
+type T = Omit<{ a: string; b: number }, 'c'>
+// ✅ 不报错，因为 K extends keyof any 非常宽泛
+// 'c' 被忽略，结果仍是 { a: string; b: number }
+
+// 如果要严格检查，使用严格版 Omit
+type StrictOmit<T, K extends keyof T> = Omit<T, K>
+type T2 = StrictOmit<{ a: string; b: number }, 'c'>  // ❌ 报错
+```
+
+### 2. Pick/Omit 不会分发属性类型中的联合
+
+```ts
+type User = { name: string; age: number | null }
+type Picked = Pick<User, 'age'>
+// { age: number | null }——不会拆分为 number 和 null
+```
+
+### 3. Readonly 是浅层的
+
+```ts
+interface User {
+  profile: { name: string }
+}
+
+type ReadonlyUser = Readonly<User>
+
+const user: ReadonlyUser = { profile: { name: 'Alice' } }
+user.profile = { name: 'Bob' }     // ❌ 顶层只读
+user.profile.name = 'Bob'          // ✅ 嵌套属性可修改
+```
+
+## 最佳实践
+
+### ✅ 用 Pick 按需暴露字段
+
+```ts
+// ❌ 把整个 entity 传给组件
+function UserCard({ user }: { user: UserEntity }) {}
+
+// ✅ 只传递需要的字段
+type UserCardProps = Pick<UserEntity, 'id' | 'name' | 'avatar'>
+function UserCard({ id, name, avatar }: UserCardProps) {}
+```
+
+### ✅ 用 Omit 排除不应暴露的字段
+
+```ts
+// ✅ 返回给客户端的数据排除敏感字段
+type SafeUser = Omit<User, 'password' | 'refreshToken'>
+```
+
+### ✅ 组合使用 Partial + Pick/Omit 处理更新
+
+```ts
+type UpdateUserDTO = Partial<Omit<User, 'id' | 'createdAt'>>
+```
+
+下一章 [工具类型（下）](/ts/utility-types-2) 介绍 Record、Exclude、Extract、NonNullable、Parameters、ReturnType 等更多工具类型。

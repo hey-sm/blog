@@ -1,0 +1,481 @@
+---
+title: 类
+description: TypeScript 类声明、继承、访问修饰符、abstract 抽象类、静态成员、参数属性与 implements 实现
+---
+
+# 类
+
+TypeScript 为 ES 类添加了类型注解、访问修饰符、抽象类和成员可见性控制。
+
+## 类声明
+
+### 基本类与成员类型
+
+```ts
+class User {
+  id: number
+  name: string
+  email: string
+
+  constructor(id: number, name: string, email: string) {
+    this.id = id
+    this.name = name
+    this.email = email
+  }
+
+  greet(): string {
+    return `Hi, I'm ${this.name}`
+  }
+}
+
+const user = new User(1, 'Alice', 'alice@example.com')
+user.greet()
+```
+
+### 初始化检查
+
+```ts
+class Bad {
+  name: string  // ❌ 错误：未初始化且未在构造函数中赋值
+}
+
+class Good {
+  name: string = ''           // ✅ 直接初始化
+  email: string               // ✅ 配合 definite assignment assertion
+  constructor(email: string) {
+    this.email = email
+  }
+}
+
+class AlsoGood {
+  name!: string               // ✅ 断言一定会被初始化（definite assignment assertion）
+}
+```
+
+## 访问修饰符
+
+### public、protected、private
+
+```ts
+class Animal {
+  public name: string           // 任何地方可访问（默认值）
+  protected age: number         // 类及其子类可访问
+  private _internalId: string   // 仅类内部可访问
+
+  constructor(name: string, age: number, id: string) {
+    this.name = name
+    this.age = age
+    this._internalId = id
+  }
+}
+
+class Dog extends Animal {
+  bark() {
+    console.log(`${this.name} is barking`)  // ✅ public
+    console.log(`age: ${this.age}`)          // ✅ protected
+    console.log(this._internalId)            // ❌ 错误：private 不可访问
+  }
+}
+
+const dog = new Dog('Max', 3, 'id-1')
+console.log(dog.name)  // ✅ public
+console.log(dog.age)   // ❌ 错误：protected 不可外部访问
+```
+
+### ECMAScript 私有字段（`#`）
+
+```ts
+// TS 4.3+ 标准 ES 私有字段——真正的硬私有
+class BankAccount {
+  #balance: number = 0
+
+  deposit(amount: number) {
+    this.#balance += amount
+  }
+
+  getBalance() {
+    return this.#balance
+  }
+}
+
+const account = new BankAccount()
+account.deposit(100)
+// account.#balance  // ❌ 语法错误：真正的运行时私有
+```
+
+### private vs `#` 比较
+
+| 特性 | `private` | `#` (ECMAScript) |
+|------|-----------|-------------------|
+| 检查阶段 | 仅编译时 | 编译时 + 运行时 |
+| 可通过方括号绕过 | ✅ | ❌ |
+| 继承中可见 | ❌ | ❌ |
+| 性能 | 编译时无开销 | 运行时 slight overhead |
+
+## 参数属性
+
+构造函数参数加上修饰符自动声明并赋值：
+
+```ts
+class User {
+  constructor(
+    public readonly id: number,
+    public name: string,
+    private email: string,
+    protected role: string = 'user'
+  ) {
+    // 不需要手动 this.id = id 等
+  }
+}
+
+const user = new User(1, 'Alice', 'alice@example.com')
+user.id     // ✅ number
+user.name   // ✅ string
+user.email  // ❌ 错误：private
+user.role   // ❌ 错误：protected
+```
+
+## readonly 修饰符
+
+```ts
+class Config {
+  readonly apiUrl: string
+  readonly version = '1.0.0'
+
+  constructor(apiUrl: string) {
+    this.apiUrl = apiUrl
+    // this.apiUrl = 'other'  // ✅ 构造函数中可以赋值
+  }
+
+  updateUrl(url: string) {
+    this.apiUrl = url  // ❌ 错误：readonly 不可修改
+  }
+}
+```
+
+## 继承与 super
+
+```ts
+class Animal {
+  constructor(public name: string) {}
+
+  move(distance: number = 0) {
+    console.log(`${this.name} moved ${distance}m`)
+  }
+}
+
+class Snake extends Animal {
+  constructor(name: string, private venomous: boolean) {
+    super(name)  // 必须调用 super
+  }
+
+  move(distance = 5) {
+    console.log('Slithering...')
+    super.move(distance)  // 调用父类方法
+  }
+}
+
+const snake = new Snake('Kaa', true)
+snake.move()
+// Slithering...
+// Kaa moved 5m
+```
+
+## 抽象类与抽象方法
+
+```ts
+abstract class Repository<T> {
+  abstract findById(id: number): T | null
+  abstract save(entity: T): void
+
+  // 抽象类中可以有具体实现
+  exists(id: number): boolean {
+    return this.findById(id) !== null
+  }
+}
+
+class UserRepository extends Repository<User> {
+  private users: User[] = []
+
+  findById(id: number): User | null {
+    return this.users.find(u => u.id === id) ?? null
+  }
+
+  save(entity: User): void {
+    this.users.push(entity)
+  }
+}
+
+// ❌ 错误：不能实例化抽象类
+const repo = new Repository<User>()
+```
+
+**React 示例——抽象服务类**：
+
+```tsx
+abstract class BaseApiService {
+  protected abstract baseUrl: string
+
+  protected async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    return response.json()
+  }
+}
+
+class UserService extends BaseApiService {
+  protected baseUrl = '/api/users'
+
+  getUsers() {
+    return this.request<User[]>('/')
+  }
+
+  getUser(id: number) {
+    return this.request<User>(`/${id}`)
+  }
+}
+```
+
+## 静态成员
+
+```ts
+class FormValidator {
+  static defaultRules = {
+    required: true,
+    minLength: 1
+  }
+
+  static validateRequired(value: unknown): boolean {
+    return value !== '' && value !== null && value !== undefined
+  }
+
+  private static formatMessage(field: string, rule: string) {
+    return `${field} failed ${rule} validation`
+  }
+}
+
+// 访问静态成员
+FormValidator.defaultRules.required
+FormValidator.validateRequired('hello')
+```
+
+## getter / setter
+
+```ts
+class Temperature {
+  private _celsius = 0
+
+  get celsius(): number {
+    return this._celsius
+  }
+
+  set celsius(value: number) {
+    if (value < -273.15) {
+      throw new Error('Temperature below absolute zero')
+    }
+    this._celsius = value
+  }
+
+  get fahrenheit(): number {
+    return this._celsius * 9 / 5 + 32
+  }
+}
+
+const t = new Temperature()
+t.celsius = 25        // 触发 setter
+console.log(t.celsius)  // 25
+console.log(t.fahrenheit) // 77
+```
+
+## this 类型
+
+在类方法中，`this` 代表当前实例的类型，支持链式调用：
+
+```ts
+class Builder {
+  private data: Record<string, unknown> = {}
+
+  setName(name: string): this {
+    this.data.name = name
+    return this
+  }
+
+  setAge(age: number): this {
+    this.data.age = age
+    return this
+  }
+
+  build() {
+    return { ...this.data }
+  }
+}
+
+const result = new Builder()
+  .setName('Alice')
+  .setAge(25)
+  .build()
+```
+
+**React 示例——Fluent API 的 Query Builder**：
+
+```tsx
+class QueryBuilder<T> {
+  private params = new URLSearchParams()
+
+  where<K extends keyof T>(key: K, value: T[K]): this {
+    this.params.set(key as string, String(value))
+    return this
+  }
+
+  limit(n: number): this {
+    this.params.set('limit', String(n))
+    return this
+  }
+
+  offset(n: number): this {
+    this.params.set('offset', String(n))
+    return this
+  }
+
+  toString() {
+    return this.params.toString()
+  }
+}
+
+// 使用
+const query = new QueryBuilder<User>()
+  .where('id', 1)
+  .where('name', 'Alice')
+  .limit(10)
+  .toString()
+// id=1&name=Alice&limit=10
+```
+
+## 类作为类型
+
+类同时声明了值（构造函数）和类型（实例类型）：
+
+```ts
+class User {
+  constructor(public name: string) {}
+}
+
+// User 作为类型：指实例类型
+const user: User = new User('Alice')
+
+// typeof User 作为类型：指构造函数类型
+const UserClass: typeof User = User
+```
+
+## 陷阱
+
+### 1. 字段初始化的执行顺序
+
+```ts
+class Base {
+  name = this.initName()
+
+  initName() {
+    return 'base'
+  }
+}
+
+class Derived extends Base {
+  name = 'derived'  // 会覆盖 Base 的 name
+
+  initName() {
+    return 'derived-init'
+  }
+}
+
+const d = new Derived()
+console.log(d.name)  // 'derived'，不是 'derived-init'
+// 提示：字段初始化顺序是 基类字段 → 基类构造器 → 派生类字段 → 派生类构造器
+```
+
+### 2. private 的保护仅限于编译期
+
+```ts
+class Secret {
+  private password = '1234'
+}
+
+const s = new Secret()
+// (s as any).password  // ✅ 运行时仍然可以访问
+```
+
+### 3. abstract 类不能实例化
+
+```ts
+abstract class Base {
+  abstract doSomething(): void
+}
+
+// ❌ 编译错误
+const instance = new Base()
+```
+
+## 最佳实践
+
+### ✅ 使用参数属性简化代码
+
+```ts
+// ❌ 冗长
+class User {
+  name: string
+  age: number
+  constructor(name: string, age: number) {
+    this.name = name
+    this.age = age
+  }
+}
+
+// ✅ 简洁
+class User {
+  constructor(public name: string, public age: number) {}
+}
+```
+
+### ✅ 优先使用组合而非继承
+
+```ts
+// ❌ 深层继承链
+class Animal { }
+class Mammal extends Animal { }
+class Dog extends Mammal { }
+class Poodle extends Dog { }
+
+// ✅ 接口组合
+interface Walkable { walk(): void }
+interface Swimmable { swim(): void }
+interface Flyable { fly(): void }
+
+class Duck implements Walkable, Swimmable, Flyable {
+  walk() {}
+  swim() {}
+  fly() {}
+}
+```
+
+### ✅ ES `#` 私有字段用于真正的运行时私有
+
+```ts
+class AuthService {
+  #token: string | null = null
+
+  setToken(token: string) {
+    this.#token = token
+  }
+
+  // 确保 token 绝不可能从外部直接访问
+}
+```
+
+下一章 [泛型](/ts/generics) 深入 TypeScript 泛型系统。

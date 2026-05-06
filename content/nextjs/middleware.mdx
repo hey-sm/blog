@@ -1,0 +1,263 @@
+---
+title: 中间件
+description: middleware.ts 的配置、matcher、NextRequest/NextResponse API 与常见用例（auth、geo、rewrite）
+---
+
+# 中间件
+
+Middleware 在**请求到达路由之前**执行，用于拦截、修改或重定向请求。它是 Edge-first 的执行环境（默认运行在 Edge Runtime）。
+
+## 创建 middleware
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  // 在这里处理 request
+  return NextResponse.next()   // 继续到路由
+}
+```
+
+文件位置：**项目根目录**或 `src/` 目录，不能放在 `app/` 内。
+
+## matcher —— 筛选路由
+
+```ts filename="src/middleware.ts"
+export const config = {
+  matcher: [
+    '/dashboard/:path*',        // 匹配 /dashboard/ 及所有子路径
+    '/api/:path*',              // 匹配所有 API 路由
+    '/((?!_next/static|_next/image|favicon.ico).*)',  // 排除静态资源
+  ],
+}
+```
+
+| 语法 | 匹配 |
+| ---- | ---- |
+| `/about` | 精确匹配 `/about` |
+| `/dashboard/:path*` | 匹配 `/dashboard` 及所有子路由 |
+| `/((?!...).*)` | 负向断言排除 |
+
+不加 `matcher` = middleware 对所有请求执行（包括静态资源）。
+
+## `NextRequest` —— 请求对象
+
+```ts filename="src/middleware.ts"
+export function middleware(request: NextRequest) {
+  const url = request.nextUrl.pathname      // 当前路径
+  const host = request.headers.get('host')  // Host 头
+  const country = request.geo?.country      // 地理信息（Vercel）
+  const ip = request.ip                     // 客户端 IP（Vercel）
+
+  // Cookies
+  const token = request.cookies.get('token')?.value
+  const allCookies = request.cookies.getAll()
+
+  return NextResponse.next()
+}
+```
+
+## `NextResponse` —— 响应控制
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  // 1. 继续到路由
+  return NextResponse.next()
+
+  // 2. 重定向
+  return NextResponse.redirect(new URL('/login', request.url))
+
+  // 3. 重写（URL 不变，内容来自其他路由）
+  return NextResponse.rewrite(new URL('/under-construction', request.url))
+
+  // 4. 自定义响应
+  return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // 5. 修改 headers 后继续
+  const response = NextResponse.next()
+  response.headers.set('x-custom-header', 'hello')
+  return response
+}
+```
+
+## 常见用例
+
+### 认证守卫
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { verifyToken } from '@/lib/auth'
+
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get('session')?.value
+
+  if (!token) {
+    return NextResponse.redirect(new URL('/login', request.url))
+  }
+
+  try {
+    const payload = verifyToken(token)
+    // 将用户信息放到 header 供后续服务端组件读取
+    const response = NextResponse.next()
+    response.headers.set('x-user-id', payload.sub)
+    return response
+  } catch {
+    return NextResponse.redirect(new URL('/login', request.url))
+  }
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*', '/admin/:path*'],
+}
+```
+
+### 国际化路由
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  const locales = ['en', 'zh', 'ja']
+  const pathname = request.nextUrl.pathname
+
+  // 检查是否已经有 locale
+  const hasLocale = locales.some(
+    l => pathname.startsWith(`/${l}/`) || pathname === `/${l}`
+  )
+
+  if (!hasLocale) {
+    const locale = request.headers.get('accept-language')?.startsWith('zh') ? 'zh' : 'en'
+    request.nextUrl.pathname = `/${locale}${pathname}`
+    return NextResponse.redirect(request.nextUrl)
+  }
+
+  return NextResponse.next()
+}
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api).*)'],
+}
+```
+
+### Bot / IP 拦截
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  const ua = request.headers.get('user-agent') ?? ''
+
+  // 拦截恶意 bot
+  if (/(bytespider|petalbot|claudebot)/i.test(ua)) {
+    return new NextResponse('Forbidden', { status: 403 })
+  }
+
+  return NextResponse.next()
+}
+```
+
+### A/B 测试
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  const cookie = request.cookies.get('variant')
+  const variant = cookie?.value ?? (Math.random() > 0.5 ? 'a' : 'b')
+
+  const res = NextResponse.rewrite(
+    new URL(`/landing/${variant}`, request.url)
+  )
+
+  if (!cookie) {
+    res.cookies.set('variant', variant, { maxAge: 60 * 60 * 24 * 30 })
+  }
+
+  return res
+}
+```
+
+### `waitUntil` (Next.js 16+)
+
+在响应已发送后执行非阻塞的后台任务：
+
+```ts filename="src/middleware.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+
+export function middleware(request: NextRequest) {
+  // 响应先发出，waitUntil 中的工作在后台完成
+  waitUntil(
+    fetch('https://analytics.example.com/log', {
+      method: 'POST',
+      body: JSON.stringify({
+        path: request.nextUrl.pathname,
+        timestamp: Date.now(),
+      }),
+    })
+  )
+
+  return NextResponse.next()
+}
+```
+
+## 执行环境
+
+Middleware 在 **Edge Runtime** 中执行。后果：
+
+| 可用 | 不可用 |
+| ---- | ------ |
+| `fetch`（Web API） | `fs`、`net`、`tls`（Node API） |
+| `crypto`（Web Crypto API） | `crypto`（Node Crypto API） |
+| `Headers` / `Request` / `Response` | `child_process` |
+| `process.env`（值在构建时内联） | 原生 npm 模块（bcrypt、sharp 等） |
+
+Edge Runtime 的限制意味着 **middleware 应该保持轻量**——不要在其中执行数据库查询或重计算。
+
+## 陷阱
+
+### Middleware 在 Edge 中不共享服务端状态
+
+不能使用 `globalThis` 或模块级变量在 Middleware 中跨请求共享数据——Edge 函数运行在隔离的实例上，可能在不同地域执行。
+
+### `NextResponse.next()` 会通过整个 Next.js 管道
+
+```ts
+const response = NextResponse.next()
+response.headers.set('x-key', 'value')
+return response
+```
+
+`NextResponse.next()` 不会执行内联的 fetch 或 DB 查询——它只是继续让请求走正常的 Next.js 渲染管道。
+
+### Middleware 不适用于大型请求体处理
+
+请求体 `request.body` 在 Middleware 中是只读的流，读完后无法传递到路由。如需处理 Body，考虑用 Route Handler 或在路由组件中处理。
+
+### Middleware 中的 `process.env` 是静态的
+
+```ts filename="src/middleware.ts"
+// 这个值在 build 时被替换，不是运行时读取
+const apiKey = process.env.SECRET_API_KEY
+```
+
+构建时 `.env.production` 的值被写入 bundle。在 middleware 中需要动态环境变量时，考虑通过 header 从上游服务传递。
+
+### 过度使用 middleware
+
+每次请求都遍历 middleware 是一种支出。可以用 `matcher` 精确限制范围；复杂的业务逻辑（如权限模型）应在 Route Handler 或 Server Components 中实现。
+
+## 小结
+
+- Middleware 在 Edge Runtime 中运行，在路由处理前拦截请求；
+- `matcher` 精确控制哪些路由触发 middleware；
+- `NextRequest` + `NextResponse` 提供完整的请求/响应控制 API；
+- Edge 环境限制要求 middleware 保持轻量——不执行 DB 查询、不读文件、不处理大 body。

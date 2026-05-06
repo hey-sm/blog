@@ -1,0 +1,800 @@
+---
+title: SSR / SSG / ISR / PPR
+description: 五种渲染策略对比、客户端水合、Selective / Progressive Hydration、Next.js 实战
+---
+
+# SSR / SSG / ISR / PPR
+
+"在哪里、什么时候、怎样渲染 HTML"——这是现代 React 应用最关键的架构决策。Next.js / Remix / Astro 各自给出了不同答案，每种渲染策略有截然不同的性能特征。本章覆盖五种主流策略（CSR / SSR / SSG / ISR / PPR）的对比与选择，以及水合（Hydration）的演进。
+
+## 五种渲染策略全景
+
+```text
+┌─ 渲染策略对比 ───────────────────────────────────────┐
+│                                                      │
+│ CSR (Client-Side Rendering)                          │
+│   服务器：返回空 HTML + JS bundle                     │
+│   客户端：JS 执行 → 渲染 → 数据请求 → 重新渲染          │
+│   首屏：慢（取决于 JS + 数据）                          │
+│                                                      │
+│ SSR (Server-Side Rendering)                          │
+│   服务器：渲染 HTML（每次请求都生成）                   │
+│   客户端：接收 HTML（FCP 快）→ JS 水合                  │
+│   首屏：快                                            │
+│                                                      │
+│ SSG (Static Site Generation)                         │
+│   构建期：生成所有页面 HTML                            │
+│   服务器：直接返回静态 HTML（CDN 缓存）                  │
+│   首屏：极快                                          │
+│                                                      │
+│ ISR (Incremental Static Regeneration)                │
+│   构建期：生成主要页面                                  │
+│   运行时：按需重新生成 + 后台刷新                        │
+│   首屏：快（命中缓存）                                  │
+│                                                      │
+│ PPR (Partial Prerendering)                           │
+│   构建期：生成静态 shell                                │
+│   运行时：流式补充动态部分                              │
+│   首屏：极快（shell 立即返回）                           │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+```
+
+## CSR：客户端渲染
+
+### 工作流
+
+```text
+T+0      用户请求 / → 服务器返回 minimal HTML
+         <html>
+           <body>
+             <div id="root"></div>
+             <script src="/app.js"></script>
+           </body>
+         </html>
+
+T+200    HTML 到达，但页面是空的（白屏）
+T+800    JS 下载完成
+T+900    JS 执行，React 渲染
+T+900    发现需要数据 → fetch
+T+1500   数据到达 → 重新渲染
+T+1500   首屏可见
+```
+
+### 优点
+
+- 部署简单（纯静态托管）
+- 服务器零计算成本
+- 复杂交互的 SPA 适合（如 Figma、Linear、Notion）
+
+### 缺点
+
+- 首屏 LCP 慢（白屏期长）
+- SEO 弱（爬虫看到空 HTML）
+- 弱网用户极其痛苦
+
+### 何时选 CSR
+
+- 后台管理工具（无 SEO 需求 + 用户网络好）
+- 重交互的桌面级 Web 应用
+- 内部工具
+
+### 性能优化点
+
+- [代码分割](/performance/react/suspense-lazy)：路由级 lazy
+- [缓存](/performance/caching)：静态资源长缓存 + Service Worker
+- [资源预加载](/performance/preload)：preload 关键 chunk + 数据预取
+
+## SSR：服务端渲染
+
+### 工作流
+
+```text
+T+0      用户请求 / 
+T+0      服务器：执行 React 渲染 → 拼装 HTML
+T+50     生成 HTML（含数据）
+T+100    返回完整 HTML
+
+T+200    HTML 到达 → 浏览器解析 → 渲染（FCP/LCP 早）
+T+800    JS 下载完成
+T+900    水合（hydration）：React 接管已有 DOM
+
+T+200 → T+900 之间：用户看到内容但点击无响应（"幽灵期"）
+```
+
+### 优点
+
+- 快 LCP / FCP（HTML 立即可渲染）
+- SEO 友好
+- 渐进可用（即使 JS 慢加载，HTML 也已可读）
+
+### 缺点
+
+- 服务器有计算成本（CPU + 内存）
+- 每次请求都渲染（除非加缓存）
+- TTFB 取决于服务端速度
+- 水合有"幽灵期"
+
+### 实现
+
+#### 原生 React
+
+```tsx
+import { renderToString } from 'react-dom/server'
+import App from './App'
+
+app.get('/', async (req, res) => {
+  const html = renderToString(<App />)
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <div id="root">${html}</div>
+        <script src="/main.js"></script>
+      </body>
+    </html>
+  `)
+})
+```
+
+```tsx
+// 客户端水合
+import { hydrateRoot } from 'react-dom/client'
+hydrateRoot(document.getElementById('root'), <App />)
+```
+
+#### Next.js Pages Router
+
+```tsx
+// pages/index.tsx
+export async function getServerSideProps(ctx) {
+  const data = await fetch('/api/data').then(r => r.json())
+  return { props: { data } }
+}
+
+export default function Home({ data }) {
+  return <main>{data.title}</main>
+}
+```
+
+#### Next.js App Router（默认）
+
+App Router 默认是 SSR + RSC：
+
+```tsx
+// app/page.tsx
+export default async function Home() {
+  const data = await fetch('https://api.example.com/data').then(r => r.json())
+  return <main>{data.title}</main>
+}
+```
+
+详见 [Server Components](/performance/react/server-components)。
+
+### 流式 SSR
+
+React 18+ 关键升级——HTML 可以**分片输出**：
+
+```tsx
+import { renderToPipeableStream } from 'react-dom/server'
+
+app.get('/', (req, res) => {
+  const { pipe } = renderToPipeableStream(<App />, {
+    bootstrapScripts: ['/main.js'],
+    onShellReady() {
+      // shell（Suspense 外层）就绪 → 开始 stream
+      res.setHeader('Content-Type', 'text/html')
+      pipe(res)
+    },
+    onAllReady() {
+      // 全部就绪（如果你想等的话）
+    },
+    onError(err) { /* ... */ }
+  })
+})
+```
+
+配合 Suspense：
+
+```tsx
+function App() {
+  return (
+    <html>
+      <body>
+        <Header />                        {/* 立即输出 */}
+        <Suspense fallback={<Skeleton />}>
+          <SlowSection />                 {/* 数据就绪后流式补充 */}
+        </Suspense>
+      </body>
+    </html>
+  )
+}
+```
+
+效果：
+
+```text
+非流式：
+  T+0   →  T+500 数据到达 →  T+550 整个 HTML 发送 → T+700 浏览器开始渲染
+
+流式：
+  T+0   →  T+50 立即发送 shell + skeleton → T+100 浏览器开始渲染
+        →  T+500 数据就绪 → 流式 append HTML 替换 skeleton
+```
+
+LCP 提前数百毫秒。
+
+### Edge SSR
+
+让 SSR 跑在**全球边缘节点**：
+
+```ts
+// Vercel Edge Runtime / Cloudflare Workers
+export const runtime = 'edge'
+
+export default async function Page() {
+  const data = await fetch(...)
+  return <div>...</div>
+}
+```
+
+效果：
+
+- TTFB 极低（边缘距离用户近）
+- 冷启动快（V8 isolate）
+- 无 Node.js 全 API（无法用某些原生模块）
+
+详见 [CDN § 边缘函数](/performance/cdn#边缘函数与边缘渲染)。
+
+## SSG：静态站点生成
+
+### 工作流
+
+```text
+构建期（一次）：
+  对每个路由：
+    - 调用 getStaticProps / RSC fetch
+    - 渲染 HTML
+    - 写入 dist/index.html、dist/about.html、...
+
+运行时：
+  服务器：直接 cat 文件 → 返回（CDN 缓存）
+  TTFB 极低（静态文件 + CDN）
+```
+
+### 优点
+
+- **TTFB 极快**（CDN 静态文件）
+- 服务器零计算
+- 可部署到纯静态托管（Netlify / Vercel / Cloudflare Pages / S3）
+- 可离线（构建期决定一切）
+
+### 缺点
+
+- 数据更新需要重新构建（不适合频繁变化）
+- 大站点构建耗时（10000 页面可能 30 分钟）
+- 个性化内容困难（需客户端补充）
+
+### 何时选 SSG
+
+- 博客 / 文档（变化频率：每日 / 每周）
+- 营销页 / 落地页
+- 小型展示站
+- 已知所有路由的应用
+
+### Next.js SSG
+
+```tsx
+// Pages Router
+export async function getStaticProps() {
+  const posts = await fetchPosts()
+  return { props: { posts } }
+}
+
+export async function getStaticPaths() {
+  const slugs = await fetchSlugs()
+  return {
+    paths: slugs.map(slug => ({ params: { slug } })),
+    fallback: false  // 或 'blocking' / true
+  }
+}
+```
+
+App Router 默认就是"如果可静态就静态"——只要不用动态 API（cookies / headers / searchParams）就会构建期生成。
+
+```tsx
+// app/posts/[slug]/page.tsx
+export async function generateStaticParams() {
+  const slugs = await fetchSlugs()
+  return slugs.map(slug => ({ slug }))
+}
+
+export default async function Post({ params }) {
+  const post = await getPost(params.slug)
+  return <article>{post.content}</article>
+}
+```
+
+### Astro / Eleventy
+
+更纯粹的静态站生成器，适合内容驱动站点：
+
+```astro
+---
+// Astro：默认 SSG
+const posts = await Astro.glob('./posts/*.md')
+---
+<ul>{posts.map(p => <li>{p.title}</li>)}</ul>
+```
+
+零客户端 JS（除非显式 island）——首屏极快。
+
+## ISR：增量静态再生
+
+> ISR = SSG 的"过期重生成"——构建期生成主要页面，运行时按需重新生成 + 后台刷新。
+
+### 工作流
+
+```text
+构建期：
+  生成主要页面（如热门 100 个）
+
+运行时（用户访问 /post/123）：
+  - 缓存命中 + 未过期 → 直接返回（CDN 速度）
+  - 缓存命中 + 已过期 → 立即返回旧版本 + 后台重新生成
+  - 缓存未命中 → 服务端按需生成 + 缓存
+```
+
+### Next.js ISR
+
+#### Pages Router
+
+```tsx
+export async function getStaticProps() {
+  const data = await fetchData()
+  return {
+    props: { data },
+    revalidate: 60   // 60 秒后过期
+  }
+}
+```
+
+#### App Router
+
+```tsx
+async function getData() {
+  const res = await fetch('https://api.example.com/data', {
+    next: { revalidate: 60 }
+  })
+  return res.json()
+}
+
+export default async function Page() {
+  const data = await getData()
+  return <main>{data.title}</main>
+}
+```
+
+或使用按需 revalidate：
+
+```tsx
+import { revalidatePath, revalidateTag } from 'next/cache'
+
+async function updatePost(id: string) {
+  'use server'
+  await db.posts.update(...)
+  revalidatePath(`/posts/${id}`)        // 立即刷新
+  // 或
+  revalidateTag('posts')
+}
+```
+
+### ISR 的体验
+
+```text
+T+0     用户 A 访问 /post/123 → 构建期生成的版本，TTFB ~ 50ms
+        缓存：120s 后过期
+
+T+30    数据库更新
+
+T+150   用户 B 访问 /post/123：
+        - 立即返回缓存（旧数据），TTFB ~ 50ms ✅
+        - 后台：触发 fetchData → 重新生成 HTML → 更新缓存
+
+T+200   用户 C 访问 /post/123：
+        - 缓存命中（新数据），TTFB ~ 50ms ✅
+```
+
+平衡点：
+
+- 用户体验：始终 TTFB < 100 ms（命中 CDN）
+- 数据新鲜：过期窗口内会刷新
+- 服务器负担：仅过期触发重建
+
+### ISR vs SWR vs SSR
+
+| 维度 | SSR | ISR | SWR |
+| ---- | --- | --- | --- |
+| 何时渲染 | 每次请求 | 过期后下次请求 | 客户端 |
+| TTFB | 慢（等渲染） | 快（缓存） | 极快（HTML 就在客户端） |
+| 数据新鲜 | 实时 | 配置过期时间 | 实时 |
+| 服务器成本 | 高 | 低 | 低 |
+
+ISR 在"读多写少"场景下是最优解——博客、产品列表、新闻。
+
+## PPR：部分预渲染（Next.js 14+）
+
+> PPR = SSG + 流式 SSR 混合：静态 shell 立即返回 + 动态部分流式补充。
+
+```tsx
+// next.config.js
+module.exports = {
+  experimental: {
+    ppr: 'incremental'
+  }
+}
+```
+
+```tsx
+import { Suspense } from 'react'
+
+export default function Page() {
+  return (
+    <>
+      <Header />                            {/* 静态：构建期生成 */}
+      <Banner />                            {/* 静态 */}
+      <Suspense fallback={<UserSkeleton />}>
+        <UserMenu />                        {/* 动态：运行时流式 */}
+      </Suspense>
+      <ProductList />                       {/* 静态 */}
+      <Suspense fallback={<CartSkeleton />}>
+        <CartCount />                       {/* 动态 */}
+      </Suspense>
+    </>
+  )
+}
+```
+
+效果：
+
+```text
+T+0     CDN 立即返回静态 shell（含 skeleton）→ TTFB 极快
+T+0     浏览器开始渲染
+T+100   服务端开始计算动态部分（UserMenu / CartCount）
+T+200   流式插入实际内容
+```
+
+收益：
+
+- **TTFB 极快**：shell 来自 CDN
+- **个性化内容仍可呈现**：动态部分流式
+- **无需选择 SSR vs SSG**：自动混合
+
+PPR 是 RSC 时代的重要架构创新，但仍在实验阶段——使用前确认稳定性。
+
+## 水合（Hydration）
+
+> 水合 = React 在客户端"接管"服务端渲染好的 HTML，附加事件监听 + 内部状态。
+
+### 水合的成本
+
+```text
+1. 下载 JS（包含所有客户端组件代码）
+2. 解析 JS
+3. 执行 React 渲染（再次！但与 server 输出一致）
+4. 走遍 DOM 树，给元素附加事件监听
+5. 进入"可交互"状态
+```
+
+低端设备上水合可能 1-3 秒——这就是"幽灵期"的来源。
+
+### 水合的常见问题
+
+#### 1. 服务端 / 客户端渲染不一致
+
+```tsx
+function Component() {
+  return <div>{Math.random()}</div>      // ❌ 服务端与客户端值不同
+}
+```
+
+```text
+Hydration mismatch! Server: 0.5234... Client: 0.1234...
+```
+
+修复：用 `useEffect` 在客户端独立设置：
+
+```tsx
+function Component() {
+  const [random, setRandom] = useState(0)
+  useEffect(() => setRandom(Math.random()), [])
+  return <div>{random}</div>
+}
+```
+
+或用 `suppressHydrationWarning`（仅在你确定无害时）：
+
+```tsx
+<div suppressHydrationWarning>{Date.now()}</div>
+```
+
+#### 2. 浏览器 API 在服务端不可用
+
+```tsx
+// ❌ 服务端没有 window
+const width = window.innerWidth
+
+// ✅ 检查环境
+const width = typeof window !== 'undefined' ? window.innerWidth : 0
+
+// ✅ 或在 useEffect 中
+useEffect(() => {
+  setWidth(window.innerWidth)
+}, [])
+```
+
+#### 3. localStorage / sessionStorage
+
+服务端不存在——必须在 `useEffect` 中读：
+
+```tsx
+function ThemeToggle() {
+  const [theme, setTheme] = useState('light')      // 默认
+  useEffect(() => {
+    setTheme(localStorage.getItem('theme') ?? 'light')
+  }, [])
+  // ...
+}
+```
+
+但这会引起"主题闪烁"：服务端渲染 light → 客户端水合 → 切到 dark。
+
+修复：把"读 localStorage 并应用"的逻辑作为内联脚本注入到 HTML head（在水合前执行）：
+
+```tsx
+<head>
+  <script dangerouslySetInnerHTML={{
+    __html: `(function() {
+      const theme = localStorage.getItem('theme') || 'light'
+      document.documentElement.classList.add(theme)
+    })()`
+  }} />
+</head>
+```
+
+## Selective Hydration
+
+React 18 的水合可以**按需**——优先水合用户交互的部分：
+
+```tsx
+<App>
+  <Header />
+  <Suspense fallback={<Skeleton />}>
+    <Sidebar />
+  </Suspense>
+  <Suspense fallback={<Skeleton />}>
+    <Main />
+  </Suspense>
+  <Footer />
+</App>
+```
+
+行为：
+
+- React 开始水合 Header
+- 用户点击 Main 内的某个按钮
+- React 优先水合 Main → 让点击立即响应
+- Sidebar 与 Footer 后续水合
+
+不需要额外配置——React 18+ 自动处理。
+
+### 水合优先级
+
+```text
+默认顺序：从根开始 DFS
+中断条件：用户交互 → React 优先水合交互的子树
+```
+
+## Progressive Hydration
+
+进一步：**只水合需要交互的组件**——其它组件保持纯 HTML。
+
+### Astro 的 Islands 架构
+
+```astro
+---
+import Counter from './Counter.svelte'
+---
+<html>
+  <body>
+    <h1>Static Title</h1>                     {/* 纯 HTML，零 JS */}
+    <Counter client:load />                   {/* 进入页面就水合 */}
+    <Counter client:visible />                {/* 视口内才水合 */}
+    <Counter client:idle />                   {/* 浏览器空闲时水合 */}
+    <Counter client:media="(max-width: 768px)" />
+  </body>
+</html>
+```
+
+每个"岛"是独立的水合单元——大幅减少客户端 JS 总量。
+
+### React 的 Islands
+
+直接的 Islands 不在 React 标准中——但可以通过 RSC 模拟：
+
+```tsx
+// Server Component
+export default function Page() {
+  return (
+    <>
+      <h1>Static Title</h1>           {/* 服务端渲染，零客户端 JS */}
+      <Counter />                      {/* 'use client' 边界，水合岛 */}
+      <ProductList />                  {/* 服务端 */}
+    </>
+  )
+}
+```
+
+RSC 的设计本身就是 Islands 的实现——只是术语不同。
+
+## 选择策略的决策树
+
+```text
+你的应用？
+│
+├─ 公开内容（博客/营销）
+│   ├─ 内容很少变 ──► SSG
+│   ├─ 中等频率变 ──► ISR
+│   └─ 实时变（如新闻首页）──► SSR / PPR
+│
+├─ 需要 SEO 的产品站（电商/SaaS 官网）
+│   ├─ 完全静态化 ──► SSG（数据少时）
+│   ├─ 大型电商 ──► ISR（产品列表）+ PPR（个性化）
+│   └─ 实时交易 ──► SSR
+│
+├─ Web 应用（无强 SEO 需求）
+│   ├─ 重交互 SPA（Linear/Figma）──► CSR
+│   └─ 一般业务 ──► 默认 SSR + 客户端 SPA 化
+│
+└─ 内部工具 / 后台
+    └─ CSR（无 SEO + 用户网络好）
+```
+
+## Next.js 的混合模式
+
+实际项目中很少"全 SSR"或"全 SSG"——Next.js App Router 让每个路由独立选择策略：
+
+```tsx
+// app/page.tsx          → 默认尝试 SSG（可静态就静态）
+// app/blog/page.tsx     → 默认 SSG
+export const revalidate = 3600   // 改为 ISR
+
+// app/dashboard/page.tsx
+import { headers } from 'next/headers'
+export default async function Dashboard() {
+  const h = headers()              // 用了动态 API → 自动 SSR
+  // ...
+}
+
+// app/admin/page.tsx
+'use client'                       // 整页 CSR
+```
+
+这是**最实用的架构**：每个页面的策略与其特性匹配。
+
+## 性能监控
+
+### TTFB 与 LCP
+
+不同策略的典型值：
+
+| 策略 | TTFB | LCP |
+| ---- | ---- | --- |
+| CSR | 50 ms（静态 HTML） | 1.5-3 s |
+| SSR | 100-500 ms（服务端渲染） | 1-2 s |
+| SSG | 30-100 ms（CDN） | < 1 s |
+| ISR | 30-100 ms（缓存命中） | < 1 s |
+| PPR | 30-100 ms（shell） | < 1 s |
+
+监控：
+
+```js
+// web-vitals
+import { onTTFB, onLCP } from 'web-vitals'
+onTTFB(metric => report('ttfb', metric))
+onLCP(metric => report('lcp', metric))
+```
+
+详见 [性能指标与预算](/performance/metrics)。
+
+### 水合时间
+
+```js
+// 水合开始/结束
+performance.mark('hydrate-start')
+hydrateRoot(...)
+// 在 root render 完成后
+performance.mark('hydrate-end')
+performance.measure('hydrate', 'hydrate-start', 'hydrate-end')
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 一切都 SSR | 服务器成本爆炸 | 适合的页面用 SSG / ISR |
+| SSG 内容频繁变化 | 重新构建慢 / 用户看到旧 | ISR + revalidate |
+| CSR 重 SEO 内容 | SEO 弱 | SSR / SSG / 预渲染 |
+| 水合错配未修 | 控制台警告 + 实际 bug | 检查服务端 / 客户端一致 |
+| 主题闪烁 | 体验差 | 内联脚本提前应用 |
+| 大量 use client | RSC 失去意义 | 边界下沉 |
+| ISR 不设过期 | 数据永远旧 | 设 revalidate |
+| 不流式 SSR | 等所有数据才发 HTML | 用 Suspense 拆分 |
+
+## 框架对比
+
+| 框架 | 默认策略 | 强项 |
+| ---- | -------- | ---- |
+| Next.js App Router | 自动混合（SSG/ISR/SSR/PPR） | 全场景 + RSC |
+| Remix | SSR + 数据 loader | 表单 / mutations |
+| Astro | SSG + Islands | 内容站 + 多框架 |
+| Gatsby | SSG | 老牌静态站 |
+| RedwoodJS | SSR + GraphQL | 全栈 |
+| Waku | RSC focused | 极简 RSC |
+
+## 完整示例：电商首页
+
+```tsx
+// app/page.tsx
+import { Suspense } from 'react'
+import { headers } from 'next/headers'   // 用了 → 触发 SSR
+
+async function HotProducts() {
+  // ISR：每小时刷新
+  const products = await fetch('https://api/products/hot', {
+    next: { revalidate: 3600 }
+  }).then(r => r.json())
+  return <ProductGrid products={products} />
+}
+
+async function PersonalizedRecs() {
+  // 个性化：每次都新算
+  const userId = (await headers()).get('x-user-id')
+  const recs = await fetch(`https://api/recs/${userId}`, {
+    cache: 'no-store'
+  }).then(r => r.json())
+  return <ProductGrid products={recs} />
+}
+
+export default function Home() {
+  return (
+    <>
+      <Header />                         {/* 静态 */}
+      <Banner />                         {/* 静态 */}
+
+      <Suspense fallback={<GridSkeleton />}>
+        <HotProducts />                  {/* ISR */}
+      </Suspense>
+
+      <Suspense fallback={<GridSkeleton />}>
+        <PersonalizedRecs />             {/* 实时 */}
+      </Suspense>
+
+      <Footer />                         {/* 静态 */}
+    </>
+  )
+}
+```
+
+策略组合：静态 shell + ISR 列表 + 实时个性化。这种"混合"是现代 Next.js 应用的常态。
+
+## 小结
+
+- 五种渲染策略各有取舍：CSR 部署简单首屏慢，SSR 兼顾首屏与 SEO，SSG 极快但难动态，ISR 平衡新鲜与速度，PPR 是 RSC 时代的"shell + island"模式；
+- Next.js App Router 的混合模式让每个路由独立选策略，这是实际项目的最佳实践；
+- 流式 SSR + Suspense 是 React 18+ 的核心能力，让 LCP 与 SSR 并行而非串行；
+- 水合是 SSR 的"代价"——下载 JS、解析、执行、附加监听都需要时间，导致"幽灵期"；
+- Selective Hydration（按用户交互优先）+ Progressive Hydration（按需水合）是减轻水合成本的方向；
+- RSC 是 React 的 Islands 实现——把"零客户端 JS"作为默认，'use client' 才是例外；
+- ISR 是博客 / 电商列表的最优解，TTFB 接近静态站但数据可定期刷新；
+- PPR 让"静态 shell + 动态填充"无需开发者手动管理，是渲染策略的下一代默认。

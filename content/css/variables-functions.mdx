@@ -1,0 +1,532 @@
+---
+title: CSS 变量与现代函数
+description: 自定义属性、@property、color-mix、light-dark、attr 与现代 CSS 函数
+---
+
+# CSS 变量与现代函数
+
+CSS 自定义属性（俗称 CSS 变量）是 CSS 的"运行时变量"——可以在不同选择器、媒体查询、JS 中赋不同的值。配合 `@property`、`color-mix()`、`light-dark()` 等 CSS Color 5 / Values 5 的新函数，原生 CSS 已能完成过去需要 Sass / JS 才能解决的大部分动态样式问题。
+
+## CSS 自定义属性（变量）
+
+### 基本用法
+
+```css
+:root {
+  --primary: #1d4ed8;
+  --space: 1rem;
+  --duration: 200ms;
+}
+
+.btn {
+  background: var(--primary);
+  padding: var(--space);
+  transition: background var(--duration);
+}
+```
+
+### 与 Sass / JS 变量的本质差异
+
+| 维度 | Sass `$var` | CSS `--var` |
+| ---- | ----------- | ----------- |
+| 解析时机 | 编译期 | 运行时 |
+| 作用域 | 文件 / 选择器（编译时） | DOM 树（运行时继承） |
+| JS 可读写 | ❌ | ✅ |
+| 媒体查询切换 | 需重写整组规则 | 仅改变量值即可 |
+| 依赖反应 | ❌ | ✅ 自动重新计算 |
+
+例：暗色模式切换
+
+```css
+:root {
+  --bg: white;
+  --text: #111;
+}
+
+[data-theme='dark'] {
+  --bg: #111;
+  --text: #f5f5f5;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+```
+
+只改 `data-theme` 一个属性，整个页面所有 `--bg` / `--text` 引用立即更新。Sass 做不到这种"运行时切换"。
+
+### 默认值
+
+```css
+.x { color: var(--brand, blue); }              /* 未定义时取 blue */
+.x { color: var(--primary, var(--brand, red)); } /* 多级 fallback */
+```
+
+### 变量也能继承
+
+```css
+.parent { --space: 2rem; }
+.child { padding: var(--space); }              /* 取父级的 2rem */
+```
+
+利用继承可以做**作用域级覆盖**：
+
+```css
+.compact { --space: 0.5rem; }                  /* 影响所有后代的 padding */
+.spacious { --space: 2rem; }
+```
+
+### 在 JS 中读写
+
+```ts
+// 读
+const value = getComputedStyle(element).getPropertyValue('--primary').trim()
+
+// 写
+element.style.setProperty('--primary', '#dc2626')
+
+// 删除
+element.style.removeProperty('--primary')
+```
+
+### Tailwind 4 与 CSS 变量
+
+Tailwind 4 的所有令牌都是 CSS 变量：
+
+```css
+@theme {
+  --color-blue-500: oklch(0.65 0.15 240);
+  --spacing: 0.25rem;
+  --text-base: 1rem;
+  --text-base--line-height: 1.5;
+}
+```
+
+生成的 utility 类如下：
+
+```css
+.bg-blue-500 { background-color: var(--color-blue-500); }
+.p-4 { padding: calc(var(--spacing) * 4); }
+.text-base { font-size: var(--text-base); line-height: var(--text-base--line-height); }
+```
+
+意味着你可以：
+
+- 在运行时改 `--color-blue-500`，所有 `bg-blue-500` 跟着变
+- 在 `@layer components` 中直接用 `var(--color-blue-500)`
+- 通过 JS 动态切换主题
+
+```ts
+document.documentElement.style.setProperty('--color-blue-500', '#dc2626')
+```
+
+## `@property`
+
+让 CSS 变量"类型化"——声明语法、初始值、是否继承：
+
+```css
+@property --gradient-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.x {
+  background: linear-gradient(var(--gradient-angle), red, blue);
+  transition: --gradient-angle 1s;
+}
+
+.x:hover { --gradient-angle: 90deg; }
+```
+
+#### 关键收益：可动画
+
+普通 CSS 变量**不能动画**——浏览器把它视为字符串，只在赋值瞬间替换。`@property` 声明类型后，浏览器知道如何插值，让变量也能 transition / animate。
+
+```css
+@property --hue {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
+
+.color-shift {
+  background: hsl(var(--hue) 80% 60%);
+  animation: hue 4s linear infinite;
+}
+
+@keyframes hue {
+  to { --hue: 360; }
+}
+```
+
+整个色相光谱平滑过渡——纯 CSS 实现。
+
+### syntax 取值
+
+| 语法 | 接受类型 |
+| ---- | -------- |
+| `<color>` | 任何颜色值 |
+| `<length>` | px / rem / em / vw 等 |
+| `<percentage>` | % |
+| `<number>` | 无单位数字 |
+| `<integer>` | 整数 |
+| `<angle>` | deg / rad / turn |
+| `<time>` | ms / s |
+| `*` | 任何值（不可动画） |
+
+## `color-mix()`
+
+混合两种颜色：
+
+```css
+.x { background: color-mix(in oklch, red, blue); }            /* 等比 */
+.x { background: color-mix(in oklch, red 70%, blue); }        /* 7:3 */
+.x { background: color-mix(in srgb, white, black 20%); }      /* 白 + 20% 黑 = 浅灰 */
+
+/* 半透明：与 transparent 混合 */
+.x { background: color-mix(in srgb, var(--primary) 50%, transparent); }
+
+/* 派生色板 */
+.btn { background: var(--primary); }
+.btn:hover { background: color-mix(in oklch, var(--primary), black 10%); }
+.btn:active { background: color-mix(in oklch, var(--primary), black 20%); }
+```
+
+### 替代 Sass 的 darken / lighten / mix
+
+```scss
+/* Sass */
+.btn:hover { background: darken($primary, 10%); }
+.btn-light { background: lighten($primary, 20%); }
+.divider   { background: mix($a, $b, 50%); }
+```
+
+```css
+/* 原生 CSS */
+.btn:hover  { background: color-mix(in oklch, var(--primary), black 10%); }
+.btn-light  { background: color-mix(in oklch, var(--primary), white 20%); }
+.divider    { background: color-mix(in oklch, var(--a), var(--b)); }
+```
+
+且 CSS 版本是**运行时**——`--primary` 改变时自动重算，Sass 编译完就锁定了。
+
+### 色彩空间（in ...）
+
+`in <space>` 决定混合在哪个色彩空间进行：
+
+- `oklch` / `oklab`：感知均匀（**推荐**），中间色不会"灰"
+- `srgb`：标准 RGB，可能产生灰色中间值
+- `hsl` / `lch`：旧空间
+
+例：红到绿混合
+
+```text
+in srgb：    红 → 灰 → 绿        ← 中间色发灰，不自然
+in oklch：   红 → 橙 → 黄 → 绿    ← 中间过渡更鲜活
+```
+
+## `light-dark()`
+
+```css
+:root { color-scheme: light dark; }
+
+body {
+  background: light-dark(white, #111);
+  color: light-dark(#111, white);
+}
+```
+
+根据 `color-scheme` 自动选择——无需写两套媒体查询。配合 `[data-theme]` 可在 light / dark 间切换：
+
+```css
+:root { color-scheme: light; }
+:root[data-theme='dark'] { color-scheme: dark; }
+:root[data-theme='auto'] { color-scheme: light dark; }
+
+body { background: light-dark(white, #111); }
+```
+
+兼容性：Chrome 123+ / Firefox 120+ / Safari 17.5+。
+
+## 相对颜色（CSS Color 5）
+
+基于已有颜色派生新颜色：
+
+```css
+:root { --brand: oklch(0.6 0.2 240); }
+
+.x {
+  /* 同色相，亮度 -10% */
+  background: oklch(from var(--brand) calc(l - 0.1) c h);
+
+  /* 同亮度，色度减半 */
+  background: oklch(from var(--brand) l calc(c / 2) h);
+
+  /* 同色相、亮度，alpha 50% */
+  background: oklch(from var(--brand) l c h / 0.5);
+}
+```
+
+`oklch(from <color> ...)` 取出 `<color>` 的 L / C / H / alpha 通道，让你按需修改后重新组合。彻底替代 Sass 的 `adjust-color` / `change-color`。
+
+#### 自动派生的色调阶梯
+
+```css
+:root { --brand: oklch(0.6 0.2 240); }
+
+.shade-50  { background: oklch(from var(--brand) calc(l + 0.35) calc(c * 0.2) h); }
+.shade-100 { background: oklch(from var(--brand) calc(l + 0.30) calc(c * 0.4) h); }
+.shade-500 { background: var(--brand); }
+.shade-900 { background: oklch(from var(--brand) calc(l - 0.4) c h); }
+```
+
+只改根色，整套色阶自动跟进——是动态主题系统的现代基础。
+
+## `attr()`
+
+CSS 中读取 HTML 属性值：
+
+```html
+<div class="tag" data-count="3">Inbox</div>
+```
+
+```css
+.tag::after {
+  content: ' (' attr(data-count) ')';
+  /* → " (3)" */
+}
+```
+
+CSS Values 5 起，`attr()` 不仅能用于 `content`，还能用于其他属性（含类型转换）：
+
+```css
+.bar {
+  width: attr(data-width type(<percentage>), 0%);
+}
+```
+
+```html
+<div class="bar" data-width="60%"></div>
+```
+
+兼容性仍在普及，`content` 之外的用途暂可作为渐进增强。
+
+## `calc()` 进阶
+
+混合不同单位、动态计算：
+
+```css
+.x { width: calc(100% - 32px); }
+.x { font-size: calc(1rem + 0.5vw); }
+.x { padding: calc(var(--space) * 1.5); }
+
+/* 嵌套 */
+.x { width: calc(calc(100% - 1rem) / 3); }
+
+/* 与 CSS 变量配合 */
+:root { --base: 16px; }
+.x { font-size: calc(var(--base) * 1.5); }
+```
+
+注意：`+` `-` 前后必须有空格：
+
+```css
+calc(100% -16px)                              /* ✗ 解析为 100% 与 -16px */
+calc(100% - 16px)                             /* ✓ */
+```
+
+## `min()` / `max()` / `clamp()`
+
+```css
+.x { width: min(100%, 1200px); }              /* 取较小者 = max-width */
+.x { font-size: max(1rem, 4vw); }             /* 取较大者 = 最小 1rem */
+.x { font-size: clamp(1rem, 1rem + 1vw, 1.5rem); }
+```
+
+详见 [单位与函数](/css/units-functions#数学函数)。
+
+## `round()` / `mod()` / `rem()`（CSS Values 4）
+
+```css
+.x { width: round(123px, 8px); }              /* 圆整到 8 倍数 = 120 */
+.x { padding: round(up, 17px, 4px); }         /* 向上 = 20 */
+.x { width: mod(100px, 30px); }                /* 取模 = 10 */
+.x { width: rem(100px, 30px); }                /* 余数 = 10 */
+```
+
+## 三角函数
+
+```css
+.dial {
+  --angle: 30deg;
+  transform: translate(
+    calc(cos(var(--angle)) * 100px),
+    calc(sin(var(--angle)) * 100px)
+  );
+}
+
+@keyframes orbit {
+  to { --angle: 360deg; }
+}
+
+.planet {
+  animation: orbit 5s linear infinite;
+  transform: translate(
+    calc(cos(var(--angle)) * 200px),
+    calc(sin(var(--angle)) * 200px)
+  );
+}
+```
+
+环形菜单、仪表盘、轨道动画——CSS 直接计算三角函数，无需 JS。
+
+需要配合 `@property` 让 `--angle` 可被 transition / animation：
+
+```css
+@property --angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+```
+
+## 实战配方
+
+### 1. 主题令牌系统
+
+```css
+:root {
+  /* 原子色 */
+  --c-blue-500: oklch(0.65 0.15 240);
+  --c-gray-50:  oklch(0.98 0 0);
+  --c-gray-900: oklch(0.18 0 0);
+
+  /* 语义色（推荐组件层用） */
+  --color-bg:        var(--c-gray-50);
+  --color-text:      var(--c-gray-900);
+  --color-primary:   var(--c-blue-500);
+  --color-border:    oklch(from var(--color-text) l c h / 0.1);
+}
+
+[data-theme='dark'] {
+  --color-bg:        var(--c-gray-900);
+  --color-text:      var(--c-gray-50);
+  --color-border:    oklch(from var(--color-text) l c h / 0.15);
+}
+```
+
+### 2. 派生交互态
+
+```css
+.btn {
+  --bg: var(--color-primary);
+  background: var(--bg);
+}
+.btn:hover  { --bg: color-mix(in oklch, var(--color-primary), black 10%); }
+.btn:active { --bg: color-mix(in oklch, var(--color-primary), black 20%); }
+```
+
+只声明一个 `--bg`，所有交互态从其派生——色板替换时一行搞定。
+
+### 3. 受 props 影响的组件（React + CSS 变量）
+
+```tsx
+function Bar({ progress }: { progress: number }) {
+  return (
+    <div
+      className="bar"
+      style={{ '--progress': `${progress}%` } as CSSProperties}
+    />
+  )
+}
+```
+
+```css
+.bar {
+  width: 100%;
+  height: 8px;
+  background: #eee;
+  position: relative;
+}
+.bar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: var(--progress, 0%);
+  background: var(--color-primary);
+  transition: width 200ms;
+}
+```
+
+JS 仅传一个数字，渲染层不重新计算 className——比 styled-components 更轻量。
+
+### 4. 用 @property 的渐变动画
+
+```css
+@property --grad-start {
+  syntax: '<color>';
+  initial-value: blue;
+  inherits: false;
+}
+@property --grad-end {
+  syntax: '<color>';
+  initial-value: purple;
+  inherits: false;
+}
+
+.banner {
+  background: linear-gradient(45deg, var(--grad-start), var(--grad-end));
+  transition: --grad-start 1s, --grad-end 1s;
+}
+.banner:hover {
+  --grad-start: red;
+  --grad-end: orange;
+}
+```
+
+普通 CSS 变量做不到——必须 `@property`。
+
+### 5. 单一变量切换全套尺寸
+
+```css
+:root { --size: 1; }
+
+.btn {
+  padding: calc(var(--size) * 0.5em) calc(var(--size) * 1em);
+  font-size: calc(var(--size) * 1rem);
+  border-radius: calc(var(--size) * 0.5rem);
+}
+
+.btn-sm { --size: 0.875; }
+.btn-lg { --size: 1.25; }
+```
+
+变量驱动的设计令牌——所有尺寸按比例派生。
+
+### 6. Logical Sticky Header 高度补偿
+
+```css
+:root { --header-h: 64px; }
+.main { padding-top: var(--header-h); }
+.sidebar { top: var(--header-h); }
+.section { scroll-margin-top: var(--header-h); }
+```
+
+锚点滚动时自动留出 header 高度——避免被遮挡。
+
+## 浏览器调试
+
+Chrome DevTools 的 **Computed** 面板显示所有变量的解析值；**Sources** 中可在 `:root` 实时改变量观察效果。
+
+`document.documentElement.style.setProperty('--primary', 'red')` 能在 Console 即时切换。
+
+## 小结
+
+- CSS 变量是运行时变量，与 Sass 编译期变量本质不同；
+- `var()` 配合 `@property` 让变量类型化、可动画；
+- `color-mix()` / `light-dark()` / 相对颜色（`oklch(from ...)`）让原生 CSS 拥有了过去 Sass 才有的颜色操控；
+- `calc()` / `min()` / `max()` / `clamp()` 是数学函数四件套，构成现代响应式的基础；
+- `cos()` / `sin()` / `tan()` 让 CSS 直接做三角运算，环形 / 轨道动画无需 JS；
+- Tailwind 4 全部令牌都是 CSS 变量——意味着 Tailwind 与原生 CSS 已没有"边界"，只有"语义层"。

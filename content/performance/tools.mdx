@@ -1,0 +1,653 @@
+---
+title: 通用性能工具链
+description: PageSpeed Insights、Lighthouse、WebPageTest、Chrome DevTools、Squoosh 与生产监控
+---
+
+# 通用性能工具链
+
+> 优化的第一步永远是测量。"以为快"和"实际快"是两件完全不同的事。
+
+本章梳理前端性能工程师日常使用的工具链，分四类：**线上检测**（PSI / 真实用户监控）、**实验室检测**（Lighthouse / WebPageTest）、**开发期工具**（Chrome DevTools / 各类构建期插件）、**资源加工工具**（Squoosh / sharp）。每个工具的定位、最佳实践、常见陷阱在本章一并梳理。
+
+## 工具地图
+
+```text
+                       ┌─ 真实用户 (RUM) ──┐
+                       │  ├─ web-vitals    │
+       生产监控 ───────┤  ├─ Sentry        │
+                       │  ├─ Datadog RUM   │
+                       │  └─ CrUX          │
+                       └───────────────────┘
+
+                       ┌─ 线上单次审计 ────┐
+                       │  ├─ PageSpeed     │
+       一次性诊断 ─────┤  ├─ WebPageTest   │
+                       │  └─ Lighthouse    │
+                       └───────────────────┘
+
+                       ┌─ 实验室 / CI ─────┐
+                       │  ├─ Lighthouse CI │
+       回归测试 ───────┤  ├─ size-limit    │
+                       │  └─ Calibre       │
+                       └───────────────────┘
+
+                       ┌─ 开发期排查 ──────┐
+                       │  ├─ DevTools      │
+       本地调优 ───────┤  ├─ React DevTools│
+                       │  ├─ Vue DevTools  │
+                       │  └─ Why-render    │
+                       └───────────────────┘
+
+                       ┌─ 构建期分析 ──────┐
+                       │  ├─ visualizer    │
+       Bundle 优化 ─────┤  ├─ source-map-X │
+                       │  └─ Bundlephobia  │
+                       └───────────────────┘
+
+                       ┌─ 资源加工 ────────┐
+                       │  ├─ Squoosh       │
+       资源压缩 ───────┤  ├─ sharp / svgo  │
+                       │  └─ Imagemin      │
+                       └───────────────────┘
+```
+
+## PageSpeed Insights (PSI)
+
+### 定位
+
+[Google PageSpeed Insights](https://pagespeed.web.dev/) 是 Google 官方的**线上一次性性能审计**工具。
+
+特点：
+
+- 基于 Lighthouse 引擎
+- 同时显示**实验室数据**（Lab）与**真实用户数据**（CrUX）
+- Mobile / Desktop 双平台
+- 免费、无需登录
+
+### 输出三大块
+
+#### 1. Core Web Vitals 评估（基于 CrUX）
+
+```text
+正在评估真实用户体验：
+LCP: 2.1 s    ✅ Good
+INP: 180 ms   ✅ Good
+CLS: 0.08     ✅ Good
+其他：FCP / TTFB
+```
+
+> 如果你的站点新或流量小，CrUX 会显示"数据不足"——这是常见现象，不代表性能差，只是无法评估。
+
+#### 2. 性能评分（基于 Lighthouse）
+
+0–100 的实验室评分，影响因子：
+
+```text
+Performance Score = 加权总和
+  ├─ FCP            10%
+  ├─ LCP            25%
+  ├─ TBT            30%
+  ├─ CLS            25%
+  └─ Speed Index    10%
+```
+
+> 注意：分数 ≥ 90 是"Good"，但**评分 95 比 85 更难**——指数关系。
+
+#### 3. 优化建议清单
+
+按优先级列出：
+
+```text
+机会（节省时间）：
+  ⚡ Eliminate render-blocking resources    ─ 节省 0.6 s
+  ⚡ Properly size images                   ─ 节省 320 KB
+  ⚡ Defer offscreen images                 ─ 节省 180 KB
+
+诊断：
+  ⚠ Avoid an excessive DOM size            ─ 4500 nodes
+  ⚠ Avoid long main-thread tasks           ─ 5 long tasks
+
+通过的审计 (24)
+```
+
+每条都有详细解释 + 文档链接。
+
+### 使用建议
+
+- **快速概览**：PSI 是最快的"现在到底如何"问题答案
+- **CrUX 数据是真实**——比 Lighthouse 实验室分数更代表用户体验
+- **不要追分数**：85 → 95 可能比 60 → 85 难 5 倍。重要的是 Core Web Vitals 都是 Good
+- **移动端是默认**：Google 主要看 mobile 分数
+
+## Lighthouse
+
+### 定位
+
+Google 出品的开源审计工具，是 PSI 的引擎。可以在多个地方使用：
+
+- **Chrome DevTools** → Lighthouse 面板（最常用）
+- **CLI**：`npx lighthouse https://example.com`
+- **Node API**：自动化 / CI 集成
+- **Lighthouse CI**：在 PR 中执行
+
+### 五个审计类别
+
+| 类别 | 覆盖 |
+| ---- | ---- |
+| Performance | LCP / INP / CLS / TBT / SI / FCP |
+| Accessibility | 可访问性（颜色对比、ARIA、语义化等） |
+| Best Practices | HTTPS、错误处理、依赖漏洞等 |
+| SEO | 元标签、可爬性、移动友好 |
+| PWA（已废弃为单独类别） | Service Worker、Manifest |
+
+### 在 DevTools 中运行
+
+DevTools → Lighthouse 面板 → 选择类别与设备 → "Analyze page load"。
+
+```text
+设备：
+  Mobile （推荐）  ── 模拟低端 Android + Slow 4G
+  Desktop          ── 模拟桌面 + 快网络
+
+Throttling：
+  Simulated         ── Lighthouse 内部计算（快）
+  Applied            ── DevTools throttle（更准）
+  No throttling      ── 真实环境
+```
+
+⚠️ **本机分数会偏高**（你的 CPU 和网络比真实用户好）。在低端设备上跑或用 PSI 才更准。
+
+### Lighthouse CLI
+
+```bash
+npx lighthouse https://example.com \
+  --output=html \
+  --output-path=./report.html \
+  --only-categories=performance \
+  --form-factor=mobile \
+  --throttling-method=simulate
+```
+
+输出 HTML 报告，可分享。
+
+### Lighthouse CI
+
+在 PR 中自动跑，门槛分数低于阈值则阻止合并：
+
+```yaml
+# .github/workflows/lighthouse.yml
+name: Lighthouse CI
+on: pull_request
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci && npm run build
+      - run: npm install -g @lhci/cli
+      - run: lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+```
+
+`lighthouserc.json`：
+
+```json
+{
+  "ci": {
+    "collect": {
+      "startServerCommand": "npm run preview",
+      "url": ["http://localhost:4173/"],
+      "numberOfRuns": 3
+    },
+    "assert": {
+      "assertions": {
+        "categories:performance": ["error", { "minScore": 0.9 }],
+        "largest-contentful-paint": ["error", { "maxNumericValue": 2500 }],
+        "cumulative-layout-shift": ["error", { "maxNumericValue": 0.1 }]
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}
+```
+
+### 常见 Lighthouse 误判
+
+- **HSTS warning**：本地 HTTP 测试时会扣分，生产无影响
+- **缺少 PWA**：现代审计已不强求
+- **第三方脚本扣分**：测试时禁用扩展（隐身模式）
+
+## WebPageTest
+
+### 定位
+
+[WebPageTest](https://www.webpagetest.org/) 是更专业的第三方测试平台，比 PSI 更细致：
+
+- 全球 40+ 测试节点（真实地理位置）
+- 支持视频录制 → 帧级别比对
+- 可设置真实手机机型（不是模拟器）
+- 多次运行取中位数
+- 详尽的瀑布图与连接视图
+
+### 关键报告
+
+#### 1. 瀑布图（Waterfall）
+
+每个请求的 DNS / Connect / SSL / TTFB / Content Download 阶段着色显示：
+
+```text
+01 GET /                      ███▓▓▓████████████████████  HTML
+02 GET /main.css              ░░░░░███████░░░             CSS（阻塞）
+03 GET /main.js               ░░░░░░░░░██░                JS（defer）
+04 GET /hero.webp             ░░░░░░░░░░░░░██████          LCP image
+                                ↑          ↑
+                              发现请求    LCP 时间
+```
+
+定位"为什么 LCP 这么慢"非常直观。
+
+#### 2. Filmstrip（视频帧分解）
+
+每 100 ms 截一帧 → 直观看到首屏每个时刻渲染了什么：
+
+```text
+0.0s  □ □ □
+0.5s  □ □ □
+1.0s  ■ □ □   ← FCP
+1.5s  ■ ■ □   ← LCP
+2.0s  ■ ■ ■   ← Visually Complete
+```
+
+#### 3. Connection View
+
+按 TCP 连接分组的瀑布图——能看出 HTTP/2 是否真在多路复用。
+
+#### 4. Cost / Carbon
+
+> 现代 WebPageTest 显示页面"碳排放成本"——可持续性视角。
+
+### 使用建议
+
+- **首次诊断**：去 WebPageTest 跑一次东京 / 法兰克福 / 弗吉尼亚三个节点
+- **看视频**：对比优化前后的 filmstrip 是最直观的"快了多少"
+- **关注瀑布图**：找最长的横条与最深的瀑布
+- **配合 LightHouse**：WebPageTest 报告页底部可一键跑 Lighthouse
+
+## Chrome DevTools
+
+详尽的本地调试工具。涉及性能的有 Performance / Network / Memory / Lighthouse / Coverage 五个面板。
+
+### Performance 面板
+
+录制一段操作（如首屏加载、搜索框输入），获得火焰图：
+
+```text
+Network ──┬─────┬───────┬─────┬─────────────
+Frames ──┐│     │       │     │              ◄ 帧率
+Main ────┤├──███████████████████─█───────── ◄ 主线程任务
+         ││     │       │     │              
+         │├─ Long task (235ms)                ◄ 红条 = 长任务
+         ├─ Style recalc (45ms)
+         └─ Layout (32ms)
+```
+
+#### 关键观察点
+
+- **红色长条**：> 50 ms 长任务，影响 INP
+- **紫色 Layout / Style**：CSS 重排重绘
+- **黄色 JS Tasks**：JS 执行
+- **绿色 Paint**：实际像素绘制
+- **Memory 曲线**：勾选 "Memory" 选项可看堆变化
+
+#### 应用场景
+
+| 场景 | 操作 |
+| ---- | ---- |
+| 首屏慢 | 录制 reload，看时间线 |
+| 输入卡顿 | 录制输入过程，找长任务 |
+| 滚动卡顿 | 录制滚动 5 秒，看帧率 |
+| 内存泄漏 | 录制操作 + 内存曲线 |
+
+### Network 面板
+
+#### 关键功能
+
+- **Disable cache**：模拟首次访问
+- **Throttling**：Slow 4G / 3G 模拟（弱网测试）
+- **Filter**：按类型过滤（JS / CSS / Img / Doc）
+- **Initiator**：定位发起请求的代码
+- **Priority**：浏览器分配的优先级
+- **HAR Export**：导出请求记录
+
+#### 列定制
+
+右键列头 → 添加列：
+
+| 列 | 用途 |
+| -- | ---- |
+| Protocol | h1.1 / h2 / h3 |
+| Priority | 浏览器优先级 |
+| Cache-Control | 缓存策略 |
+| Size | Transferred / Resource Size |
+| Connection ID | 复用情况 |
+
+### Memory 面板
+
+#### Heap Snapshot
+
+定位"未被释放的对象"：
+
+```text
+1. 操作前 → Take snapshot #1
+2. 操作（打开模态框 → 关闭）
+3. 强制 GC（垃圾桶按钮）
+4. Take snapshot #2
+5. 切换到 #2，下拉选 "Comparison"
+6. 看 # Delta 列正值（增加的对象）
+```
+
+详见 [JavaScript 优化](/performance/javascript) 与各框架专章。
+
+#### Allocation Timeline
+
+录制期间持续采样内存分配：
+
+```text
+Memory → Allocation instrumentation on timeline → Start
+─ 操作页面
+─ Stop
+─ 蓝色柱：仍存活的分配 ← 可疑
+─ 灰色柱：已被 GC 回收 ← 正常
+```
+
+### Coverage 面板
+
+诊断"未使用的代码占比"：
+
+```text
+Cmd/Ctrl+Shift+P → "Show Coverage" → Reload + record
+─ 列出每个文件的 Unused 比例
+─ 高 Unused 文件考虑代码分割
+```
+
+### Performance Insights（实验性 → 已并入 Performance）
+
+提供更人话的诊断：
+
+```text
+LCP analysis:
+  Render delay: 80%   ← 渲染被阻塞了
+  Load delay: 15%
+  Element ready: 5%
+  
+建议：减少 head 中阻塞资源
+```
+
+## Bundle 分析工具
+
+### `rollup-plugin-visualizer`（Vite / Rollup）
+
+```js
+import { visualizer } from 'rollup-plugin-visualizer'
+
+export default {
+  plugins: [
+    visualizer({ open: true, gzipSize: true, brotliSize: true })
+  ]
+}
+```
+
+输出可视化页面，按文件大小渲染矩形。
+
+### `webpack-bundle-analyzer`
+
+```bash
+npm install --save-dev webpack-bundle-analyzer
+ANALYZE=true npm run build
+```
+
+### `source-map-explorer`
+
+不依赖打包器配置，对任何已构建产物分析：
+
+```bash
+npx source-map-explorer 'dist/**/*.js'
+```
+
+适合分析"我没改过 webpack 配置但需要看 bundle"的情况。
+
+### Lighthouse Treemap
+
+Lighthouse 报告 → "View Treemap" 按钮 → bundle 矩形可视化。
+
+## 资源加工工具
+
+### Squoosh
+
+[squoosh.app](https://squoosh.app/) 是 Google 出的网页版图片压缩：
+
+- 浏览器内运行（不上传服务器）
+- 实时左右对比
+- 支持 JPEG / PNG / WebP / AVIF / OxiPNG / MozJPEG
+- 可视化调参（quality / 颜色深度 / 子采样）
+
+适合：
+
+- 一次性压缩素材
+- 试验最佳参数
+- 对比不同格式的视觉差异
+
+### sharp
+
+Node.js 图片处理库，构建期 / 服务端用：
+
+```js
+import sharp from 'sharp'
+
+await sharp('input.jpg')
+  .resize(1200)
+  .toFormat('avif', { quality: 60, effort: 4 })
+  .toFile('output.avif')
+```
+
+详见 [图片格式选择](/performance/image-format#nodejs-库sharp)。
+
+### SVGO
+
+```bash
+npx svgo input.svg -o output.svg
+```
+
+或编程：
+
+```js
+import { optimize } from 'svgo'
+const result = optimize(svgString)
+```
+
+详见 [图片格式选择 § SVG](/performance/image-format#svg)。
+
+## 真实用户监控（RUM）
+
+实验室数据无法反映真实用户的网络、设备、地理分布。RUM 是必要的补充。
+
+### `web-vitals` 库
+
+Google 官方 ~ 1.5 KB：
+
+```js
+import { onLCP, onINP, onCLS, onFCP, onTTFB } from 'web-vitals'
+
+function send(metric) {
+  navigator.sendBeacon('/analytics', JSON.stringify({
+    name: metric.name,
+    value: metric.value,
+    rating: metric.rating,
+    delta: metric.delta,
+    id: metric.id,
+    navigationType: metric.navigationType,
+    deviceMemory: navigator.deviceMemory,
+    connection: navigator.connection?.effectiveType
+  }))
+}
+
+onLCP(send)
+onINP(send)
+onCLS(send)
+onFCP(send)
+onTTFB(send)
+```
+
+详见 [性能指标与预算](/performance/metrics#采集真实用户数据)。
+
+### 商业 RUM
+
+| 服务 | 特点 |
+| ---- | ---- |
+| Sentry Performance | 与错误监控集成，TS 友好 |
+| Datadog RUM | 企业级仪表盘 |
+| New Relic Browser | 老牌 APM 一体化 |
+| Vercel Analytics | Vercel 部署原生集成 |
+| Cloudflare Web Analytics | 免费、隐私友好 |
+| SpeedCurve | 性能专用，业界标杆 |
+| Calibre | LightHouse 历史趋势 |
+
+### Google CrUX
+
+[Chrome User Experience Report](https://developer.chrome.com/docs/crux) 是 Chrome 收集的全球真实用户数据。在 PSI、Search Console 中可见。
+
+```bash
+# CrUX API 直接查
+curl -X POST 'https://chromeuxreport.googleapis.com/v1/records:queryRecord?key=API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/"}'
+```
+
+返回该 URL 的 P75 LCP / INP / CLS 等指标。
+
+## CI 性能门槛
+
+### Lighthouse CI
+
+见上文 § Lighthouse CI 节。
+
+### `size-limit`
+
+PR 中检查 bundle 体积：
+
+```json
+{
+  "size-limit": [
+    { "path": "dist/assets/main.*.js", "limit": "200 KB" }
+  ]
+}
+```
+
+```yaml
+- uses: andresz1/size-limit-action@v1
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Calibre / SpeedCurve
+
+商业方案，自动定时跑 Lighthouse + WebPageTest，趋势可视化。
+
+## 浏览器扩展
+
+| 扩展 | 用途 |
+| ---- | ---- |
+| Web Vitals (Chrome) | 实时显示当前页 Core Web Vitals |
+| Lighthouse | 一键运行 Lighthouse |
+| React DevTools | 组件树 + Profiler |
+| Vue DevTools | Vue 组件树 + 性能 |
+| WhyDidYouRender (npm) | React 重渲染原因 |
+
+## 开发期工具组合
+
+不同框架的专用工具集中在各框架专章：
+
+- [React 性能工具](/performance/react-tools)：React DevTools Profiler / React Scan / Why-did-you-render / react-window
+- [Vue 性能工具](/performance/vue-tools)：Vue DevTools Timeline / vue-virtual-scroller
+
+## 工具使用流程示例
+
+### 上线前性能检查
+
+```text
+1. 本地 npm run build
+   ├─ visualizer 看 bundle 构成
+   └─ size-limit 检查体积上限
+
+2. 本地 npm run preview
+   ├─ DevTools Lighthouse mobile 跑一次
+   └─ DevTools Performance 录一段交互
+
+3. 部署到 staging
+   ├─ PSI 跑一次（CrUX 数据可能尚无）
+   ├─ WebPageTest 跑东京 / 美东两个节点
+   └─ Lighthouse CI（PR 自动）
+
+4. 生产监控
+   ├─ web-vitals 上报到 RUM
+   └─ 每周看 P75 趋势
+```
+
+### 性能回归排查
+
+```text
+"PSI 分数从 92 降到 78，怎么办？"
+
+1. PSI 报告 → 看具体降级的指标（LCP / INP / CLS）
+2. WebPageTest 对比上线前后 filmstrip
+3. 定位变化的资源（Network 面板）
+4. 看 CI 历史：是哪个 PR 引入的？
+5. visualizer 对比 bundle 构成变化
+6. 锁定问题（多了什么库 / 改了什么逻辑）
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 只看 PSI 不看 CrUX | 可能优化错方向 | 关注真实用户数据 |
+| 只在自己机器跑 Lighthouse | 分数偏高 | 用 PSI 或低端模拟 |
+| 不在 CI 拦回归 | 性能悄悄劣化 | size-limit + Lighthouse CI |
+| 忽视 WebPageTest 视频 | 看不出"看起来快不快" | 比对 filmstrip |
+| 不接 RUM | 实际体验未知 | web-vitals |
+| 只看平均值 | 长尾被掩盖 | P75 / P95 分位 |
+| 看到分数下降就调阈值 | 性能预算无效 | 定根因不调阈值 |
+
+## 工具总结表
+
+| 工具 | 类别 | 适用阶段 | 成本 |
+| ---- | ---- | -------- | ---- |
+| PSI | 线上单次 | 上线后快速审计 | 免费 |
+| Lighthouse | 实验室 | 开发 / CI | 免费 |
+| Lighthouse CI | 实验室 | CI / 回归 | 免费 |
+| WebPageTest | 线上多节点 | 深度诊断 | 免费 + 付费 |
+| DevTools Performance | 本地 | 开发期排查 | 免费 |
+| DevTools Network | 本地 | 资源问题 | 免费 |
+| DevTools Memory | 本地 | 内存泄漏 | 免费 |
+| visualizer / source-map-explorer | 构建期 | bundle 分析 | 免费 |
+| size-limit / bundlewatch | CI | 体积回归 | 免费 |
+| Squoosh | 资源 | 图片调试 | 免费 |
+| sharp | 资源 | 自动化处理 | 免费 |
+| web-vitals | RUM | 生产监控 | 免费 |
+| Sentry / Datadog / SpeedCurve | RUM | 企业生产监控 | 付费 |
+| CrUX | RUM | 真实用户基线 | 免费 |
+
+## 小结
+
+- PSI 是最快的"现状如何"答案，CrUX 数据比 Lighthouse 实验室分数更代表用户体验；
+- Lighthouse 在 DevTools / CLI / CI 三个场景都能用，CI 集成是回归防护的标配；
+- WebPageTest 提供 PSI / Lighthouse 之外的深度——多节点、视频、瀑布图；
+- DevTools Performance + Network + Memory 是本地排查三件套，掌握火焰图、Coverage、Heap Snapshot 是基本功；
+- bundle 分析工具（visualizer / source-map-explorer）让"为什么这么大"变得可视化；
+- 真实用户监控（web-vitals + Sentry / Datadog）是补全实验室盲区的唯一办法；
+- 工具不是替代思考——所有数字都要回答"为什么"，否则只是数字游戏。

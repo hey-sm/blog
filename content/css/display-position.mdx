@@ -1,0 +1,557 @@
+---
+title: 显示与定位
+description: display、position、z-index 与层叠上下文
+---
+
+# 显示与定位
+
+CSS 的"元素该如何参与布局"由三个维度决定：
+
+- **`display`**：盒子类型（块 / 行内 / Flex / Grid / ...）
+- **`position`**：定位模式（static / relative / absolute / fixed / sticky）
+- **`z-index` 与层叠上下文**：垂直叠放顺序
+
+三者交织决定了元素在文档流中的角色。本章覆盖这三个维度的全部行为。
+
+## display
+
+```css
+.x { display: block; }
+.x { display: inline; }
+.x { display: inline-block; }
+.x { display: flex; }                         /* 详见 Flexbox */
+.x { display: grid; }                         /* 详见 Grid */
+.x { display: none; }                         /* 完全移除（不参与布局） */
+.x { display: contents; }                     /* 自身消失，子元素提升 */
+.x { display: flow-root; }                    /* 创建新的 BFC */
+```
+
+### 块（block）
+
+- 占据父元素整行
+- 可设置 `width` / `height`
+- 可设置上下左右 margin / padding
+- 默认值：`<div>` / `<p>` / `<h1-6>` / `<section>` 等
+
+### 行内（inline）
+
+- 仅占内容宽度
+- **`width` / `height` 失效**
+- 上下 `margin` / `padding` 不影响布局（视觉可见但不挤压相邻元素）
+- 默认值：`<span>` / `<a>` / `<em>` / `<strong>`
+
+```html
+<span style="margin-top: 100px">无效，相邻元素未受影响</span>
+```
+
+### inline-block
+
+- 像 inline 那样**水平排列**
+- 像 block 那样**接受 width / height / margin / padding**
+- 默认值：`<button>` / `<input>` / `<select>` / `<img>`
+
+```css
+.btn { display: inline-block; padding: 8px 16px; }
+```
+
+### `none` vs `visibility: hidden` vs `opacity: 0`
+
+| 属性 | 占空间 | 触发事件 | 屏幕阅读器 |
+| ---- | ------ | -------- | ---------- |
+| `display: none` | ❌ | ❌ | ❌ |
+| `visibility: hidden` | ✅ | ❌ | ❌ |
+| `opacity: 0` | ✅ | ✅ | ✅ |
+| `aria-hidden="true"` | ✅ | ✅ | ❌ |
+
+```css
+/* 完全移除 */
+.hidden { display: none; }
+
+/* 占位但不可见、不可交互 */
+.invisible { visibility: hidden; }
+
+/* 可交互的"渐隐" */
+.fade { opacity: 0; transition: opacity 200ms; }
+
+/* 屏幕阅读器可见但视觉隐藏（无障碍标签） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+```
+
+#### Tailwind
+
+```html
+<div class="hidden">display: none</div>
+<div class="invisible">visibility: hidden</div>
+<div class="opacity-0">opacity: 0</div>
+<span class="sr-only">仅屏幕阅读器</span>
+```
+
+### `display: contents`
+
+```html
+<ul>
+  <div style="display: contents">
+    <li>A</li>
+    <li>B</li>
+  </div>
+</ul>
+```
+
+`<div>` 自身从布局中消失，但子元素仍参与父级布局——`<li>` 直接被 `<ul>` 当作子。常用于"语义包装但不影响 Flex / Grid 布局"的场景。
+
+### `display: flow-root`
+
+创建新的 BFC（Block Formatting Context），主要用于：
+
+- 阻止 margin 折叠
+- 包含浮动子元素
+
+```css
+.parent { display: flow-root; }               /* 取代老式的 overflow: auto / clearfix */
+```
+
+## position
+
+### `static`（默认）
+
+按正常文档流排版，`top` / `right` / `bottom` / `left` / `z-index` **全部失效**。
+
+### `relative`
+
+依然占据原位置，但视觉上可通过 `top` / `left` 等偏移：
+
+```css
+.x {
+  position: relative;
+  top: 10px;
+  left: 20px;
+}
+```
+
+特点：
+
+- **占位不变**——其他元素不会"补位"
+- 创建新的定位上下文（成为 absolute 子元素的参考系）
+- `z-index` 可生效
+
+### `absolute`
+
+脱离文档流——不占位、相对**最近的非 static 祖先**定位：
+
+```css
+.parent { position: relative; }
+.child {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 100px;
+}
+```
+
+无非 static 祖先时，相对**初始包含块**（视口）定位。
+
+### `fixed`
+
+相对**视口**定位，滚动时位置不变：
+
+```css
+.toolbar {
+  position: fixed;
+  top: 0;
+  inset-inline: 0;                            /* 逻辑属性，等价于 left: 0; right: 0 */
+  z-index: 100;
+}
+```
+
+注意：祖先有 `transform` / `filter` / `perspective` / `contain: paint` 等会创建新包含块，让 `fixed` 子元素相对该祖先而非视口定位——是 sticky header 内的 modal 错位的常见原因。
+
+### `sticky`
+
+混合 relative + fixed——滚动到指定阈值前是 relative，超过后变 fixed：
+
+```css
+.section-header {
+  position: sticky;
+  top: 0;
+  background: white;
+  z-index: 10;
+}
+```
+
+要让 sticky 生效，**必须**：
+
+- 给至少一个方向（`top` / `bottom` / `left` / `right`）赋值
+- 父元素允许溢出（`overflow: visible` 是默认）
+- 父元素的高度大于该 sticky 元素
+
+常见失效原因：祖先 `overflow: hidden` 把粘性效果"剪掉"。
+
+### `inset` 简写
+
+```css
+.x { inset: 0; }                              /* top/right/bottom/left = 0 */
+.x { inset: 10px 20px; }                      /* 上下 / 左右 */
+.x { inset-inline: 0; }                       /* 逻辑左右 */
+.x { inset-block-start: 0; }                  /* 逻辑上 */
+```
+
+`inset: 0` + `position: absolute` 让元素填满父容器：
+
+```css
+.overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+}
+```
+
+#### Tailwind 定位
+
+```html
+<div class="relative">
+  <div class="absolute top-0 right-0">右上角</div>
+  <div class="absolute inset-0 bg-black/50">铺满</div>
+</div>
+
+<header class="sticky top-0 z-10">...</header>
+<div class="fixed inset-x-0 bottom-0">底部固定栏</div>
+```
+
+| Tailwind | CSS |
+| -------- | --- |
+| `relative` / `absolute` / `fixed` / `sticky` / `static` | `position: ...` |
+| `inset-0` / `inset-x-0` / `inset-y-0` | `inset: ...` |
+| `top-0` / `right-4` / 等 | `top: 0; right: 1rem` |
+| `start-0` / `end-0` | 逻辑起 / 终（多语言） |
+| `z-10` / `z-50` / `z-[999]` | `z-index: ...` |
+
+## z-index 与层叠上下文
+
+### z-index 基础
+
+```css
+.a { position: relative; z-index: 1; }
+.b { position: relative; z-index: 2; }        /* 在 .a 之上 */
+```
+
+`z-index` 仅对**已定位元素**（position 不是 static）或 Flex/Grid 子元素生效。
+
+### 层叠上下文（Stacking Context）
+
+不是所有 `z-index` 都直接比较——它们只在**同一个层叠上下文内**比较。理解这一点是解决"`z-index: 9999` 还被遮挡"的关键。
+
+#### 什么会创建新的层叠上下文？
+
+| 触发条件 | 说明 |
+| -------- | ---- |
+| `position` + `z-index` 不为 auto | 经典触发 |
+| `position: fixed` / `sticky` | 自动创建 |
+| `opacity < 1` | 即使 0.99 也会触发 |
+| `transform` / `filter` / `perspective` 不为 none | 触发 |
+| `mix-blend-mode` 不为 normal | 触发 |
+| `isolation: isolate` | **显式**创建（推荐） |
+| `will-change: transform / opacity` | 触发 |
+| `contain: layout / paint` | 触发 |
+
+```css
+/* 经典坑：父元素 opacity 创建上下文，子元素 z-index 被困其中 */
+.modal-bg {
+  opacity: 0.95;                              /* 创建新栈 */
+  z-index: 1;
+}
+.modal {
+  position: fixed;
+  z-index: 9999;                              /* 仍可能被外部 z-index: 2 的元素遮挡 */
+}
+```
+
+#### `isolation: isolate`
+
+显式创建层叠上下文而不带其他副作用：
+
+```css
+.card {
+  isolation: isolate;                         /* 卡片内部的 z-index 不影响外部 */
+  position: relative;
+}
+```
+
+适合"卡片内部需要叠层（hover 浮起）但不希望影响全局"的场景。
+
+### z-index 工程实践
+
+#### 1. 全局 z-index 令牌
+
+```css
+@theme {
+  --z-base:      0;
+  --z-dropdown:  10;
+  --z-sticky:    20;
+  --z-fixed:     30;
+  --z-overlay:   40;
+  --z-modal:     50;
+  --z-popover:   60;
+  --z-tooltip:   70;
+  --z-toast:     80;
+}
+
+.tooltip { z-index: var(--z-tooltip); }
+```
+
+避免直接写魔法数字 `999` / `9999`。
+
+#### 2. 用 Portal 而非高 z-index
+
+复杂场景（modal、tooltip）用 Portal 把元素 render 到 `<body>` 末尾，从根本上回避层叠上下文嵌套问题。详见 [React 高级主题](/react/advanced#portals)。
+
+## 文档流与 BFC
+
+**Block Formatting Context (BFC)** 是块布局的"独立子环境"。BFC 内的元素不与外部互相影响。
+
+#### 创建 BFC 的场景
+
+- `<html>` 根元素
+- `display: flow-root`（推荐）
+- `display: inline-block` / `flex` / `grid`
+- `overflow` 不是 visible
+- `contain: layout` 等
+
+#### BFC 的作用
+
+1. 阻止 margin 折叠
+2. 包含浮动子元素（清除浮动）
+3. 不与外部浮动元素重叠
+
+```css
+/* 父元素阻止子元素 margin 与外部折叠 */
+.box { display: flow-root; }
+```
+
+## visibility 进阶
+
+### `visibility: collapse`
+
+仅在表格行 / 列上：让该行 / 列不显示但保留尺寸（不会"塌陷"导致表格变窄）。
+
+```css
+.hidden-row { visibility: collapse; }
+```
+
+### `content-visibility`（CSS Containment 2）
+
+让浏览器"按需渲染"屏幕外内容：
+
+```css
+.section {
+  content-visibility: auto;                   /* 不在视口内时跳过渲染 */
+  contain-intrinsic-size: 1px 500px;          /* 占位高度 */
+}
+```
+
+对长文章 / 长列表性能巨大提升——浏览器自动跳过滚动屏外的元素的 layout / paint。
+
+## 实战配方
+
+### 居中对齐（绝对定位）
+
+```css
+.center {
+  position: absolute;
+  inset: 0;
+  margin: auto;                               /* 经典：上下左右 inset 0 + margin auto */
+  width: 200px;
+  height: 100px;
+}
+
+/* 现代：transform 居中 */
+.center-2 {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* Flex 父布局居中（最现代） */
+.parent { display: grid; place-items: center; }
+```
+
+### 全屏遮罩
+
+```css
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: var(--z-overlay);
+}
+```
+
+```html
+<div class="fixed inset-0 z-40 bg-black/50"></div>
+```
+
+### 角标
+
+```css
+.badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+}
+
+.parent { position: relative; }
+```
+
+```html
+<div class="relative">
+  <button>...</button>
+  <span class="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full"></span>
+</div>
+```
+
+### 粘性表头
+
+```css
+table { border-collapse: separate; border-spacing: 0; }
+thead th {
+  position: sticky;
+  top: 0;
+  background: white;
+  z-index: 1;
+}
+```
+
+```html
+<table class="border-collapse">
+  <thead>
+    <tr>
+      <th class="sticky top-0 bg-white z-10">Name</th>
+    </tr>
+  </thead>
+</table>
+```
+
+### 居底固定按钮（移动端）
+
+```css
+.cta {
+  position: fixed;
+  inset-inline: 1rem;
+  bottom: env(safe-area-inset-bottom, 1rem);
+  z-index: var(--z-fixed);
+}
+```
+
+```html
+<button class="fixed inset-x-4 bottom-[env(safe-area-inset-bottom,1rem)] z-30">
+  Buy now
+</button>
+```
+
+`env(safe-area-inset-*)` 是 iOS 刘海屏的安全区，避免被 home indicator 遮挡。
+
+## 常见陷阱
+
+### 1. fixed 元素被 transform 父级"困住"
+
+```css
+.parent {
+  transform: translateZ(0);                   /* 创建新的包含块 */
+}
+.child {
+  position: fixed;
+  top: 0;                                     /* 相对 .parent 而非视口！ */
+}
+```
+
+修复：移除 transform，或用 Portal 挂到 `<body>`。
+
+### 2. sticky 失效
+
+```css
+.parent {
+  overflow: hidden;                            /* sticky 无法工作 */
+}
+.child { position: sticky; top: 0; }
+```
+
+修复：父元素改为 `overflow: visible` 或 `overflow: clip`（clip 不剪 sticky）。
+
+### 3. z-index 大战
+
+```css
+.modal { z-index: 9999; }
+.tooltip { z-index: 99999; }
+.dropdown { z-index: 999999; }
+```
+
+修复：
+
+- 把模态、悬浮等通过 Portal 挂到根
+- 用 z-index 令牌（10/20/30 步长）
+- 复杂场景用 `<dialog>` 元素 + `::backdrop`
+
+### 4. absolute 父元素错位
+
+```html
+<div class="overlay">
+  <div class="popup" style="position: absolute; top: 0;">...</div>
+</div>
+```
+
+如果 `.overlay` 没有 `position: relative`，`.popup` 会向上找到更远的祖先定位。
+
+修复：给定位锚加 `position: relative`。
+
+## `<dialog>` 元素：现代模态
+
+HTML5 的 `<dialog>` 现代浏览器全支持，是模态框的语义化方案：
+
+```html
+<dialog id="confirm">
+  <p>Are you sure?</p>
+  <button onclick="confirm.close()">Cancel</button>
+</dialog>
+
+<button onclick="confirm.showModal()">Open</button>
+```
+
+```css
+dialog {
+  border: none;
+  border-radius: 8px;
+  padding: 24px;
+}
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+```
+
+特性：
+
+- `showModal()` 自动占据顶层（top layer），完全不受 z-index / 层叠上下文影响
+- 自带焦点管理与 ESC 关闭
+- `::backdrop` 伪元素是模态背景
+
+是替代手写"全屏遮罩 + 高 z-index"的现代方案。
+
+## 小结
+
+- `display` 决定盒子类型，`position` 决定定位模式，`z-index` 决定垂直叠放；
+- `inline-block` 兼具 inline 排列与 block 尺寸，适合按钮 / 标签等；
+- `display: none` / `visibility: hidden` / `opacity: 0` / `sr-only` 各有适用场景；
+- `position: sticky` 失效多因父元素 overflow 截断；
+- 层叠上下文是 z-index 的"作用域"——父元素 opacity / transform 等都会创建新栈；
+- 复杂模态用 Portal 与 `<dialog>` 替代高 z-index 比拼；
+- `content-visibility: auto` 让长文档自动跳过屏外渲染，性能优化利器。

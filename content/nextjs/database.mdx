@@ -1,0 +1,264 @@
+---
+title: 数据库集成
+description: Prisma / Drizzle ORM 与 Neon / PlanetScale 的 Next.js 最佳集成方案、Server Components 直查与连接管理
+---
+
+# 数据库集成
+
+Next.js 与数据库的集成是 Server Components 最大的实际收益——**你可以在渲染同一处代码中查询数据库，无需 API 层**。
+
+## 战略选择
+
+Next.js 自身不提供 DB，但它与两类方案深度集成：
+
+| 方案 | 主力 ORM | Serverless 友好 | 适用 |
+| ---- | -------- | --------------- | ---- |
+| Neon / Vercel Postgres | Drizzle、Prisma | ✓ 原生 Serverless | 多区域、分支预览 |
+| PlanetScale | Prisma（专用 driver） | ✓ 支持 | MySQL、自动切分 |
+| Supabase | Drizzle、Prisma | ✓ | PostgreSQL + Auth + Realtime |
+| SQLite（Turso） | Drizzle | ✓ Edge 可用 | 轻量、边缘计算 |
+| 自托管 PostgreSQL | Drizzle、Prisma | 需配置 | 完全控制 |
+
+## Prisma 示例
+
+```bash
+pnpm add prisma @prisma/client
+pnpm prisma init --datasource-provider postgresql
+```
+
+```prisma filename="prisma/schema.prisma"
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id       String   @id @default(cuid())
+  email    String   @unique
+  name     String?
+  posts    Post[]
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  published Boolean  @default(false)
+  author    User     @relation(fields: [authorId], references: [id])
+  authorId  String
+  createdAt DateTime @default(now())
+}
+```
+
+### 单例客户端
+
+```ts filename="src/lib/db.ts"
+import 'server-only'
+
+import { PrismaClient } from '@prisma/client'
+
+const globalForPrisma = globalThis as unknown as {
+  prisma: PrismaClient | undefined
+}
+
+export const db = globalForPrisma.prisma ?? new PrismaClient()
+
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+```
+
+`globalThis` 模式防止 dev 模式下热重载创建多个 PrismaClient 实例（消耗连接数）。
+
+### Server Component 中直查
+
+```tsx filename="app/posts/page.tsx"
+import { db } from '@/lib/db'
+
+export default async function PostsPage() {
+  const posts = await db.post.findMany({
+    where: { published: true },
+    include: { author: true },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  return <PostList posts={posts} />
+}
+```
+
+### Prisma + `'use cache'`（Next.js 16）
+
+```tsx filename="lib/data.ts"
+import { db } from '@/lib/db'
+
+export async function getPosts() {
+  'use cache'
+  cacheTag('posts')
+  cacheLife('hours')
+
+  return db.post.findMany({
+    where: { published: true },
+    include: { author: true },
+  })
+}
+```
+
+## Drizzle ORM 示例
+
+```bash
+pnpm add drizzle-orm @neondatabase/serverless
+pnpm add -D drizzle-kit
+```
+
+```ts filename="src/lib/db/schema.ts"
+import { pgTable, text, boolean, timestamp } from 'drizzle-orm/pg-core'
+
+export const posts = pgTable('posts', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  published: boolean('published').default(false),
+  createdAt: timestamp('created_at').defaultNow(),
+})
+```
+
+```ts filename="src/lib/db/index.ts"
+import 'server-only'
+
+import { drizzle } from 'drizzle-orm/neon-http'
+import { neon } from '@neondatabase/serverless'
+
+const sql = neon(process.env.DATABASE_URL!)
+export const db = drizzle(sql)
+```
+
+```tsx filename="app/posts/page.tsx"
+import { db } from '@/lib/db'
+import { posts } from '@/lib/db/schema'
+import { desc, eq } from 'drizzle-orm'
+
+export default async function PostsPage() {
+  const allPosts = await db
+    .select()
+    .from(posts)
+    .where(eq(posts.published, true))
+    .orderBy(desc(posts.createdAt))
+
+  return <PostList posts={allPosts} />
+}
+```
+
+## Serverless 注意事项
+
+### 连接池
+
+Serverless 环境中每个函数调用创建连接 → 导致 DB 连接耗尽。使用提供商的 HTTP 驱动或连接池：
+
+- **Neon**：`@neondatabase/serverless`（HTTP + WebSocket 自管理）
+- **PlanetScale**：`@planetscale/database`（HTTP，全球缓存）
+- **Prisma Accelerate**：Prisma 的连接池中间件
+- **pgBouncer / PgCat**：自己的 PostgreSQL 前池
+
+### `pg` 驱动的问题
+
+传统的 `node-postgres(pg)` 不支持 Edge Runtime。Serverless 环境需要专用驱动（`@vercel/postgres` / `@neondatabase/serverless`）。
+
+## 事务
+
+```tsx filename="app/actions.ts"
+'use server'
+
+import { db } from '@/lib/db'
+import { revalidatePath } from 'next/cache'
+
+export async function transferPoints(from: string, to: string, amount: number) {
+  // Prisma
+  await db.$transaction(async (tx) => {
+    const sender = await tx.user.findUniqueOrThrow({ where: { id: from } })
+    if (sender.points < amount) throw new Error('Insufficient points')
+
+    await tx.user.update({ where: { id: from }, data: { points: { decrement: amount } } })
+    await tx.user.update({ where: { id: to }, data: { points: { increment: amount } } })
+  })
+
+  revalidatePath('/dashboard')
+}
+```
+
+```ts
+// Drizzle
+await db.transaction(async (tx) => {
+  // ...
+})
+```
+
+## 迁移
+
+### Prisma
+
+```bash
+pnpm prisma migrate dev --name init    # 生成迁移文件
+pnpm prisma migrate deploy             # 应用到生产（无迁移冲突）
+```
+
+### Drizzle
+
+```bash
+npx drizzle-kit generate    # 生成迁移 SQL
+npx drizzle-kit migrate     # 应用到数据库
+```
+
+## 陷阱
+
+### 开发阶段热重载导致连接数爆炸
+
+Prisma: 使用 `globalThis` 缓存（见上文）。否则每次 HMR → 新 PrismaClient → 新连接 → 100 个连接用完。
+
+### 忘记 `'server-only'`
+
+```ts
+// ✗
+export const db = new PrismaClient()
+```
+
+客户端组件中 import `db` → 完整 Prisma 代码被打包进浏览器 bundle → `window is not defined` 错误。
+
+```ts
+import 'server-only'    // ✓ 守卫
+```
+
+### 在 Server Component 中混合 ORM fetch 与普通 fetch 的事务
+
+Prisma 事务 = 数据库事务，`fetch` = HTTP 事务。两者不是同一条连接，回滚不能跨边界。如果需要在一次操作中兼顾 ORM 与外部 API，考虑 saga pattern 或用事务 ID 协调。
+
+### 生产机密中的数据库 URL
+
+`DATABASE_URL` 在 build 时内联，包含密码。部署日志中可能打印该值。Neon 建议使用 branch-based URL 或在 CI 中使用不同的临时数据库。
+
+### N+1 查询
+
+```tsx
+// N+1: 每个 post 都触发一次 author 查询
+const posts = await db.post.findMany()
+for (const post of posts) {
+  const author = await db.user.findUnique({ where: { id: post.authorId } })
+}
+```
+
+`Prisma: include` 或 `Drizzle: relations + with` 可以在一条 SQL 中获取关联数据：
+
+```ts
+const posts = await db.post.findMany({
+  include: { author: true },   // 一次 SQL JOIN
+})
+```
+
+## 小结
+
+- Prisma 和 Drizzle 是 Next.js 生态的两大 ORM，PostgreSQL（Neon / PlanetScale）最主流；
+- Server Components 中直查 DB 消除了 API 层，调用路径 = 浏览器 → Server → DB；
+- Serverless 需要 HTTP 驱动（Neon / PlanetScale / Prisma Accelerate），避免传统 TCP pool；
+- `'server-only'` + `globalThis` 缓存防止客户端泄漏与连接耗尽；
+- 迁移自动化为 Prisma: `migrate deploy`，Drizzle: `drizzle-kit migrate`。

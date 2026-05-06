@@ -1,0 +1,247 @@
+---
+title: 并行与拦截路由
+description: "@slot 并行路由与 (.)/(..) 拦截路由的语法、Modal 模式实现与路由状态管理"
+---
+
+# 并行与拦截路由
+
+并行路由（Parallel Routes）和拦截路由（Intercepting Routes）是 App Router 的两个高级路由特性。它们通常**配合使用**来实现 Modal、Dashboard 小组件等复杂 UI 模式。
+
+## 并行路由 —— `@slot`
+
+并行路由允许在同一个 layout 中渲染多个 slot（每个 slot 是一个独立的"子路由子树"）：
+
+```text
+app/
+├── layout.tsx            ← 接收 @analytics 和 @team 作为 props
+├── @analytics/
+│   └── page.tsx          → slot "analytics"
+├── @team/
+│   └── page.tsx          → slot "team"
+└── page.tsx              → children slot
+```
+
+### layout 接收 slot props
+
+```tsx filename="app/layout.tsx"
+export default function DashboardLayout({
+  children,
+  analytics,
+  team,
+}: {
+  children: React.ReactNode
+  analytics: React.ReactNode
+  team: React.ReactNode
+}) {
+  return (
+    <div className="grid grid-cols-3 gap-4">
+      <aside className="col-span-1">{team}</aside>
+      <main className="col-span-2">
+        {children}
+        <section className="mt-8">{analytics}</section>
+      </main>
+    </div>
+  )
+}
+```
+
+每个 `@folder` 会被传入 layout 作为对应的 prop（去掉 `@` 前缀）。`page.tsx` 会自动作为 `children` prop。
+
+### 独立导航
+
+```text
+app/
+├── layout.tsx
+├── @analytics/
+│   ├── page.tsx        → / 时渲染
+│   └── pageviews/
+│       └── page.tsx
+└── @team/
+    ├── page.tsx
+    └── settings/
+        └── page.tsx
+```
+
+不同 slot 可以有**独立路由状态**：
+
+```tsx href="app/@team/settings/page.tsx"
+import Link from 'next/link'
+
+export default function TeamSettings() {
+  return (
+    <div>
+      <h3>Team Settings</h3>
+      <Link href="/">Back</Link>
+    </div>
+  )
+}
+```
+
+访问 `/` 时，如果某个 slot 的当前路由不匹配（比如之前导航到了 `/` 但 `@analytics` 在 `/pageviews`），Next.js 渲染该 slot 的 `default.tsx`。
+
+## `default.tsx` —— 并行路由的回退
+
+```tsx filename="app/@analytics/default.tsx"
+export default function DefaultAnalytics() {
+  return <div>Select a metric to view analytics</div>
+}
+```
+
+- 硬导航（首次加载）时：不匹配的子路由展示 `default.tsx`
+- 软导航（客户端导航）时：不匹配的子路由**保持之前的渲染内容**
+
+## 拦截路由 —— `(.)` / `(..)`
+
+拦截路由**截获**本该触发全页导航的 URL，改为在当前布局的 slot 中渲染。
+
+语法：
+
+| 前缀 | 匹配层级 | 示例（当前在 `/feed`） |
+| ---- | -------- | ---------------------- |
+| `(.)` | 同层级 | `(.)photo` → 匹配 `/feed/photo` |
+| `(..)` | 上一层级 | `(..)photo` → 匹配 `/photo` |
+| `(..)(..)` | 上两级 | `(..)(..)photo` → 匹配根下的 `/photo` |
+| `(...)` | 根层级 | `(...)photo` → 匹配 `app/photo` |
+
+## 经典模式：Modal
+
+```text
+app/
+├── layout.tsx
+├── @modal/
+│   ├── default.tsx              ← 无 modal 时返回 null
+│   └── (.)photo/
+│       └── [id]/
+│           └── page.tsx         ← 拦截：渲染 modal
+├── photo/
+│   └── [id]/
+│       └── page.tsx             ← 真实页面（直接访问时）
+└── page.tsx
+```
+
+### layout
+
+```tsx filename="app/layout.tsx"
+export default function RootLayout({
+  children,
+  modal,
+}: {
+  children: React.ReactNode
+  modal: React.ReactNode
+}) {
+  return (
+    <html lang="zh-CN">
+      <body>
+        {children}
+        {modal}
+      </body>
+    </html>
+  )
+}
+```
+
+### modal default
+
+```tsx filename="app/@modal/default.tsx"
+export default function Default() {
+  return null                     // 没有需要展示的 modal
+}
+```
+
+### 拦截的 photo page
+
+```tsx filename="app/@modal/(.)photo/[id]/page.tsx"
+'use client'
+
+import { useRouter } from 'next/navigation'
+import type { Photo } from '@/types'
+
+export default function PhotoModal({ photo }: { photo: Photo }) {
+  const router = useRouter()
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/50"
+      onClick={() => router.back()}
+    >
+      <div className="mx-auto mt-20 max-w-2xl rounded-lg bg-white p-4">
+        <img src={photo.url} alt={photo.title} />
+        <h2>{photo.title}</h2>
+      </div>
+    </div>
+  )
+}
+```
+
+### 真实 photo page（直接访问或刷新后）
+
+```tsx filename="app/photo/[id]/page.tsx"
+export default async function PhotoPage({
+  params,
+}: {
+  params: Promise<{ id: string }>
+}) {
+  const { id } = await params
+  const photo = await getPhoto(id)
+
+  return (
+    <main className="mx-auto max-w-4xl py-8">
+      <img src={photo.url} alt={photo.title} />
+      <h1>{photo.title}</h1>
+      <p>{photo.description}</p>
+    </main>
+  )
+}
+```
+
+### 流程总结
+
+```text
+场景 A：在 feed 页点击 /photo/123
+  → (.)photo/[id]/page.tsx 拦截
+  → 在 @modal 中弹出 modal
+  → feed 页保持在后面
+  → URL 变为 /photo/123
+
+场景 B：直接访问 /photo/123
+  → 没有上下文可拦截
+  → 渲染 photo/[id]/page.tsx（完整页面）
+```
+
+## 陷阱
+
+### 硬导航时 slot 不自动匹配
+
+如果页面刷新时 URL 是 `/photo/123`，`@modal` slot 会尝试渲染 `@modal/photo/[id]/page.tsx`——但如果没有 `default.tsx` 且无匹配路由，会 404。
+
+确保：
+- 所有 `@slot` 都有 `default.tsx`
+- 拦截路由的对应真实路由提供完整页面
+
+### 不能在同一 layout 中同时使用 `route.ts` 与 slot page
+
+如果某个 slot 的路由匹配到了 `route.ts`，返回的是 `Response` 而不是组件。这在 slot 中几乎不会用到，但要注意路径重叠。
+
+### 不要过度嵌套
+
+```text
+# ✗ 反模式：3 层以上 slot 嵌套
+app/
+├── @a/
+│   └── @b/
+│       └── @c/
+│           └── page.tsx
+```
+
+并行路由的典型用途是**单层 slot + modal**或**侧边栏/面板**。超过 2 层的 slot 嵌套难以推理和维护。
+
+### 拦截路由与 `Link` 的软导航
+
+拦截路由只在**客户端导航**时生效。如果用户在新标签页中用 `Cmd+Click` 打开链接，浏览器发起了硬导航——拦截路由不触发，显示的是真实 page。
+
+## 小结
+
+- 并行路由通过 `@folder` 在 layout 中渲染多个独立路由子树；
+- 每个 `@slot` 都需要 `default.tsx` 作为失配时的回退；
+- 拦截路由通过 `(.)` / `(..)` 截获同级/上级的导航，实现 modal 覆盖；
+- 经典模式：`@modal` + `(.)photo` 拦截 → Modal UI，`photo/` 真实 page → 直接访问的完整页面。

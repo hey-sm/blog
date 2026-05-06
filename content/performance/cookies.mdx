@@ -1,0 +1,466 @@
+---
+title: Cookie 性能
+description: Cookie 大小限制、数量控制、Domain/Path 影响、SameSite 与替代方案
+---
+
+# Cookie 性能
+
+> "Cookie size should be less than 4096 bytes" / "Keep the cookie count less than 20"（roadmap 条目）
+
+Cookie 看似只是几个字符串，但每一个 Cookie 都会**附在每一个 HTTP 请求上**。一个网页可能加载 100+ 资源（HTML / CSS / JS / 图片 / API）——如果 Cookie 不加节制，仅 Cookie 头部就可能多传输数 MB 数据。本章覆盖 Cookie 的传输成本、限额、Domain/Path 优化、SameSite 与现代替代方案。
+
+## Cookie 的传输成本
+
+```text
+浏览器请求 https://example.com/api/data：
+  GET /api/data HTTP/1.1
+  Host: example.com
+  Cookie: session=abc; user=123; pref=zh; theme=dark; ...
+                ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+            每次请求都附带，无法压缩到极致（HPACK 部分压缩）
+```
+
+### 实际影响（实测）
+
+某电商网站 Cookie ~ 2 KB，单页面加载 80 个同源资源：
+
+```text
+Cookie 流量 = 2 KB × 80 = 160 KB（仅请求头部）
+```
+
+慢网用户的影响：
+
+| 网络 | 上行带宽 | 160 KB 上传时间 |
+| ---- | -------- | -------------- |
+| Slow 3G | 50 KB/s | 3.2 s |
+| 4G | 500 KB/s | 0.32 s |
+| WiFi | 1 MB/s+ | < 0.16 s |
+
+> 移动用户的**上行带宽通常远小于下行**——这是 Cookie 性能问题被低估的原因。
+
+## 浏览器限额
+
+| 限制项 | 浏览器规范 | 实际通行值 |
+| ------ | ---------- | ---------- |
+| 单 Cookie 大小 | RFC 6265 推荐 4096 字节 | 4 KB |
+| 单域 Cookie 数量 | RFC 推荐 ≥ 50 | 50–180（不同浏览器） |
+| 单浏览器 Cookie 数量 | 推荐 ≥ 3000 | 3000+ |
+| 单 HTTP 请求 Cookie 总大小 | 服务器通常限 8 KB header | 8 KB |
+
+超过限额：
+
+- 单 Cookie > 4096 → 多数浏览器忽略（不存）
+- 单域 > 数量上限 → 旧 Cookie 被淘汰
+- 总头部 > 8 KB → 服务器返回 `431 Request Header Fields Too Large`
+
+### 实际遇到的问题
+
+第三方脚本（埋点 / 广告）会写入大量 Cookie：
+
+```text
+访问一个新闻网站：
+  域 1（自身）：5 个 Cookie，总 ~ 1 KB
+  域 2（GA）：2 个 Cookie，~ 200 B
+  域 3（Facebook Pixel）：3 个，~ 300 B
+  域 4（广告）：10+ 个，~ 2 KB
+  ...
+
+总计：30+ 个 Cookie，~ 5 KB
+```
+
+每次访问每个域的资源都附带对应域的 Cookie——总流量浪费惊人。
+
+## 优化策略
+
+### 1. 减少 Cookie 数量
+
+把多个相关字段**合并**到一个 Cookie：
+
+```js
+// ❌ 多个独立 Cookie
+document.cookie = 'theme=dark'
+document.cookie = 'lang=zh-CN'
+document.cookie = 'sidebar=collapsed'
+document.cookie = 'currency=CNY'
+
+// ✅ 合并为一个
+document.cookie = `prefs=${JSON.stringify({
+  theme: 'dark', lang: 'zh-CN', sidebar: 'collapsed', currency: 'CNY'
+})}`
+
+// ✅ 或紧凑格式
+document.cookie = 'prefs=t.dark|l.zh|s.col|c.CNY'
+```
+
+### 2. 减少 Cookie 体积
+
+会话标识用**短 ID 而非完整数据**：
+
+```js
+// ❌ 把完整用户信息塞进 Cookie
+document.cookie = `user=${JSON.stringify({
+  id: 12345, name: '张三', email: 'zhang@example.com',
+  role: 'admin', avatar: '/uploads/avatars/12345.jpg', ...
+})}`
+
+// ✅ 只存 session ID，服务端按需查
+document.cookie = 'sid=abc123def456'
+// 服务端：sid → 查询数据库 / Redis 拿到完整信息
+```
+
+### 3. 不向静态资源域发送 Cookie
+
+把静态资源放到**不同域名**——浏览器只对同域发送 Cookie：
+
+```text
+应用：app.example.com           ──► Cookie 附带
+静态：static.example.com        ──► 无 Cookie
+API：api.example.com            ──► Cookie 附带（必要）
+```
+
+或更彻底地用**完全不同的域**（cookieless domain）：
+
+```text
+应用：example.com               ──► Cookie 附带
+CDN：cdn.example-static.io      ──► 完全无 Cookie（不同顶级域）
+```
+
+收益：80+ 个静态资源请求都不带 Cookie。
+
+### 4. Domain 设置最小化
+
+```js
+// ❌ 设置在父域，所有子域都附带
+document.cookie = 'session=abc; domain=.example.com'
+// → app.example.com、cdn.example.com、blog.example.com 都附带
+
+// ✅ 仅设置在当前域
+document.cookie = 'session=abc'   // 默认仅 app.example.com
+```
+
+子域共享 Cookie 仅在**真正需要 SSO** 时才用。
+
+### 5. Path 限定
+
+```js
+// 仅 /api 路径下的请求附带 Cookie
+document.cookie = 'apitoken=xyz; path=/api'
+
+// 主域路径不受影响
+fetch('/static/main.js')   // 无 cookie
+fetch('/api/data')         // 附带 apitoken
+```
+
+适合分割不同业务的会话。
+
+### 6. 用 Storage 替代 Cookie
+
+许多场景不需要"每次请求都带"——只要客户端能读：
+
+| 数据类型 | 推荐存储 |
+| -------- | -------- |
+| 会话 ID（需服务端验证） | Cookie + HttpOnly |
+| UI 偏好（主题 / 语言） | localStorage |
+| 一次性表单状态 | sessionStorage |
+| 大量结构化数据 | IndexedDB |
+| 离线数据 | IndexedDB / Cache API |
+
+```js
+// ❌ 主题用 Cookie：每个请求附带
+document.cookie = 'theme=dark'
+
+// ✅ 主题用 localStorage：仅客户端读取
+localStorage.setItem('theme', 'dark')
+```
+
+### 7. 第三方 Cookie 治理
+
+```html
+<!-- 第三方脚本可能写入大量 Cookie -->
+<script src="https://example.com/analytics.js"></script>
+```
+
+策略：
+
+- **审计**：用 DevTools → Application → Cookies 列出每个域的 Cookie
+- **延迟加载**：不必要的第三方延后加载（详见 [JavaScript 优化](/performance/javascript#第三方脚本性能)）
+- **首次方代理**：通过自己的服务器代理第三方调用，避免暴露第三方 Cookie
+
+## Cookie 属性详解
+
+```http
+Set-Cookie: name=value; Domain=example.com; Path=/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax
+```
+
+| 属性 | 默认 | 推荐值 | 影响 |
+| ---- | ---- | ------ | ---- |
+| `Domain` | 当前域 | 当前域（不指定） | 限制传播 |
+| `Path` | `/` | 视场景 | 限制路径 |
+| `Max-Age` / `Expires` | 会话级 | 显式设置 | 持久性 |
+| `Secure` | 否 | 必须启用 | 仅 HTTPS |
+| `HttpOnly` | 否 | 会话 cookie 启用 | 禁 JS 读取（防 XSS） |
+| `SameSite` | `Lax` | `Lax` 或 `Strict` | 跨站防御（CSRF） |
+
+### Secure：性能的隐性影响
+
+```http
+Set-Cookie: session=abc; Secure
+```
+
+`Secure` 只是说"仅 HTTPS 时发送"。但与性能相关的**隐性收益**：
+
+- 强制 HTTPS 后才能用 HTTP/2 / HTTP/3
+- 避免在不安全连接上的明文 cookie 暴露
+
+### HttpOnly：减少 JS 副本
+
+```http
+Set-Cookie: session=abc; HttpOnly
+```
+
+`HttpOnly` 让 JS 完全访问不到这个 Cookie。看似与性能无关，但：
+
+- 避免 JS 错误地把 cookie 复制到 LocalStorage / 内存
+- 防 XSS 窃取 → 不需要轮换会话 → 避免大量"重新登录"流量
+
+### SameSite：现代默认
+
+| 值 | 行为 |
+| -- | ---- |
+| `Strict` | 仅同站请求附带（最严） |
+| `Lax`（2024 年默认） | 同站 + 顶层导航附带（推荐） |
+| `None` | 所有请求附带（需配 `Secure`） |
+
+```http
+Set-Cookie: session=abc; SameSite=Lax; Secure
+```
+
+`SameSite=Lax` 防大部分 CSRF 攻击，性能上**减少跨站请求误带 Cookie** 的浪费。
+
+## Cookie 的 HTTP/2 HPACK 压缩
+
+HTTP/2 / HTTP/3 用 HPACK / QPACK 压缩头部——**重复的 Cookie 名只传一次**：
+
+```text
+HTTP/1.1：每次请求都完整传 Cookie 字符串
+HTTP/2：第一次请求完整传，后续请求传"index"（几字节）
+```
+
+这意味着：
+
+- HTTP/1.1 时代 Cookie 优化收益巨大
+- HTTP/2 / 3 时代收益降低，但仍存在（首请求 + 跨连接不复用时）
+
+但优化策略不变——**减少 Cookie 体积与数量永远是好事**。
+
+## SSR / API 中的 Cookie 处理
+
+### Next.js App Router
+
+```ts
+// app/api/data/route.ts
+import { cookies } from 'next/headers'
+
+export async function GET() {
+  const cookieStore = await cookies()
+  const session = cookieStore.get('session')
+
+  // 设置 Cookie
+  cookieStore.set('lastVisit', new Date().toISOString(), {
+    maxAge: 60 * 60 * 24,
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax'
+  })
+
+  return Response.json({ ok: true })
+}
+```
+
+### Nuxt 3
+
+```ts
+// server/api/auth.ts
+export default defineEventHandler((event) => {
+  const session = getCookie(event, 'session')
+  setCookie(event, 'lastVisit', new Date().toISOString(), {
+    maxAge: 60 * 60 * 24,
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax'
+  })
+  return { ok: true }
+})
+```
+
+### Express
+
+```js
+import cookieParser from 'cookie-parser'
+
+app.use(cookieParser())
+
+app.get('/api/data', (req, res) => {
+  const session = req.cookies.session
+  res.cookie('lastVisit', Date.now(), {
+    httpOnly: true, secure: true, sameSite: 'lax'
+  })
+  res.json({ ok: true })
+})
+```
+
+## 现代替代：`Storage Access API` 与 `Partitioned Cookies`
+
+### CHIPS（Partitioned Cookies）
+
+> 第三方 Cookie 按"嵌入站点"分区——同一第三方在不同主站点下用不同 Cookie。
+
+```http
+Set-Cookie: thirdparty=abc; SameSite=None; Secure; Partitioned
+```
+
+收益：第三方追踪用户跨站行为变难，浏览器还可以**主动清理**特定主站点下的第三方 Cookie。
+
+### `Storage Access API`
+
+第三方 iframe 显式向用户请求"存储访问权"：
+
+```js
+// 在第三方 iframe 中
+await document.requestStorageAccess()
+// 用户授权后才能读写第一方 Cookie
+```
+
+适合：跨站登录、跨站 SSO 等合法场景。
+
+### 服务端会话 + `Cache-Control: private`
+
+不依赖 Cookie 的另一种做法：
+
+```http
+# 个性化 HTML 走 CDN，但加 Vary: Cookie
+HTTP/1.1 200 OK
+Cache-Control: private, max-age=0
+Vary: Cookie
+```
+
+CDN 按 Cookie 维度分桶缓存（小心爆炸）。一般用于轻度个性化（夜间模式之类）。
+
+## 监控 Cookie 性能
+
+### DevTools Application 面板
+
+DevTools → Application → Cookies → 选择域，查看：
+
+- 总数量
+- 单 Cookie 大小（Name + Value）
+- 总大小
+
+### Network 面板查看实际传输
+
+DevTools → Network → 选某请求 → Headers → Request Headers：
+
+```http
+Cookie: session=abc...; user=...; theme=dark; ...
+```
+
+复制粘贴看长度即知道每个请求被 Cookie 占多少字节。
+
+### 监控脚本
+
+```js
+// 计算当前页 Cookie 总大小
+const totalSize = document.cookie.length
+console.log(`Cookie total: ${totalSize} bytes`)
+
+// 拆分到每个 Cookie
+document.cookie.split('; ').forEach(c => {
+  const [name, value] = c.split('=')
+  console.log(`${name}: ${value.length} bytes`)
+})
+```
+
+### Lighthouse 审计
+
+| 项 | 含义 |
+| -- | ---- |
+| Avoid an excessive DOM size | 大 DOM 间接增加请求 → Cookie 流量翻倍 |
+| Use HTTP/2 | HPACK 减轻 Cookie 流量 |
+
+Lighthouse 没有专门的 Cookie 大小审计——需自己检查。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 把完整用户信息塞 Cookie | 每次请求多传 KB | 只存 session ID |
+| 写在 `domain=.example.com` | 子域全部附带 | 默认（不设 domain） |
+| 静态资源同主域 | 资源请求附带 cookie | 拆 cookieless domain |
+| Cookie 存主题 / 语言 | 每次请求都带 | 用 localStorage |
+| 第三方脚本 Cookie 不审计 | 隐性流量增加 | DevTools 定期审计 |
+| 不设 `Secure` / `HttpOnly` | 安全 + 性能受损 | 必须显式设置 |
+| `SameSite=None` 默认全用 | 跨站请求误带 | `Lax` 是大多数场景默认 |
+| 单 Cookie > 4096 字节 | 浏览器忽略 | 拆分或转存 |
+
+## 与会话管理的取舍
+
+### 传统：Server Session + Cookie
+
+```text
+客户端 ──Cookie: sid=abc──► 服务器
+                            │
+                            ├─► Redis 查 sid=abc → 用户信息
+                            └─► 处理业务
+```
+
+优点：Cookie 体积小（仅 sid）。
+缺点：服务器需要会话存储。
+
+### 现代：JWT + Cookie 或 Authorization 头
+
+```text
+客户端 ──Cookie/Header: jwt=eyJ...──► 服务器
+                                       │
+                                       └─► 验证签名 → 用户信息
+```
+
+优点：无状态（无服务器存储）。
+缺点：JWT 通常 200-500 字节，比 sid 大。
+
+### Cookie vs Authorization 头
+
+| 维度 | Cookie | Authorization 头 |
+| ---- | ------ | ---------------- |
+| 自动附带 | ✅（同域） | ❌（需 JS 设置） |
+| 静态资源附带 | ✅（误传） | ❌ |
+| XSS 防护 | `HttpOnly` 可禁 JS 读 | JS 必须能读，难 HttpOnly |
+| CSRF 风险 | 有（需 SameSite） | 低 |
+| HPACK 压缩 | 部分 | 部分 |
+
+**实践**：会话标识用 Cookie + HttpOnly + SameSite=Lax；API token（如 OAuth）用 Authorization 头。
+
+## 框架预设值
+
+### Next.js / Nuxt 默认 Cookie 设置
+
+```ts
+// 框架默认行为
+{
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax',
+  path: '/'
+}
+```
+
+直接用即可，不要降级。
+
+## 小结
+
+- Cookie 在每次请求中附带，每 KB 都是上行流量浪费——单页面 100+ 资源时影响显著；
+- 把 UI 偏好、缓存数据等"不需要服务端验证"的数据放 localStorage / IndexedDB；
+- 静态资源用 cookieless domain（不同子域或不同顶级域）能让大量请求免传 Cookie；
+- 单 Cookie 控制 < 1 KB，单域 Cookie 数量 < 10，总头部 < 4 KB 是健康基线；
+- HTTP/2 / HPACK 减轻 Cookie 流量但不消除——优化策略仍然有效；
+- 必设 `Secure` + `HttpOnly` + `SameSite=Lax`，是性能与安全的双重收益；
+- 第三方 Cookie 是被低估的流量黑洞，定期审计 + Partitioned Cookies 是治理路径。

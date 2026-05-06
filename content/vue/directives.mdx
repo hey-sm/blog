@@ -1,0 +1,542 @@
+---
+title: 指令系统
+description: v-if、v-show、v-for、v-on、v-model 等核心指令详解
+---
+
+# 指令系统
+
+Vue 指令是带有 `v-` 前缀的特殊属性，用于在模板中声明式地绑定 DOM 行为。
+
+## v-if / v-else-if / v-else：条件渲染
+
+`v-if` 根据条件**真正地**渲染或销毁元素：
+
+```vue filename="components/UserStatus.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+type Status = 'loading' | 'success' | 'error'
+const status = ref<Status>('loading')
+</script>
+
+<template>
+  <div v-if="status === 'loading'">
+    Loading...
+  </div>
+  <div v-else-if="status === 'success'">
+    Success!
+  </div>
+  <div v-else>
+    Error occurred
+  </div>
+</template>
+```
+
+### `<template>` 分组
+
+当需要切换多个元素时，使用 `<template>` 包裹（不会渲染额外节点）：
+
+```vue
+<template>
+  <template v-if="isLoggedIn">
+    <h1>Welcome back!</h1>
+    <p>Your dashboard</p>
+    <button>Logout</button>
+  </template>
+  <template v-else>
+    <h1>Please login</h1>
+    <button>Login</button>
+  </template>
+</template>
+```
+
+## v-show：显示/隐藏
+
+`v-show` 通过 CSS `display` 属性切换显示：
+
+```vue filename="components/Modal.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const isVisible = ref(false)
+</script>
+
+<template>
+  <div v-show="isVisible" class="modal">
+    Modal Content
+  </div>
+</template>
+```
+
+编译为：
+
+```html
+<div style="display: none;" class="modal">
+  Modal Content
+</div>
+```
+
+### v-if vs v-show
+
+| 特性 | v-if | v-show |
+| ---- | ---- | ------ |
+| 渲染方式 | 条件为真时才渲染 | 始终渲染，切换 display |
+| 切换开销 | 高（销毁/重建） | 低（CSS 切换） |
+| 初始开销 | 低（惰性） | 高（总是渲染） |
+| 生命周期 | 触发 mounted/unmounted | 不触发 |
+| 适用场景 | 不频繁切换 | 频繁切换 |
+
+```vue
+<template>
+  <!-- ✅ 不频繁切换：使用 v-if -->
+  <AdminPanel v-if="isAdmin" />
+  
+  <!-- ✅ 频繁切换：使用 v-show -->
+  <Tooltip v-show="isHovered" />
+</template>
+```
+
+## v-for：列表渲染
+
+`v-for` 基于数组或对象渲染列表：
+
+### 遍历数组
+
+```vue filename="components/TodoList.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+interface Todo {
+  id: number
+  text: string
+  done: boolean
+}
+
+const todos = ref<Todo[]>([
+  { id: 1, text: 'Learn Vue', done: false },
+  { id: 2, text: 'Build App', done: false }
+])
+</script>
+
+<template>
+  <ul>
+    <li v-for="(todo, index) in todos" :key="todo.id">
+      {{ index + 1 }}. {{ todo.text }}
+    </li>
+  </ul>
+</template>
+```
+
+语法：`v-for="(item, index) in items"`
+
+### 遍历对象
+
+```vue
+<script setup lang="ts">
+const user = {
+  name: 'Alice',
+  age: 25,
+  email: 'alice@example.com'
+}
+</script>
+
+<template>
+  <ul>
+    <li v-for="(value, key, index) in user" :key="key">
+      {{ index }}. {{ key }}: {{ value }}
+    </li>
+  </ul>
+</template>
+```
+
+语法：`v-for="(value, key, index) in object"`
+
+### 遍历数字范围
+
+```vue
+<template>
+  <span v-for="n in 10" :key="n">{{ n }}</span>
+  <!-- 渲染：1 2 3 4 5 6 7 8 9 10 -->
+</template>
+```
+
+### key 属性
+
+**`key` 是必需的**，用于 Vue 识别节点身份，优化 diff 算法：
+
+```vue
+<!-- ❌ 没有 key：可能导致状态错乱 -->
+<div v-for="item in items">
+  {{ item.text }}
+</div>
+
+<!-- ✅ 使用唯一 key -->
+<div v-for="item in items" :key="item.id">
+  {{ item.text }}
+</div>
+```
+
+**key 的选择**：
+- ✅ 使用唯一 ID（`item.id`）
+- ❌ 不要使用索引（`index`）作为 key（除非列表静态且不重排）
+- ❌ 不要使用随机数或时间戳
+
+```vue
+<!-- ❌ 错误：索引作为 key -->
+<div v-for="(item, index) in items" :key="index">
+  <input v-model="item.text">
+</div>
+<!-- 删除第一项时，所有输入框的值会错位 -->
+
+<!-- ✅ 正确：唯一 ID 作为 key -->
+<div v-for="item in items" :key="item.id">
+  <input v-model="item.text">
+</div>
+```
+
+### v-for 与 v-if
+
+**不要在同一元素上同时使用 `v-if` 和 `v-for`**（v-if 优先级更高）：
+
+```vue
+<!-- ❌ 错误：v-if 无法访问 v-for 的变量 -->
+<li v-for="todo in todos" v-if="todo.done" :key="todo.id">
+  {{ todo.text }}
+</li>
+
+<!-- ✅ 方案1：使用计算属性过滤 -->
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+
+const todos = ref([...])
+const doneTodos = computed(() => todos.value.filter(t => t.done))
+</script>
+
+<template>
+  <li v-for="todo in doneTodos" :key="todo.id">
+    {{ todo.text }}
+  </li>
+</template>
+
+<!-- ✅ 方案2：使用 <template> 包裹 -->
+<template>
+  <template v-for="todo in todos" :key="todo.id">
+    <li v-if="todo.done">
+      {{ todo.text }}
+    </li>
+  </template>
+</template>
+```
+
+## v-on：事件监听
+
+`v-on` 或简写 `@` 监听 DOM 事件：
+
+```vue filename="components/Counter.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++
+}
+
+function add(n: number) {
+  count.value += n
+}
+</script>
+
+<template>
+  <!-- 完整语法 -->
+  <button v-on:click="increment">+1</button>
+  
+  <!-- 简写（推荐） -->
+  <button @click="increment">+1</button>
+  
+  <!-- 内联表达式 -->
+  <button @click="count++">+1</button>
+  
+  <!-- 传递参数 -->
+  <button @click="add(5)">+5</button>
+  
+  <!-- 访问原始事件 -->
+  <button @click="(event) => console.log(event)">Log Event</button>
+  <button @click="add(5, $event)">+5 with Event</button>
+</template>
+```
+
+### 事件修饰符
+
+```vue
+<template>
+  <!-- .stop：阻止事件冒泡 -->
+  <button @click.stop="handler">Stop Propagation</button>
+  
+  <!-- .prevent：阻止默认行为 -->
+  <form @submit.prevent="onSubmit">Submit</form>
+  
+  <!-- .self：只在事件目标是元素自身时触发 -->
+  <div @click.self="handler">Only Self</div>
+  
+  <!-- .capture：使用捕获模式 -->
+  <div @click.capture="handler">Capture</div>
+  
+  <!-- .once：只触发一次 -->
+  <button @click.once="handler">Once</button>
+  
+  <!-- .passive：提升移动端滚动性能 -->
+  <div @scroll.passive="onScroll">Scroll</div>
+  
+  <!-- 链式调用 -->
+  <form @submit.prevent.stop="onSubmit">Submit</form>
+</template>
+```
+
+### 按键修饰符
+
+```vue
+<template>
+  <!-- 特定按键 -->
+  <input @keyup.enter="submit">
+  <input @keyup.tab="nextField">
+  <input @keyup.delete="remove">
+  <input @keyup.esc="cancel">
+  <input @keyup.space="toggle">
+  <input @keyup.up="moveUp">
+  <input @keyup.down="moveDown">
+  <input @keyup.left="moveLeft">
+  <input @keyup.right="moveRight">
+  
+  <!-- 系统修饰键 -->
+  <input @keyup.ctrl="handler">
+  <input @keyup.alt="handler">
+  <input @keyup.shift="handler">
+  <input @keyup.meta="handler">  <!-- Mac: Cmd, Windows: Win -->
+  
+  <!-- 组合键 -->
+  <input @keyup.ctrl.enter="submit">
+  <button @click.ctrl="handler">Ctrl + Click</button>
+  
+  <!-- .exact：精确匹配 -->
+  <button @click.ctrl.exact="handler">只有 Ctrl</button>
+  <button @click.exact="handler">没有修饰键</button>
+</template>
+```
+
+### 鼠标按键修饰符
+
+```vue
+<template>
+  <button @click.left="handler">左键</button>
+  <button @click.right="handler">右键</button>
+  <button @click.middle="handler">中键</button>
+</template>
+```
+
+## v-model：双向绑定
+
+`v-model` 在表单元素上创建双向数据绑定：
+
+```vue filename="components/Form.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const text = ref('')
+const checked = ref(false)
+const selected = ref('')
+const multiSelect = ref<string[]>([])
+</script>
+
+<template>
+  <!-- 文本输入 -->
+  <input v-model="text" type="text">
+  <p>{{ text }}</p>
+  
+  <!-- 复选框 -->
+  <input v-model="checked" type="checkbox">
+  <p>{{ checked }}</p>
+  
+  <!-- 单选框 -->
+  <input v-model="selected" type="radio" value="A"> A
+  <input v-model="selected" type="radio" value="B"> B
+  
+  <!-- 下拉框 -->
+  <select v-model="selected">
+    <option value="A">Option A</option>
+    <option value="B">Option B</option>
+  </select>
+  
+  <!-- 多选下拉框 -->
+  <select v-model="multiSelect" multiple>
+    <option value="A">A</option>
+    <option value="B">B</option>
+    <option value="C">C</option>
+  </select>
+  
+  <!-- 文本域 -->
+  <textarea v-model="text"></textarea>
+</template>
+```
+
+### v-model 修饰符
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const text = ref('')
+const number = ref(0)
+</script>
+
+<template>
+  <!-- .lazy：change 事件后同步（而非 input） -->
+  <input v-model.lazy="text">
+  
+  <!-- .number：自动转为数字 -->
+  <input v-model.number="number" type="number">
+  
+  <!-- .trim：自动去除首尾空格 -->
+  <input v-model.trim="text">
+  
+  <!-- 组合使用 -->
+  <input v-model.lazy.trim="text">
+</template>
+```
+
+### v-model 原理
+
+`v-model` 是语法糖：
+
+```vue
+<!-- v-model -->
+<input v-model="text">
+
+<!-- 等价于 -->
+<input 
+  :value="text"
+  @input="text = $event.target.value"
+>
+```
+
+不同表单元素的绑定：
+
+| 元素 | 属性 | 事件 |
+| ---- | ---- | ---- |
+| `<input type="text">` | `value` | `input` |
+| `<textarea>` | `value` | `input` |
+| `<input type="checkbox">` | `checked` | `change` |
+| `<input type="radio">` | `checked` | `change` |
+| `<select>` | `value` | `change` |
+
+## v-bind 简写
+
+绑定同名属性时可以省略值（Vue 3.4+）：
+
+```vue
+<script setup lang="ts">
+const id = ref('input-1')
+const disabled = ref(false)
+</script>
+
+<template>
+  <!-- 传统写法 -->
+  <input :id="id" :disabled="disabled">
+  
+  <!-- 简写（Vue 3.4+） -->
+  <input :id :disabled>
+</template>
+```
+
+## 动态指令
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const eventName = ref('click')
+const attrName = ref('title')
+</script>
+
+<template>
+  <!-- 动态事件 -->
+  <button @[eventName]="handler">Dynamic Event</button>
+  
+  <!-- 动态属性 -->
+  <div :[attrName]="'Tooltip'">Hover me</div>
+</template>
+```
+
+## 陷阱与最佳实践
+
+### ❌ 不要在 v-for 中使用索引作为 key
+
+```vue
+<!-- ❌ 错误：删除/插入时会导致状态错乱 -->
+<div v-for="(item, index) in items" :key="index">
+  <input v-model="item.text">
+</div>
+
+<!-- ✅ 正确：使用唯一 ID -->
+<div v-for="item in items" :key="item.id">
+  <input v-model="item.text">
+</div>
+```
+
+### ❌ 不要在同一元素上使用 v-if 和 v-for
+
+```vue
+<!-- ❌ 错误 -->
+<li v-for="user in users" v-if="user.active" :key="user.id">
+  {{ user.name }}
+</li>
+
+<!-- ✅ 正确：使用计算属性 -->
+<script setup lang="ts">
+const activeUsers = computed(() => users.value.filter(u => u.active))
+</script>
+
+<template>
+  <li v-for="user in activeUsers" :key="user.id">
+    {{ user.name }}
+  </li>
+</template>
+```
+
+### ✅ v-if vs v-show 选择
+
+```vue
+<template>
+  <!-- ✅ 权限控制：使用 v-if -->
+  <AdminPanel v-if="isAdmin" />
+  
+  <!-- ✅ 频繁切换：使用 v-show -->
+  <Modal v-show="isModalOpen" />
+</template>
+```
+
+### ✅ 事件处理器提取为方法
+
+```vue
+<!-- ❌ 内联逻辑过多 -->
+<template>
+  <button @click="count++; log('clicked'); emit('update')">
+    Click
+  </button>
+</template>
+
+<!-- ✅ 提取为方法 -->
+<script setup lang="ts">
+function handleClick() {
+  count.value++
+  log('clicked')
+  emit('update')
+}
+</script>
+
+<template>
+  <button @click="handleClick">Click</button>
+</template>
+```
+
+下一章 [组件注册与通信](/vue/components) 详解组件的注册方式和父子通信。

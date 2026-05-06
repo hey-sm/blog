@@ -1,0 +1,482 @@
+---
+title: React 组件模式
+description: React 组件模式 TypeScript 类型标注：HOC 高阶组件、Render Props、forwardRef、Compound Components、泛型组件
+---
+
+# React 组件模式
+
+本章涵盖常见 React 组件设计模式的 TypeScript 类型标注方案。
+
+## 高阶组件（HOC）
+
+### 基本 HOC
+
+```tsx
+// ✅ 注入 loading prop 的 HOC
+interface WithLoadingProps {
+  loading: boolean
+}
+
+function withLoading<T extends object>(Component: React.ComponentType<T>) {
+  return (props: T & WithLoadingProps) => {
+    const { loading, ...rest } = props
+
+    if (loading) {
+      return <div>Loading...</div>
+    }
+
+    return <Component {...(rest as T)} />
+  }
+}
+
+// 使用
+interface UserCardProps {
+  name: string
+  email: string
+}
+
+function UserCard({ name, email }: UserCardProps) {
+  return <div>{name} - {email}</div>
+}
+
+const UserCardWithLoading = withLoading(UserCard)
+
+<UserCardWithLoading
+  name="Alice"
+  email="alice@example.com"
+  loading={false}
+/>
+```
+
+### HOC 注入 Props（移除被注入的属性）
+
+```tsx
+// ✅ 使用者不需要传递被注入的 props
+function withAuth<T extends { user?: User | null }>(
+  Component: React.ComponentType<T>
+) {
+  return (props: Omit<T, 'user'>) => {
+    const { user, loading } = useAuth()
+
+    if (loading) return <div>Loading...</div>
+    if (!user) return <div>Please log in</div>
+
+    return <Component {...(props as T)} user={user} />
+  }
+}
+
+interface DashboardProps {
+  user: User
+  metrics: { visits: number; sales: number }
+}
+
+function Dashboard({ user, metrics }: DashboardProps) {
+  return (
+    <div>
+      <h1>Welcome, {user.name}</h1>
+      <p>Visits: {metrics.visits}</p>
+    </div>
+  )
+}
+
+const ProtectedDashboard = withAuth(Dashboard)
+
+// ✅ user 不需要外部传入
+<ProtectedDashboard metrics={{ visits: 100, sales: 20 }} />
+```
+
+### 多 HOC 组合
+
+```tsx
+// ✅ 使用 compose 串联
+function compose<A, B, C>(
+  f: (x: A) => B,
+  g: (x: B) => C
+): (x: A) => C {
+  return x => g(f(x))
+}
+```
+
+## Render Props
+
+```tsx
+interface MousePosition {
+  x: number
+  y: number
+}
+
+interface MouseTrackerProps {
+  render: (position: MousePosition) => ReactNode
+}
+
+function MouseTracker({ render }: MouseTrackerProps) {
+  const [position, setPosition] = useState<MousePosition>({ x: 0, y: 0 })
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => setPosition({ x: e.clientX, y: e.clientY })
+    window.addEventListener('mousemove', handler)
+    return () => window.removeEventListener('mousemove', handler)
+  }, [])
+
+  return <>{render(position)}</>
+}
+
+// 使用
+function App() {
+  return (
+    <MouseTracker
+      render={({ x, y }) => (
+        <div>
+          Mouse: {x}, {y}
+        </div>
+      )}
+    />
+  )
+}
+```
+
+### children 作为 Render Prop
+
+```tsx
+interface DataFetcherProps<T> {
+  url: string
+  children: (data: T | null, loading: boolean, error: Error | null) => ReactNode
+}
+
+function DataFetcher<T>({ url, children }: DataFetcherProps<T>) {
+  const [data, setData] = useState<T | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<Error | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    fetch(url)
+      .then(r => r.json())
+      .then(data => setData(data as T))
+      .catch(setError)
+      .finally(() => setLoading(false))
+  }, [url])
+
+  return <>{children(data, loading, error)}</>
+}
+
+// 使用
+<DataFetcher<User[]> url="/api/users">
+  {(users, loading, error) => {
+    if (loading) return <div>Loading...</div>
+    if (error) return <div>{error.message}</div>
+    if (!users) return <div>No data</div>
+    return (
+      <ul>{users.map(u => <li key={u.id}>{u.name}</li>)}</ul>
+    )
+  }}
+</DataFetcher>
+```
+
+## forwardRef 进阶
+
+### forwardRef + useImperativeHandle
+
+```tsx
+// ✅ 暴露给父组件的方法
+export interface InputHandle {
+  focus: () => void
+  clear: () => void
+  selectAll: () => void
+}
+
+interface InputProps {
+  label: string
+  placeholder?: string
+  defaultValue?: string
+}
+
+const Input = forwardRef<InputHandle, InputProps>(
+  ({ label, placeholder, defaultValue }, ref) => {
+    const inputRef = useRef<HTMLInputElement>(null)
+
+    useImperativeHandle(ref, () => ({
+      focus: () => inputRef.current?.focus(),
+      clear: () => {
+        if (inputRef.current) inputRef.current.value = ''
+      },
+      selectAll: () => inputRef.current?.select()
+    }))
+
+    return (
+      <div>
+        <label>{label}</label>
+        <input
+          ref={inputRef}
+          placeholder={placeholder}
+          defaultValue={defaultValue}
+        />
+      </div>
+    )
+  }
+)
+
+// 使用
+function Form() {
+  const inputRef = useRef<InputHandle>(null)
+
+  const handleFocus = () => {
+    inputRef.current?.focus()
+  }
+
+  return (
+    <div>
+      <Input ref={inputRef} label="Username" />
+      <button onClick={handleFocus}>Focus Input</button>
+    </div>
+  )
+}
+```
+
+## Compound Components（复合组件）
+
+```tsx
+// ✅ 上下文 + 子组件 = 类型安全的 Compound Component
+interface TabsContextType {
+  activeTab: string
+  setActiveTab: (tab: string) => void
+}
+
+const TabsContext = createContext<TabsContextType | null>(null)
+
+function useTabs() {
+  const ctx = useContext(TabsContext)
+  if (!ctx) throw new Error('Tabs compound components must be used within <Tabs>')
+  return ctx
+}
+
+// 主容器
+interface TabsProps {
+  defaultTab: string
+  children: ReactNode
+}
+
+function Tabs({ defaultTab, children }: TabsProps) {
+  const [activeTab, setActiveTab] = useState(defaultTab)
+
+  return (
+    <TabsContext.Provider value={{ activeTab, setActiveTab }}>
+      {children}
+    </TabsContext.Provider>
+  )
+}
+
+// 子组件：TabList
+interface TabListProps {
+  children: ReactElement<TabProps>[]
+}
+
+function TabList({ children }: TabListProps) {
+  return <div className="tabs-list">{children}</div>
+}
+
+// 子组件：Tab
+interface TabProps {
+  tab: string
+  children: ReactNode
+}
+
+function Tab({ tab, children }: TabProps) {
+  const { activeTab, setActiveTab } = useTabs()
+  const isActive = activeTab === tab
+
+  return (
+    <button
+      className={`tab ${isActive ? 'active' : ''}`}
+      onClick={() => setActiveTab(tab)}
+    >
+      {children}
+    </button>
+  )
+}
+
+// 子组件：TabPanel
+interface TabPanelProps {
+  tab: string
+  children: ReactNode
+}
+
+function TabPanel({ tab, children }: TabPanelProps) {
+  const { activeTab } = useTabs()
+  if (activeTab !== tab) return null
+  return <div className="tab-panel">{children}</div>
+}
+
+// ✅ 挂载子组件
+Tabs.List = TabList
+Tabs.Tab = Tab
+Tabs.Panel = TabPanel
+
+export { Tabs }
+```
+
+```tsx
+// 使用
+<Tabs defaultTab="account">
+  <Tabs.List>
+    <Tabs.Tab tab="account">Account</Tabs.Tab>
+    <Tabs.Tab tab="settings">Settings</Tabs.Tab>
+  </Tabs.List>
+  <Tabs.Panel tab="account">
+    <p>Account settings</p>
+  </Tabs.Panel>
+  <Tabs.Panel tab="settings">
+    <p>App settings</p>
+  </Tabs.Panel>
+</Tabs>
+```
+
+## Polymorphic Components（多态组件）
+
+```tsx
+// ✅ 泛型 as prop 支持渲染为不同元素
+type PolymorphicProps<T extends React.ElementType> = {
+  as?: T
+  children: ReactNode
+} & React.ComponentPropsWithRef<T>
+
+function Box<T extends React.ElementType = 'div'>({
+  as,
+  children,
+  ...props
+}: PolymorphicProps<T>) {
+  const Component = as ?? 'div'
+  return <Component {...props}>{children}</Component>
+}
+
+// 使用——类型安全
+<Box as="a" href="/docs">Documentation</Box>           // ✅ 允许 href
+<Box as="button" type="submit">Submit</Box>             // ✅ 允许 type
+<Box as="section" data-section="hero">Hero</Box>        // ✅ 允许 data-*
+<Box as="div">Default div</Box>                          // ✅ 默认
+```
+
+## Generic Components（泛型组件）
+
+### 泛型 List
+
+```tsx
+interface ListProps<T> {
+  items: T[]
+  render: (item: T, index: number) => ReactNode
+  keyExtractor: (item: T) => string | number
+}
+
+function List<T>({ items, render, keyExtractor }: ListProps<T>) {
+  return (
+    <ul>
+      {items.map((item, index) => (
+        <li key={keyExtractor(item)}>{render(item, index)}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+### 泛型 Select
+
+```tsx
+interface SelectProps<T> {
+  value: T
+  options: T[]
+  formatLabel?: (option: T) => string
+  onChange: (value: T) => void
+}
+
+function Select<T extends string>({
+  value,
+  options,
+  formatLabel = String,
+  onChange
+}: SelectProps<T>) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value as T)}>
+      {options.map(option => (
+        <option key={String(option)} value={option}>
+          {formatLabel(option)}
+        </option>
+      ))}
+    </select>
+  )
+}
+```
+
+## 陷阱
+
+### 1. HOC 中使用 Omit 可能导致类型丢失
+
+```tsx
+// ❌ 直接用 Omit 可能不精准
+function withLoading<T extends { loading: boolean }>(Comp: React.ComponentType<T>) {
+  return (props: Omit<T, 'loading'>) => <Comp {...props as T} loading={false} />
+}
+
+// ✅ 使用更明确的排除方式或重新定义 Props
+```
+
+### 2. Compound Component 的子组件需要强耦合
+
+```tsx
+// ❌ 子组件脱离 context 使用会导致运行时错误
+<Tabs.List>  {/* 运行时错误——缺少 Tabs.Provider */}
+  <Tabs.Tab tab="a">Tab A</Tabs.Tab>
+</Tabs.List>
+
+// ✅ 自定义 Hook 中抛出明确错误
+function useTabs() {
+  const ctx = useContext(TabsContext)
+  if (!ctx) throw new Error('...')
+  return ctx
+}
+```
+
+### 3. Polymorphic Component 的 ref 传递
+
+```tsx
+// ⚠️ Polymorphic + forwardRef 需要额外小心泛型顺序
+function Box<T extends React.ElementType = 'div'>(
+  { as, ...props }: PolymorphicProps<T>,
+  ref: React.ComponentPropsWithRef<T>['ref']
+) {
+  const Component = as ?? 'div'
+  return <Component ref={ref} {...props} />
+}
+
+// 需要额外的 workaround 来做 forwardRef
+```
+
+## 最佳实践
+
+### ✅ 函数式组件优先于 class 组件
+
+```tsx
+// ✅ 现代 React 项目
+function UserCard({ user }: { user: User }) {
+  return <div>{user.name}</div>
+}
+```
+
+### ✅ 用 as const 保持 Hook 返回元组的字面量类型
+
+```tsx
+function useToggle(initial = false) {
+  const [on, setOn] = useState(initial)
+  return [on, () => setOn(o => !o), () => setOn(true), () => setOn(false)] as const
+}
+```
+
+### ✅ 使用 interface 声明组件的静态属性
+
+```tsx
+interface FormComponent extends React.FC<FormProps> {
+  Item: typeof FormItem
+  Submit: typeof FormSubmit
+}
+```
+
+下一章 [React 高级类型](/ts/react-patterns) 介绍 React 中的高级类型模式与最佳实践。

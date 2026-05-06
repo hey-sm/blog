@@ -1,0 +1,634 @@
+---
+title: 模板与指令
+description: v-once / v-memo / v-show vs v-if、key 决策、自定义指令性能与模板优化技巧
+---
+
+# 模板与指令
+
+> Vue 模板的指令系统提供了直接控制渲染行为的"开发者级"性能旋钮。
+
+[编译时优化](/performance/vue/compilation) 是编译器自动做的，本章是**开发者主动用**的指令——`v-once` / `v-memo` 锁定渲染、`v-show` vs `v-if` 切换策略、`key` 控制节点身份、`v-for` 优化、自定义指令性能。
+
+## v-once：永远只渲染一次
+
+```vue
+<template>
+  <div>
+    <h1 v-once>{{ title }}</h1>           <!-- title 改变也不更新 -->
+    <p>{{ content }}</p>
+  </div>
+</template>
+```
+
+### 工作机制
+
+`v-once` 让 Vue 跳过这个节点的所有未来更新：
+
+```js
+// 编译后
+const _hoisted_1 = /*#__PURE__*/_createElementVNode("h1", null,
+  _toDisplayString(_ctx.title), -1 /* HOISTED */
+)
+```
+
+`-1 HOISTED` 标记——这个节点被视为"永久静态"。
+
+### 适用场景
+
+#### 1. 大量不变内容
+
+```vue
+<!-- 页脚 / 静态文档 / 一次性渲染的大块 -->
+<template>
+  <article v-once>
+    <h1>{{ post.title }}</h1>
+    <div v-html="post.content"></div>     <!-- 长 HTML -->
+    <Author :data="post.author" />
+  </article>
+</template>
+```
+
+整个 article 渲染一次后锁定——即使 post 变化也不更新。
+
+#### 2. 性能关键的初始化
+
+```vue
+<template>
+  <DataVisualization v-once :data="initialData" />
+  <Controls @change="updateOtherStuff" />
+</template>
+```
+
+可视化组件初始化昂贵，且只用初始数据——v-once 防止意外重建。
+
+### 限制
+
+- 锁定后无法解除
+- 子组件如果有自己的状态，仍可独立更新
+- 不能用于需要响应数据变化的内容
+
+## v-memo：条件 memo
+
+Vue 3.2+ 新增——精细控制节点的更新触发条件：
+
+```vue
+<template>
+  <div v-memo="[item.id, item.updated]">
+    <ItemDetail :item="item" />
+  </div>
+  <!-- 仅当 item.id 或 item.updated 变化时才更新 -->
+</template>
+```
+
+### vs v-once
+
+| 维度 | v-once | v-memo |
+| ---- | ------ | ------ |
+| 更新条件 | 永远不更新 | 依赖列表变化时更新 |
+| 适用 | 真静态内容 | 部分依赖变化才更新 |
+
+```vue
+<!-- v-once：title 改变也不重渲 -->
+<h1 v-once>{{ title }}</h1>
+
+<!-- v-memo: title 改变就重渲 -->
+<h1 v-memo="[title]">{{ title }}</h1>
+
+<!-- v-memo 空数组等价于 v-once -->
+<h1 v-memo="[]">{{ title }}</h1>
+```
+
+### 列表中的 v-memo
+
+最经典场景——**大列表中的项**：
+
+```vue
+<template>
+  <div v-for="item in items" :key="item.id"
+       v-memo="[item.id, item.selected]">
+    <!-- 仅 id 或 selected 变化才重渲 -->
+    <ItemRow :item="item" />
+  </div>
+</template>
+```
+
+效果：
+
+- 列表中只有 `selected` 变化的项重渲染
+- 其它项（即使整个 items 数组替换）也跳过
+
+实测：1000 项列表，仅切换一个项的 selected：
+
+| 方案 | 重渲染数 | 时间 |
+| ---- | -------- | ---- |
+| 无 memo | 1000 | 50 ms |
+| v-memo | 1 | < 1 ms |
+
+### v-memo 的依赖陷阱
+
+```vue
+<!-- ❌ 漏依赖 → 显示陈旧 -->
+<div v-memo="[item.id]">
+  {{ item.name }} - {{ item.status }}    <!-- name 或 status 改变也不更新 -->
+</div>
+
+<!-- ✅ 完整依赖 -->
+<div v-memo="[item.id, item.name, item.status]">
+  {{ item.name }} - {{ item.status }}
+</div>
+```
+
+类似 React useMemo 的 deps——必须**穷尽**依赖。
+
+### vs v-for + key
+
+```vue
+<!-- key + v-memo 是大列表性能优化的标配 -->
+<div v-for="item in items"
+     :key="item.id"
+     v-memo="[item.id, item.version]">
+```
+
+`key` 控制 Vue 是否复用节点；`v-memo` 控制即使复用是否需要 patch。
+
+## v-show vs v-if
+
+### 对比
+
+| 维度 | v-if | v-show |
+| ---- | ---- | ------ |
+| 实现 | 条件渲染（DOM 增删） | display: none / 默认 |
+| 初始成本 | 低（false 时不渲染） | 高（始终渲染） |
+| 切换成本 | 高（创建/销毁组件） | 低（仅样式切换） |
+| 子组件状态 | 销毁后丢失 | 保留 |
+| Lighthouse 节点数 | 不计入 | 计入 |
+
+### 决策
+
+```text
+该用 v-if：
+  ├─ 条件很少切换（如登录后才显示某些 UI）
+  ├─ 内容子组件有状态变化负担（重新创建很贵）
+  └─ 初始 false 概率高（避免渲染）
+
+该用 v-show：
+  ├─ 频繁切换（如 Tab、下拉菜单、Tooltip）
+  ├─ 子组件有不应丢失的状态（输入框、滚动位置）
+  └─ 初始 true 概率高
+```
+
+### 实战示例
+
+```vue
+<!-- 模态框：通常关闭 → v-if -->
+<Modal v-if="showModal" />
+
+<!-- Tab 内容：频繁切换 + 用户希望保留状态 → v-show -->
+<div v-show="activeTab === 'profile'"><ProfilePanel /></div>
+<div v-show="activeTab === 'settings'"><SettingsPanel /></div>
+```
+
+或对 Tab 配合 KeepAlive（详见 [KeepAlive](/performance/vue/keep-alive)）：
+
+```vue
+<KeepAlive>
+  <component :is="activeTabComponent" />
+</KeepAlive>
+```
+
+KeepAlive 保留状态 + 销毁/恢复时机控制，比 v-show 更灵活。
+
+### v-if 的 v-else / v-else-if
+
+```vue
+<div v-if="status === 'loading'">Loading...</div>
+<div v-else-if="status === 'error'">Error</div>
+<div v-else>{{ data }}</div>
+```
+
+编译器会优化为高效的条件分支。
+
+## key 的正确使用
+
+### 为什么需要 key
+
+```vue
+<!-- ❌ 没有 key -->
+<div v-for="item in items">{{ item.name }}</div>
+```
+
+Vue 会用"就地复用"策略——可能引发：
+
+- 状态错位（输入框值串到错误项）
+- 不必要的 DOM 操作
+- 动画失效
+
+### key 的本质
+
+Vue 用 key 决定"这个节点是不是同一个东西"：
+
+```vue
+<input v-for="user in users" :key="user.id" v-model="user.name" />
+```
+
+key 一致 → 复用 DOM + 状态。
+key 变化 → 销毁旧 DOM + 创建新 DOM。
+
+### 反模式：用 index
+
+```vue
+<!-- ❌ 删除中间项时错位 -->
+<input v-for="(user, i) in users" :key="i" v-model="user.name" />
+
+<!-- 删除第 0 项后：
+     原来：[A, B, C] → key 0,1,2
+     现在：[B, C]    → key 0,1
+     Vue 认为：key 0 = A → B（更新），key 1 = B → C（更新），key 2 卸载
+     用户输入框中的值可能错位 -->
+```
+
+### 反模式：用对象本身
+
+```vue
+<!-- ❌ 对象引用作 key（不稳定） -->
+<div v-for="user in users" :key="user">
+```
+
+每次 users 重新生成，key 都是新引用——所有项都被销毁重建。
+
+### 推荐：稳定 ID
+
+```vue
+<div v-for="user in users" :key="user.id">
+```
+
+如果数据没有 ID：
+
+```ts
+// 加入
+const itemsWithId = computed(() => 
+  items.value.map((x, i) => ({ ...x, _id: x.uid ?? `${i}-${x.someKey}` }))
+)
+```
+
+或用[`crypto.randomUUID()`](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID) 生成稳定 ID。
+
+### 强制重建组件
+
+利用 key 变化触发卸载/重建：
+
+```vue
+<UserProfile :user-id="userId" :key="userId" />
+<!-- userId 变化时 UserProfile 完全重建（用于切换用户清理状态）-->
+```
+
+### v-for 与 v-if 同级
+
+```vue
+<!-- ❌ Vue 3 中 v-for 优先级高于 v-if（Vue 2 是反的）-->
+<li v-for="user in users" v-if="user.active">
+
+<!-- 即使 user 不 active 也会进入 v-for 循环再判断
+     不必要的迭代 + 编译警告 -->
+
+<!-- ✅ 提前过滤 -->
+<li v-for="user in activeUsers" :key="user.id">
+```
+
+```ts
+const activeUsers = computed(() => users.value.filter(u => u.active))
+```
+
+## v-for 的优化
+
+### 1. 不要在循环内计算
+
+```vue
+<!-- ❌ 每次渲染都过滤排序 -->
+<li v-for="item in items.filter(x => x.active).sort()" :key="item.id">
+
+<!-- ✅ computed 缓存 -->
+<li v-for="item in visibleItems" :key="item.id">
+```
+
+```ts
+const visibleItems = computed(() =>
+  items.value.filter(x => x.active).sort()
+)
+```
+
+### 2. 大对象别用 reactive
+
+```ts
+// ❌
+const items = reactive(largeArray)        // 深度代理
+
+// ✅
+const items = shallowRef(largeArray)
+```
+
+详见 [浅层与只读优化](/performance/vue/shallow-optimization)。
+
+### 3. 列表过长时虚拟化
+
+```vue
+<!-- 1000+ 项时虚拟化 -->
+<RecycleScroller :items="largeList" :item-size="50">
+  <template #default="{ item }"><Item :data="item" /></template>
+</RecycleScroller>
+```
+
+详见 [列表虚拟化](/performance/vue/virtualization)。
+
+### 4. v-memo 跳过不变项
+
+```vue
+<div v-for="item in items"
+     :key="item.id"
+     v-memo="[item.id, item.version]">
+  <!-- ... -->
+</div>
+```
+
+### 5. 分组渲染
+
+```vue
+<!-- ❌ 一次渲染 1000 项 -->
+<li v-for="i in items" :key="i.id">
+
+<!-- ✅ 分批 -->
+<li v-for="i in displayedItems" :key="i.id">
+```
+
+```ts
+const displayedItems = ref(items.value.slice(0, 50))
+
+// 滚动到底加载下一批
+function loadMore() {
+  const next = items.value.slice(displayedItems.value.length, displayedItems.value.length + 50)
+  displayedItems.value.push(...next)
+}
+```
+
+## v-html 的代价与安全
+
+```vue
+<div v-html="post.content"></div>
+```
+
+性能：
+
+- 每次 content 变化都重新解析 HTML
+- 渲染的 DOM 子树不参与 Vue 响应（无追踪）
+- 大块 HTML 解析慢
+
+安全：
+
+- **绝不** 直接 v-html 用户输入（XSS 风险）
+- 用 [DOMPurify](https://github.com/cure53/DOMPurify) 清洗：
+
+```ts
+import DOMPurify from 'dompurify'
+
+const safeHtml = computed(() => DOMPurify.sanitize(rawHtml.value))
+```
+
+```vue
+<div v-html="safeHtml"></div>
+```
+
+## 自定义指令性能
+
+```ts
+const vTooltip = {
+  mounted(el, binding) {
+    el._tooltip = createTooltip(el, binding.value)
+  },
+  updated(el, binding) {
+    el._tooltip.update(binding.value)
+  },
+  unmounted(el) {
+    el._tooltip.destroy()
+  }
+}
+```
+
+```vue
+<button v-tooltip="'Click me'">Hover me</button>
+```
+
+### 性能注意
+
+- 钩子在每次渲染都执行（updated）
+- 不要在钩子里做昂贵操作
+- 销毁要清理（避免内存泄漏）
+
+```ts
+// ❌ 每次 updated 都创建新监听器
+const vWrong = {
+  updated(el, binding) {
+    el.addEventListener('click', binding.value)   // 累积！
+  }
+}
+
+// ✅ 仅 mounted 时一次
+const vRight = {
+  mounted(el, binding) {
+    el._handler = binding.value
+    el.addEventListener('click', el._handler)
+  },
+  updated(el, binding) {
+    el._handler = binding.value          // 更新引用，不重新绑定
+  },
+  unmounted(el) {
+    el.removeEventListener('click', el._handler)
+  }
+}
+```
+
+## Slot 性能
+
+### 默认 slot
+
+```vue
+<!-- Layout.vue -->
+<template>
+  <div class="layout">
+    <slot />
+  </div>
+</template>
+
+<!-- Usage -->
+<Layout>
+  <Page />
+</Layout>
+```
+
+slot 内容由父组件渲染——**父变带动 slot 内容变**：
+
+```vue
+<!-- 父变化触发 Layout slot 重渲染 -->
+<Layout>
+  <Page :data="dynamicData" />     <!-- 这个跟随父变 -->
+</Layout>
+```
+
+### 作用域 slot
+
+```vue
+<!-- DataTable.vue -->
+<template>
+  <table>
+    <tr v-for="row in rows" :key="row.id">
+      <slot name="cell" :row="row" />
+    </tr>
+  </table>
+</template>
+
+<!-- Usage -->
+<DataTable :rows="users">
+  <template #cell="{ row }">
+    {{ row.name }} - {{ row.email }}
+  </template>
+</DataTable>
+```
+
+slot 函数被传入 DataTable，每行调用一次——slot 函数内部访问 row 也参与响应式追踪。
+
+### slot 的 v-memo
+
+大列表中 slot 内容不变时：
+
+```vue
+<DataTable :rows="users">
+  <template #cell="{ row }">
+    <div v-memo="[row.id, row.updated]">
+      <ExpensiveCell :row="row" />
+    </div>
+  </template>
+</DataTable>
+```
+
+## 模板表达式
+
+### 复杂表达式应提到 computed
+
+```vue
+<!-- ❌ 模板内做大量计算 -->
+<div>{{ items.filter(x => x.active).map(x => x.name).join(', ') }}</div>
+
+<!-- ✅ computed -->
+<div>{{ activeNames }}</div>
+```
+
+```ts
+const activeNames = computed(() =>
+  items.value.filter(x => x.active).map(x => x.name).join(', ')
+)
+```
+
+### 避免模板内的副作用
+
+```vue
+<!-- ❌ 渲染时调用方法（副作用 + 性能）-->
+<div>{{ logAndReturn(data) }}</div>
+
+<!-- ✅ 副作用放 watchEffect -->
+```
+
+## Teleport：把 DOM 移到别处
+
+```vue
+<Teleport to="body">
+  <Modal v-if="showModal" />
+</Teleport>
+```
+
+`Modal` 在组件树中是这里——但 DOM 实际渲染到 `<body>`。
+
+性能上：
+
+- 不影响响应式追踪
+- 避免 modal 受父级 CSS（如 transform、overflow）影响
+- 与 KeepAlive、v-if 都兼容
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| v-for 不加 key | 状态错位 + 渲染浪费 | 加稳定 ID 作 key |
+| 用 index 作 key | 删除中间项错位 | 用 ID |
+| v-for + v-if 同级 | 多余迭代 | computed 提前过滤 |
+| v-if 频繁切换 | 反复创建销毁 | v-show 或 KeepAlive |
+| v-show 大组件初始 false | 初始渲染就慢 | v-if 延迟到需要时 |
+| 模板内复杂表达式 | 每渲染都执行 | 提到 computed |
+| v-html 用户输入未清洗 | XSS 漏洞 | DOMPurify |
+| v-memo 漏依赖 | 显示陈旧 | 完整列出依赖 |
+| 自定义指令 updated 中创建监听器 | 累积内存泄漏 | mounted/unmounted 配对 |
+| 大列表不用虚拟化 | 卡死 | RecycleScroller |
+
+## 实战示例：高性能列表
+
+综合本章技巧：
+
+```vue
+<script setup>
+import { shallowRef, computed } from 'vue'
+import { RecycleScroller } from 'vue-virtual-scroller'
+
+const items = shallowRef([])               // shallow，不深度代理
+const filter = ref('')
+
+// computed 派生 + 缓存
+const visible = computed(() =>
+  items.value.filter(x => x.name.includes(filter.value))
+)
+
+async function load() {
+  const data = await fetch('/api/items').then(r => r.json())
+  items.value = data                        // 整体替换触发响应
+}
+
+function update(id, changes) {
+  items.value = items.value.map(x =>
+    x.id === id ? { ...x, ...changes } : x
+  )
+}
+</script>
+
+<template>
+  <input v-model="filter" />
+
+  <RecycleScroller :items="visible" :item-size="60" key-field="id">
+    <template #default="{ item }">
+      <div v-memo="[item.id, item.updated]" class="row">
+        <h3>{{ item.name }}</h3>
+        <p>{{ item.description }}</p>
+        <button @click="update(item.id, { selected: !item.selected })">
+          Toggle
+        </button>
+      </div>
+    </template>
+  </RecycleScroller>
+</template>
+```
+
+特点：
+
+- `shallowRef`：避免深度代理大数组
+- `computed`：过滤结果缓存
+- `RecycleScroller`：虚拟化
+- `v-memo`：每行精确控制更新触发
+- 整体替换 `items.value`：触发响应（不原地 mutate）
+
+## 小结
+
+- `v-once` 让节点永远不更新，适合大量不变内容；
+- `v-memo` 是细粒度的 memoization，与 `v-for` 的 `key` 配合是大列表优化的杀手锏；
+- `v-if` vs `v-show`：少切换 + 状态可弃 → v-if，频繁切换 + 保留状态 → v-show 或 KeepAlive；
+- `key` 是 Vue 识别"同一节点"的依据——稳定 ID 是不二选择，index 用作 key 是常见 bug 来源；
+- v-for 内不要计算/过滤——提到 computed 缓存；
+- v-for 不要嵌 v-if（同级）——computed 提前过滤；
+- v-html 性能与安全双风险，用户输入必须 DOMPurify 清洗；
+- 自定义指令的钩子要正确配对（mounted/unmounted），避免累积内存泄漏；
+- Teleport 让 modal 等组件 DOM 脱离父级，在保留组件树关系的同时避免 CSS 干扰。

@@ -1,0 +1,659 @@
+---
+title: Hooks
+description: 全部内置 Hook 的语义、用法、陷阱与自定义 Hook 实践
+---
+
+# Hooks
+
+Hook 是 React 16.8 引入的、让**函数组件**拥有状态、副作用、上下文等能力的 API。本章覆盖：
+
+- **Hook 的两条铁律**
+- **基础 Hook**：`useState` / `useReducer` / `useEffect` / `useLayoutEffect` / `useRef` / `useContext`
+- **性能 Hook**：`useMemo` / `useCallback` / `useTransition` / `useDeferredValue` / `useId`
+- **React 19 新 Hook**：`use` / `useOptimistic` / `useFormStatus` / `useActionState`
+- **依赖数组陷阱与闭包过期**
+- **自定义 Hook 设计原则**
+
+## Hook 的两条铁律
+
+> 1. **只在最顶层调用 Hook**——不要在循环、条件、嵌套函数中调用
+> 2. **只在 React 函数中调用**——函数组件或自定义 Hook 中
+
+```tsx
+// ✗ 条件分支
+function Bad({ enabled }: { enabled: boolean }) {
+  if (enabled) {
+    const [state, setState] = useState(0)        // 每次渲染 Hook 顺序不同，崩
+  }
+  return null
+}
+
+// ✓ 条件移到值层面
+function Good({ enabled }: { enabled: boolean }) {
+  const [state, setState] = useState(0)
+  if (!enabled) return null
+  // ...
+}
+```
+
+为什么？React 用调用顺序识别每个 Hook 的状态槽位。条件调用会让两次渲染的"槽位 → Hook"映射对不上。`eslint-plugin-react-hooks` 中的 `rules-of-hooks` 规则会在编译期捕捉违规。
+
+## `useState`
+
+### 签名
+
+```ts
+function useState<S>(initial: S | (() => S)): [S, Dispatch<SetStateAction<S>>]
+```
+
+### 基本用法
+
+```tsx
+const [count, setCount] = useState(0)
+const [user, setUser] = useState<User | null>(null)
+```
+
+### 函数式更新
+
+依赖前一个值时使用函数形式，避免**闭包过期**：
+
+```tsx
+// ✗
+setCount(count + 1)
+setCount(count + 1)
+// 实际：count 仍是渲染时捕获的旧值，二次调用基于同一旧值
+
+// ✓
+setCount(c => c + 1)
+setCount(c => c + 1)
+```
+
+### 惰性初始化
+
+```tsx
+// ✗ 每次渲染都执行 expensiveCompute
+const [data, setData] = useState(expensiveCompute())
+
+// ✓ 仅首次渲染执行
+const [data, setData] = useState(() => expensiveCompute())
+```
+
+### 状态批处理（automatic batching, React 18+）
+
+React 18 起在所有事件回调、Promise、setTimeout 中都会自动批处理 setState 调用：
+
+```tsx
+function handleClick() {
+  setA(1)
+  setB(2)
+  setC(3)
+  // React 18+：仅触发一次渲染
+  // React 17：在异步回调中各触发一次
+}
+```
+
+### state 的不可变性
+
+```tsx
+const [user, setUser] = useState({ name: 'js', tags: ['a', 'b'] })
+
+// ✗ 修改原对象
+user.tags.push('c')
+setUser(user)                     // 引用未变，React 不重新渲染
+
+// ✓
+setUser(u => ({ ...u, tags: [...u.tags, 'c'] }))
+```
+
+复杂嵌套结构使用 [Immer](https://immerjs.github.io/immer/) 或 `useReducer`。
+
+## `useReducer`
+
+```ts
+function useReducer<S, A>(
+  reducer: (state: S, action: A) => S,
+  initial: S
+): [S, Dispatch<A>]
+```
+
+适合"状态多分支变化"或"action 描述意图"的场景：
+
+```tsx
+type State = { count: number; step: number }
+type Action =
+  | { type: 'inc' }
+  | { type: 'dec' }
+  | { type: 'setStep'; payload: number }
+
+function reducer(state: State, action: Action): State {
+  switch (action.type) {
+    case 'inc':     return { ...state, count: state.count + state.step }
+    case 'dec':     return { ...state, count: state.count - state.step }
+    case 'setStep': return { ...state, step: action.payload }
+  }
+}
+
+function Counter() {
+  const [state, dispatch] = useReducer(reducer, { count: 0, step: 1 })
+  return (
+    <>
+      <p>{state.count}</p>
+      <button onClick={() => dispatch({ type: 'inc' })}>+</button>
+      <input
+        value={state.step}
+        onChange={e => dispatch({ type: 'setStep', payload: +e.target.value })}
+      />
+    </>
+  )
+}
+```
+
+`useReducer` 让状态变更逻辑**集中**到 reducer 函数，便于测试与扩展。
+
+## `useEffect`
+
+副作用钩子——在 commit 阶段之后、浏览器 paint 之后异步运行。
+
+### 签名
+
+```ts
+function useEffect(
+  effect: () => void | (() => void),
+  deps?: ReadonlyArray<unknown>
+): void
+```
+
+### 三种形态
+
+```tsx
+// 1. 每次渲染后都跑
+useEffect(() => { ... })
+
+// 2. 仅挂载后跑一次（卸载时执行返回的清理函数）
+useEffect(() => {
+  const id = setInterval(tick, 1000)
+  return () => clearInterval(id)
+}, [])
+
+// 3. deps 中任一引用变化时重新跑
+useEffect(() => {
+  fetchUser(id).then(setUser)
+}, [id])
+```
+
+### 何时用 useEffect
+
+| 场景 | 应该用 effect 吗 |
+| ---- | ---------------- |
+| 订阅外部数据（WebSocket / EventSource） | ✅ |
+| 操作 React 之外的 DOM API（document.title、滚动） | ✅ |
+| 接入第三方库（图表、地图、播放器） | ✅ |
+| 数据请求 | ⚠️ 可以但更推荐 TanStack Query / SWR |
+| 派生 state（A 变 → B 跟着变） | ❌ 渲染时直接计算 |
+| 响应 props 变化做计算 | ❌ 渲染时直接计算 |
+| 通知父组件状态变化 | ❌ 在事件处理器里直接调 |
+
+### 反模式：用 effect 同步派生状态
+
+```tsx
+// ✗
+function Bad({ items }: { items: Item[] }) {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    setCount(items.length)
+  }, [items])
+  return <p>{count}</p>
+}
+
+// ✓ 直接计算
+function Good({ items }: { items: Item[] }) {
+  const count = items.length
+  return <p>{count}</p>
+}
+```
+
+### 与外部系统同步
+
+```tsx
+function ChatRoom({ roomId }: { roomId: string }) {
+  useEffect(() => {
+    const conn = createConnection(roomId)
+    conn.connect()
+    return () => conn.disconnect()
+  }, [roomId])
+
+  return <div>...</div>
+}
+```
+
+每次 roomId 变化：先运行清理函数（disconnect 旧连接），再运行新 effect（connect 新连接）。
+
+### `<StrictMode>` 下的双调用
+
+开发模式下 React 会对每个 effect 故意 mount → unmount → mount，触发"清理函数 + 重建"循环。这是为了暴露**没有正确实现清理的副作用**。生产构建中只会执行一次。
+
+```tsx
+useEffect(() => {
+  console.log('mount')
+  return () => console.log('unmount')
+}, [])
+
+// 开发模式输出：
+// mount
+// unmount
+// mount
+
+// 生产模式输出：
+// mount
+```
+
+## `useLayoutEffect`
+
+与 `useEffect` 同样的签名，但**同步**运行——在 DOM mutation 之后、浏览器 paint 之前。
+
+```tsx
+function Tooltip({ targetRef, children }: Props) {
+  const tooltipRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState({ top: 0, left: 0 })
+
+  useLayoutEffect(() => {
+    if (!targetRef.current || !tooltipRef.current) return
+    const targetRect = targetRef.current.getBoundingClientRect()
+    setPos({ top: targetRect.bottom, left: targetRect.left })
+  }, [targetRef])
+
+  return <div ref={tooltipRef} style={pos}>{children}</div>
+}
+```
+
+使用 `useLayoutEffect` 而非 `useEffect`，避免出现"先以错位渲染、再瞬间跳回正确位置"的视觉闪烁。
+
+性能代价：阻塞 paint。仅在确实需要"读取布局并同步调整"时使用。
+
+## `useRef`
+
+```tsx
+const ref = useRef<HTMLInputElement>(null)
+ref.current?.focus()
+
+// 存可变值（不触发渲染）
+const lastValueRef = useRef<string>('')
+useEffect(() => { lastValueRef.current = currentValue })
+```
+
+详见 [渲染机制](/react/rendering#refs)。
+
+## `useContext`
+
+```tsx
+const ThemeContext = React.createContext<'light' | 'dark'>('light')
+
+function ThemedButton() {
+  const theme = useContext(ThemeContext)
+  return <button className={theme}>...</button>
+}
+
+// 顶层
+<ThemeContext.Provider value="dark">
+  <ThemedButton />
+</ThemeContext.Provider>
+```
+
+### Context 的性能注意
+
+Context 值变化会让**所有消费该 context 的组件**都重新渲染。频繁变化的高频值（如鼠标坐标、动画进度）不适合放 Context；可考虑：
+
+- 拆 Context：把"经常变"和"很少变"的拆分
+- 使用 Zustand / Jotai 等带 selector 的 store
+- 配合 `React.memo` 让叶子组件浅比较 props
+
+详见 [状态管理](/react/state-management)。
+
+### `use(Context)`（React 19）
+
+React 19 引入新的 `use` API，可在条件中读取 Context：
+
+```tsx
+function Component({ enabled }: { enabled: boolean }) {
+  if (!enabled) return null
+  const theme = use(ThemeContext)              // ✓ 允许在条件之后调用
+  return <div className={theme}>...</div>
+}
+```
+
+`use` 是唯一可破"只在顶层调 Hook"铁律的 API。
+
+## `useMemo` 与 `useCallback`
+
+```ts
+function useMemo<T>(factory: () => T, deps: ReadonlyArray<unknown>): T
+function useCallback<T extends Function>(callback: T, deps: ReadonlyArray<unknown>): T
+```
+
+### `useMemo`
+
+缓存"昂贵的派生值"：
+
+```tsx
+const sortedItems = useMemo(
+  () => items.slice().sort(byDate),
+  [items]
+)
+```
+
+### `useCallback`
+
+缓存"函数引用"，避免传给子组件时引发重渲染：
+
+```tsx
+const onClick = useCallback(() => doThing(id), [id])
+
+return <ExpensiveChild onClick={onClick} />
+```
+
+### 别滥用
+
+`useMemo` / `useCallback` 自身有成本（保存依赖、比较）。仅在以下情况使用：
+
+1. 计算确实昂贵（毫秒级以上）
+2. 派生值作为另一个 effect / memo 的依赖
+3. 函数 / 对象作为 prop 传给 `React.memo` 包装的子组件
+
+无脑给所有变量包 `useMemo` 不会变快，反而增加内存压力与心智成本。
+
+### React Compiler（React 19 实验性）
+
+React 团队正在推进 [React Compiler](https://react.dev/learn/react-compiler)（编译期自动 memo 化），稳定后多数 `useMemo` / `useCallback` 可由编译器自动加上。当前需要手动写。
+
+## `useTransition`
+
+把状态更新标记为"低优先级"，避免阻塞高优先级输入：
+
+```tsx
+function SearchPage() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<Item[]>([])
+  const [isPending, startTransition] = useTransition()
+
+  function onChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setQuery(e.target.value)                  // 立即更新（高优）
+
+    startTransition(() => {
+      setResults(searchSync(e.target.value))  // 低优，可被打断
+    })
+  }
+
+  return (
+    <>
+      <input value={query} onChange={onChange} />
+      {isPending && <Spinner />}
+      <List items={results} />
+    </>
+  )
+}
+```
+
+## `useDeferredValue`
+
+与 `useTransition` 类似，但用于"无法控制 setter"的值（props、context）：
+
+```tsx
+function ResultsList({ query }: { query: string }) {
+  const deferred = useDeferredValue(query)
+  const isStale = query !== deferred
+  const items = useMemo(() => search(deferred), [deferred])
+  return (
+    <div style={{ opacity: isStale ? 0.5 : 1 }}>
+      <List items={items} />
+    </div>
+  )
+}
+```
+
+## `useId`
+
+生成稳定、唯一的 ID，用于 SSR 友好的 ARIA / `htmlFor` 关联：
+
+```tsx
+function Field({ label }: { label: string }) {
+  const id = useId()
+  return (
+    <>
+      <label htmlFor={id}>{label}</label>
+      <input id={id} />
+    </>
+  )
+}
+```
+
+## React 19 新 Hook
+
+### `use`
+
+可读取 Promise 与 Context，且**可在条件 / 循环中使用**：
+
+```tsx
+import { use, Suspense } from 'react'
+
+function UserProfile({ userPromise }: { userPromise: Promise<User> }) {
+  const user = use(userPromise)               // 抛 Promise → 触发 Suspense
+  return <h1>{user.name}</h1>
+}
+
+function Page() {
+  const userPromise = useMemo(() => fetchUser(), [])
+  return (
+    <Suspense fallback={<Spinner />}>
+      <UserProfile userPromise={userPromise} />
+    </Suspense>
+  )
+}
+```
+
+### `useOptimistic`
+
+为乐观 UI 提供官方 Hook：
+
+```tsx
+function MessageList({ messages, sendMessage }: Props) {
+  const [optimisticMessages, addOptimistic] = useOptimistic(
+    messages,
+    (state, newMsg: string) => [...state, { id: 'temp', text: newMsg, sending: true }]
+  )
+
+  async function handleSend(formData: FormData) {
+    const text = formData.get('text') as string
+    addOptimistic(text)                       // 立即看到
+    await sendMessage(text)                   // 后台请求
+  }
+
+  return (
+    <>
+      {optimisticMessages.map(m => (
+        <p key={m.id} style={{ opacity: m.sending ? 0.5 : 1 }}>{m.text}</p>
+      ))}
+      <form action={handleSend}>
+        <input name="text" />
+      </form>
+    </>
+  )
+}
+```
+
+### `useFormStatus`
+
+读取最近一次 `<form action={...}>` 的提交状态：
+
+```tsx
+function Submit() {
+  const { pending } = useFormStatus()
+  return <button disabled={pending}>{pending ? 'Sending…' : 'Send'}</button>
+}
+
+function Form() {
+  return (
+    <form action={sendMessage}>
+      <input name="text" />
+      <Submit />                              // 自动感知父 form 的状态
+    </form>
+  )
+}
+```
+
+### `useActionState`
+
+把 form action 的返回值与 pending 状态合并到一个 Hook 中：
+
+```tsx
+async function login(prevState: any, formData: FormData) {
+  const res = await fetch('/login', { method: 'POST', body: formData })
+  return res.ok ? { ok: true } : { ok: false, error: '...' }
+}
+
+function LoginForm() {
+  const [state, formAction, isPending] = useActionState(login, { ok: false })
+  return (
+    <form action={formAction}>
+      <input name="email" />
+      <input name="password" type="password" />
+      <button disabled={isPending}>Sign in</button>
+      {state.error && <p>{state.error}</p>}
+    </form>
+  )
+}
+```
+
+## 依赖数组陷阱
+
+```tsx
+// ✗ 漏依赖：onClick 永远调用第一次渲染时的 doThing
+const onClick = useCallback(() => doThing(id), [])
+
+// ✓ 把 id 列入
+const onClick = useCallback(() => doThing(id), [id])
+```
+
+`react-hooks/exhaustive-deps` 规则会高亮缺失依赖。**永远不要为了"跳过某次更新"而省略依赖**——把意图编码到值中：
+
+```tsx
+// 仅希望"id 变化时不重新订阅，但订阅函数能读到最新 id"
+const idRef = useRef(id)
+useEffect(() => { idRef.current = id })
+
+useEffect(() => {
+  const sub = subscribe(() => use(idRef.current))
+  return () => sub.unsubscribe()
+}, [])                                        // 故意不依赖 id
+```
+
+## 闭包过期
+
+```tsx
+function Counter() {
+  const [count, setCount] = useState(0)
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      // 始终读到 0：本 effect 仅在挂载时跑一次，闭包捕获了最初的 count
+      console.log(count)
+    }, 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>
+}
+
+// 修复 1：把 count 列入依赖（每次重置 interval）
+useEffect(() => {
+  const id = setInterval(() => console.log(count), 1000)
+  return () => clearInterval(id)
+}, [count])
+
+// 修复 2：useReducer / 函数式更新（不依赖捕获值）
+useEffect(() => {
+  const id = setInterval(() => {
+    setCount(c => {
+      console.log(c)
+      return c
+    })
+  }, 1000)
+  return () => clearInterval(id)
+}, [])
+```
+
+## 自定义 Hook
+
+把组件中的 Hook 调用封装成可复用单元——任何 `use` 开头的函数：
+
+```tsx
+function useLocalStorage<T>(key: string, initial: T): [T, (v: T) => void] {
+  const [value, setValue] = useState<T>(() => {
+    const stored = localStorage.getItem(key)
+    return stored ? JSON.parse(stored) : initial
+  })
+
+  useEffect(() => {
+    localStorage.setItem(key, JSON.stringify(value))
+  }, [key, value])
+
+  return [value, setValue]
+}
+
+// 使用
+const [theme, setTheme] = useLocalStorage<'light' | 'dark'>('theme', 'light')
+```
+
+### 设计原则
+
+1. **每个自定义 Hook 解决单一问题**——不要做"万能 Hook"
+2. **命名以 `use` 开头**——ESLint 据此识别
+3. **返回稳定的 API**——优先返回 `[state, actions]` 数组或对象，而非散乱多值
+4. **不要把组件特定的逻辑封装成"通用 Hook"**——抽象先于服务对象就是过度设计
+
+### 几个常用模板
+
+```tsx
+// 防抖
+function useDebounced<T>(value: T, delay: number): T {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const id = setTimeout(() => setV(value), delay)
+    return () => clearTimeout(id)
+  }, [value, delay])
+  return v
+}
+
+// 上一次的值
+function usePrevious<T>(value: T): T | undefined {
+  const ref = useRef<T>(undefined)
+  useEffect(() => { ref.current = value })
+  return ref.current
+}
+
+// 是否首次渲染
+function useIsFirstRender(): boolean {
+  const ref = useRef(true)
+  useEffect(() => { ref.current = false }, [])
+  return ref.current
+}
+
+// 浏览器 API：matchMedia
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const mql = window.matchMedia(query)
+    const handler = (e: MediaQueryListEvent) => setMatches(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [query])
+  return matches
+}
+```
+
+## 小结
+
+- Hook 的两条铁律是 React 状态机制的硬性约束，配合 ESLint 规则可在编译期捕捉违规；
+- `useState` / `useReducer` 管 state；`useEffect` 管同步外部系统；`useRef` 管"非渲染相关"的可变值；`useContext` 读上下文；
+- `useMemo` / `useCallback` 是性能 escape hatch，盲用反而劣化体验；
+- React 19 引入的 `use` 打破"只在顶层调 Hook"的约束，可在条件中使用；
+- 自定义 Hook 让逻辑跨组件复用而无需 HOC 或 render props，是 React 生态的现代基石。

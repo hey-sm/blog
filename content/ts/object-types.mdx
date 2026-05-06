@@ -1,0 +1,645 @@
+---
+title: 对象类型
+description: Interface、Type、Object、Array、Tuple、Enum 与对象类型定义
+---
+
+# 对象类型
+
+TypeScript 提供多种方式定义对象类型，包括接口、类型别名、内联类型等。
+
+## 对象类型定义
+
+### 内联对象类型
+
+```ts
+function greet(person: { name: string; age: number }) {
+  return `Hello, ${person.name}!`
+}
+
+greet({ name: 'Alice', age: 25 })
+```
+
+**React 示例**：
+
+```tsx
+function UserCard({ user }: { user: { name: string; email: string } }) {
+  return (
+    <div>
+      <h3>{user.name}</h3>
+      <p>{user.email}</p>
+    </div>
+  )
+}
+```
+
+### 接口定义
+
+```ts
+interface Person {
+  name: string
+  age: number
+}
+
+function greet(person: Person) {
+  return `Hello, ${person.name}!`
+}
+```
+
+**React 示例**：
+
+```tsx
+interface UserCardProps {
+  user: {
+    name: string
+    email: string
+    avatar?: string
+  }
+  onEdit: (id: number) => void
+}
+
+function UserCard({ user, onEdit }: UserCardProps) {
+  return (
+    <div>
+      {user.avatar && <img src={user.avatar} alt={user.name} />}
+      <h3>{user.name}</h3>
+      <p>{user.email}</p>
+      <button onClick={() => onEdit(1)}>Edit</button>
+    </div>
+  )
+}
+```
+
+### 类型别名
+
+```ts
+type Person = {
+  name: string
+  age: number
+}
+
+function greet(person: Person) {
+  return `Hello, ${person.name}!`
+}
+```
+
+## 可选属性
+
+```ts
+interface User {
+  name: string
+  age: number
+  email?: string  // 可选属性
+}
+
+const user1: User = { name: 'Alice', age: 25 }  // ✅
+const user2: User = { name: 'Bob', age: 30, email: 'bob@example.com' }  // ✅
+```
+
+**React 示例**：
+
+```tsx
+interface ButtonProps {
+  label: string
+  onClick: () => void
+  variant?: 'primary' | 'secondary'  // 可选
+  disabled?: boolean                  // 可选
+}
+
+function Button({ 
+  label, 
+  onClick, 
+  variant = 'primary',  // 默认值
+  disabled = false 
+}: ButtonProps) {
+  return (
+    <button 
+      onClick={onClick} 
+      disabled={disabled}
+      className={`btn-${variant}`}
+    >
+      {label}
+    </button>
+  )
+}
+```
+
+## 只读属性
+
+```ts
+interface User {
+  readonly id: number
+  name: string
+}
+
+const user: User = { id: 1, name: 'Alice' }
+
+user.name = 'Bob'  // ✅ 允许
+user.id = 2        // ❌ 错误：只读属性
+```
+
+**React 示例**：
+
+```tsx
+interface Post {
+  readonly id: number
+  readonly createdAt: Date
+  title: string
+  content: string
+}
+
+function PostEditor({ post }: { post: Post }) {
+  // ❌ 错误
+  post.id = 2
+  post.createdAt = new Date()
+  
+  // ✅ 正确
+  const updatedPost = { ...post, title: 'New Title' }
+  
+  return <div>{post.title}</div>
+}
+```
+
+## 索引签名
+
+允许动态属性名：
+
+```ts
+interface StringMap {
+  [key: string]: string
+}
+
+const map: StringMap = {
+  name: 'Alice',
+  email: 'alice@example.com',
+  city: 'New York'
+}
+
+// 访问任意属性
+console.log(map['name'])
+console.log(map['unknown'])  // string | undefined
+```
+
+**React 示例**：
+
+```tsx
+interface FormData {
+  [key: string]: string | number | boolean
+}
+
+function Form() {
+  const [data, setData] = useState<FormData>({})
+  
+  const handleChange = (key: string, value: string | number | boolean) => {
+    setData({ ...data, [key]: value })
+  }
+  
+  return (
+    <div>
+      <input 
+        onChange={(e) => handleChange('name', e.target.value)}
+      />
+    </div>
+  )
+}
+```
+
+### 混合索引签名
+
+```ts
+interface User {
+  name: string
+  age: number
+  [key: string]: string | number  // 其他属性
+}
+
+const user: User = {
+  name: 'Alice',
+  age: 25,
+  city: 'New York',
+  country: 'USA'
+}
+```
+
+## 接口扩展
+
+```ts
+interface Person {
+  name: string
+  age: number
+}
+
+interface Employee extends Person {
+  employeeId: number
+  department: string
+}
+
+const employee: Employee = {
+  name: 'Alice',
+  age: 25,
+  employeeId: 1001,
+  department: 'Engineering'
+}
+```
+
+**多重继承**：
+
+```ts
+interface Nameable {
+  name: string
+}
+
+interface Ageable {
+  age: number
+}
+
+interface Person extends Nameable, Ageable {
+  email: string
+}
+```
+
+**React 示例**：
+
+```tsx
+interface BaseProps {
+  className?: string
+  style?: React.CSSProperties
+}
+
+interface ButtonProps extends BaseProps {
+  label: string
+  onClick: () => void
+}
+
+interface InputProps extends BaseProps {
+  value: string
+  onChange: (value: string) => void
+}
+
+function Button({ label, onClick, className, style }: ButtonProps) {
+  return (
+    <button onClick={onClick} className={className} style={style}>
+      {label}
+    </button>
+  )
+}
+```
+
+## 交叉类型
+
+使用 `&` 组合多个类型：
+
+```ts
+type Person = {
+  name: string
+  age: number
+}
+
+type Employee = {
+  employeeId: number
+  department: string
+}
+
+type EmployeePerson = Person & Employee
+
+const employee: EmployeePerson = {
+  name: 'Alice',
+  age: 25,
+  employeeId: 1001,
+  department: 'Engineering'
+}
+```
+
+**React 示例**：
+
+```tsx
+type BaseProps = {
+  className?: string
+}
+
+type ButtonProps = BaseProps & {
+  label: string
+  onClick: () => void
+}
+
+type InputProps = BaseProps & {
+  value: string
+  onChange: (value: string) => void
+}
+```
+
+## Interface vs Type
+
+### 相同点
+
+都可以定义对象类型：
+
+```ts
+interface User1 {
+  name: string
+}
+
+type User2 = {
+  name: string
+}
+```
+
+### 不同点
+
+| 特性 | Interface | Type |
+| ---- | --------- | ---- |
+| 扩展 | `extends` | `&` |
+| 声明合并 | ✅ 支持 | ❌ 不支持 |
+| 联合类型 | ❌ 不支持 | ✅ 支持 |
+| 元组 | ❌ 不支持 | ✅ 支持 |
+| 映射类型 | ❌ 不支持 | ✅ 支持 |
+
+**声明合并**：
+
+```ts
+// Interface 支持声明合并
+interface User {
+  name: string
+}
+
+interface User {
+  age: number
+}
+
+// 合并为
+interface User {
+  name: string
+  age: number
+}
+
+// Type 不支持
+type User = {
+  name: string
+}
+
+type User = {  // ❌ 错误：重复标识符
+  age: number
+}
+```
+
+**联合类型**：
+
+```ts
+// Type 支持联合类型
+type Status = 'pending' | 'success' | 'error'
+
+type Result = 
+  | { status: 'success'; data: string }
+  | { status: 'error'; error: string }
+
+// Interface 不支持
+interface Status = 'pending' | 'success' | 'error'  // ❌ 错误
+```
+
+### 推荐使用场景
+
+**使用 Interface**：
+- 定义对象形状
+- 需要声明合并
+- 公共 API 定义
+
+**使用 Type**：
+- 联合类型
+- 元组类型
+- 映射类型
+- 工具类型
+
+**React 中的推荐**：
+
+```tsx
+// ✅ Props 使用 Interface
+interface ButtonProps {
+  label: string
+  onClick: () => void
+}
+
+// ✅ 联合类型使用 Type
+type ButtonVariant = 'primary' | 'secondary' | 'danger'
+
+// ✅ 复杂类型使用 Type
+type AsyncState<T> = 
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; data: T }
+  | { status: 'error'; error: Error }
+```
+
+## 嵌套对象类型
+
+```ts
+interface Address {
+  street: string
+  city: string
+  country: string
+}
+
+interface User {
+  name: string
+  age: number
+  address: Address
+}
+
+const user: User = {
+  name: 'Alice',
+  age: 25,
+  address: {
+    street: '123 Main St',
+    city: 'New York',
+    country: 'USA'
+  }
+}
+```
+
+**React 示例**：
+
+```tsx
+interface User {
+  id: number
+  name: string
+  profile: {
+    avatar: string
+    bio: string
+    social: {
+      twitter?: string
+      github?: string
+    }
+  }
+}
+
+function UserProfile({ user }: { user: User }) {
+  return (
+    <div>
+      <img src={user.profile.avatar} alt={user.name} />
+      <h3>{user.name}</h3>
+      <p>{user.profile.bio}</p>
+      {user.profile.social.github && (
+        <a href={`https://github.com/${user.profile.social.github}`}>
+          GitHub
+        </a>
+      )}
+    </div>
+  )
+}
+```
+
+## 函数类型属性
+
+```ts
+interface Calculator {
+  add: (a: number, b: number) => number
+  subtract: (a: number, b: number) => number
+}
+
+const calc: Calculator = {
+  add: (a, b) => a + b,
+  subtract: (a, b) => a - b
+}
+```
+
+**React 示例**：
+
+```tsx
+interface FormProps {
+  onSubmit: (data: FormData) => void
+  onCancel: () => void
+  onValidate?: (data: FormData) => boolean
+}
+
+function Form({ onSubmit, onCancel, onValidate }: FormProps) {
+  const handleSubmit = (data: FormData) => {
+    if (onValidate && !onValidate(data)) {
+      return
+    }
+    onSubmit(data)
+  }
+  
+  return (
+    <form onSubmit={(e) => {
+      e.preventDefault()
+      handleSubmit(data)
+    }}>
+      {/* ... */}
+    </form>
+  )
+}
+```
+
+## 泛型对象类型
+
+```ts
+interface Box<T> {
+  value: T
+}
+
+const numberBox: Box<number> = { value: 123 }
+const stringBox: Box<string> = { value: 'hello' }
+```
+
+**React 示例**：
+
+```tsx
+interface ListProps<T> {
+  items: T[]
+  renderItem: (item: T) => React.ReactNode
+  keyExtractor: (item: T) => string | number
+}
+
+function List<T>({ items, renderItem, keyExtractor }: ListProps<T>) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={keyExtractor(item)}>
+          {renderItem(item)}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// 使用
+interface User {
+  id: number
+  name: string
+}
+
+<List<User>
+  items={users}
+  renderItem={(user) => <div>{user.name}</div>}
+  keyExtractor={(user) => user.id}
+/>
+```
+
+## 最佳实践
+
+### ✅ 使用 Interface 定义 Props
+
+```tsx
+// ✅ 推荐
+interface ButtonProps {
+  label: string
+  onClick: () => void
+}
+
+// ❌ 不推荐
+type ButtonProps = {
+  label: string
+  onClick: () => void
+}
+```
+
+### ✅ 使用可选属性代替 undefined
+
+```ts
+// ❌ 不推荐
+interface User {
+  name: string
+  email: string | undefined
+}
+
+// ✅ 推荐
+interface User {
+  name: string
+  email?: string
+}
+```
+
+### ✅ 使用 readonly 保护数据
+
+```ts
+interface Config {
+  readonly apiUrl: string
+  readonly timeout: number
+}
+```
+
+### ✅ 避免过度嵌套
+
+```ts
+// ❌ 过度嵌套
+interface User {
+  profile: {
+    personal: {
+      name: {
+        first: string
+        last: string
+      }
+    }
+  }
+}
+
+// ✅ 扁平化
+interface UserName {
+  first: string
+  last: string
+}
+
+interface User {
+  name: UserName
+}
+```
+
+下一章 [类型推断](/ts/type-inference) 介绍 TypeScript 的类型推断机制。

@@ -1,0 +1,279 @@
+---
+title: 配置体系
+description: next.config.ts、环境变量、TypeScript 与 ESLint 配置、Turbopack 插件
+---
+
+# 配置体系
+
+Next.js 16 通过 `next.config.ts`、环境变量、TypeScript 配置的一体化实现"零配置启动，按需覆盖"。
+
+## `next.config.ts`
+
+```ts filename="next.config.ts"
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  // 配置项
+}
+
+export default nextConfig
+```
+
+### 常用配置项
+
+| 配置 | 类型 | 默认 | 说明 |
+| ---- | ---- | ---- | ---- |
+| `output` | `'standalone' \| undefined` | `undefined` | `standalone` 用于 Docker 部署 |
+| `images` | `ImageConfig` | 默认 | 远程图片域名、格式、大小 |
+| `logging` | `{ fetches?: { fullUrl?: boolean } }` | - | fetch 日志级别 |
+| `serverExternalPackages` | `string[]` | `[]` | 不打包的服务端依赖 |
+| `transpilePackages` | `string[]` | `[]` | 需转译的 node_modules 包 |
+| `experimental` | `ExperimentalConfig` | - | 实验性功能 |
+| `headers` | `() => Promise<Header[]>` | - | 全局自定义头 |
+| `redirects` | `() => Promise<Redirect[]>` | - | 全局重定向 |
+| `rewrites` | `() => Promise<Rewrite[]>` | - | 全局重写 |
+| `trailingSlash` | `boolean` | `false` | URL 添加/移除末尾 `/` |
+| `reactStrictMode` | `boolean` | `true` | React Strict Mode |
+
+### 完整示例
+
+```ts filename="next.config.ts"
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'images.unsplash.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'cdn.example.com',
+        port: '',
+        pathname: '/blog/**',
+      },
+    ],
+    formats: ['image/avif', 'image/webp'],
+  },
+
+  logging: {
+    fetches: {
+      fullUrl: true,
+    },
+  },
+
+  serverExternalPackages: ['@prisma/client', 'bcrypt'],
+
+  async headers() {
+    return [
+      {
+        source: '/api/:path*',
+        headers: [
+          { key: 'Access-Control-Allow-Origin', value: '*' },
+        ],
+      },
+    ]
+  },
+
+  async redirects() {
+    return [
+      {
+        source: '/old-blog/:slug',
+        destination: '/blog/:slug',
+        permanent: true,
+      },
+    ]
+  },
+}
+
+export default nextConfig
+```
+
+## 环境变量
+
+### 默认加载的文件
+
+```text
+.env                # 所有环境，通常提交到 git（含默认值）
+.env.local          # 本地覆盖，不提交
+.env.development    # next dev 时
+.env.production     # next start 时
+```
+
+Next.js 16 对 `.env` 的加载遵循 dotenv 标准：
+
+```
+NEXT_PUBLIC_*  → 浏览器可见
+其他变量        → 仅服务端可见
+```
+
+### `NEXT_PUBLIC_*` 前缀
+
+```bash filename=".env.local"
+NEXT_PUBLIC_API_URL=https://api.example.com    # 客户端可见
+DATABASE_URL=postgresql://localhost:5432/db    # 仅服务端
+```
+
+```tsx
+// 客户端代码
+const apiUrl = process.env.NEXT_PUBLIC_API_URL  // ✓
+
+// 私有变量不可在客户端访问 — 编译时报 undefined
+```
+
+### 服务端读取环境变量
+
+```tsx filename="app/page.tsx"
+export default async function Page() {
+  const dbUrl = process.env.DATABASE_URL  // ✓ Server Component
+  // ...
+}
+```
+
+`DATABASE_URL` 永远不会出现在浏览器 bundle 中——Next.js 在构建时用一个 marker 替换它。
+
+### Edge Runtime 的环境变量
+
+Middleware 和 Edge Route Handlers 中，`process.env` **不可用**——Edge 环境没有 Node.js 全局对象：
+
+```ts filename="middleware.ts"
+// ✗ Edge 中不可用
+const dbUrl = process.env.DATABASE_URL
+```
+
+使用 `process.env` 访问时 Next.js 会将值内联到 bundle；但这种行为在 Edge 中不保证。推荐用 `NextRequest` 或在服务端组件中读后传到 middleware。
+
+## TypeScript 配置
+
+`tsconfig.json`：
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+要点：
+- **`plugins: [{ name: "next" }]`**：Next.js TypeScript 插件，提供页面类型检查与路由提示
+- **`moduleResolution: "bundler"`**：适配 ESM + Turbopack
+- **`paths`** 别名必须与 `next.config.ts` 中对应配置同时维护
+
+## ESLint 配置
+
+```json filename=".eslintrc.json"
+{
+  "extends": ["next/core-web-vitals", "next/typescript"]
+}
+```
+
+`next/core-web-vitals` 包含：
+- `eslint-plugin-react-hooks`（严格规则）
+- `eslint-plugin-next`（Link、Image 正确用法检查）
+- Core Web Vitals 相关规则（`@next/next/no-html-link-for-pages` 等）
+
+## Turbopack 配置
+
+Next.js 16 默认使用 Turbopack。如有残留的 Webpack 配置，需要迁移：
+
+```ts filename="next.config.ts"
+// Webpack (仅 Pages Router 或显式禁用 Turbo)
+const nextConfig: NextConfig = {
+  webpack: (config, { isServer }) => {
+    // ...
+    return config
+  },
+}
+
+// Turbopack 等价（实验性）
+const nextConfig: NextConfig = {
+  experimental: {
+    turbo: {
+      rules: {
+        // ...
+      },
+    },
+  },
+}
+```
+
+## 配置函数 vs 配置对象
+
+部分配置接受**函数**形式，用于动态场景：
+
+```ts filename="next.config.ts"
+const nextConfig: NextConfig = {
+  // 静态 — 构建时确定
+  images: { ... },
+
+  // 动态 — 运行时确定
+  async headers() {
+    const headers = await fetchHeadersFromCMS()
+    return headers
+  },
+}
+```
+
+动态函数在**每次请求时**执行（但有缓存），不应在其中执行耗时操作。
+
+## 陷阱
+
+### `next.config.ts` 在 Edge 中也执行
+
+Headers / Redirects / Rewrites 在 Edge 路由层处理。如果配置函数中有 Node.js 特定 API（如 `fs`），在 Edge 环境会报错：
+
+```ts filename="next.config.ts"
+import fs from 'fs'
+
+const nextConfig: NextConfig = {
+  async rewrites() {
+    const config = JSON.parse(fs.readFileSync('./rewrites.json', 'utf-8'))
+    // ✗ Edge 环境没有 fs
+    return config
+  },
+}
+```
+
+**修复**：使用 `process.env` 或硬编码配置。
+
+### `NEXT_PUBLIC_` 变量在构建时固化
+
+```bash
+# .env.production
+NEXT_PUBLIC_API_URL=https://api.example.com
+```
+
+该值在 `next build` 时被**内联**到客户端 bundle。运行时的 `docker run -e NEXT_PUBLIC_API_URL=...` 不会覆盖——必须重新构建。
+
+### `serverExternalPackages` 不要滥用
+
+把太多包标记为 external 会增加冷启动时间（每个包独立 require）。只在确实有 CJS / 二进制兼容问题时使用。
+
+## 小结
+
+- `next.config.ts` 是核心配置文件，支持静态值 + 动态函数；
+- 环境变量通过 `NEXT_PUBLIC_` 前缀区分客户端 / 服务端可见范围；
+- Next.js 16 默认 Turbopack，Webpack 配置需迁移或显式回退；
+- 配置函数需注意 Edge 环境兼容性。

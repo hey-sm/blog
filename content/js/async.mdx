@@ -1,0 +1,473 @@
+---
+title: 异步
+description: 事件循环、宏任务与微任务、Promise、async/await、Fetch
+---
+
+# 异步
+
+JavaScript 主线程是**单线程**的——任何长时间的同步操作都会阻塞 UI 渲染或服务器响应。"异步"在 JavaScript 中是借助宿主环境（浏览器 / Node.js）的事件循环实现的延迟执行机制。本章自底向上依次梳理：事件循环 → 回调 → Promise → `async/await`。
+
+## 事件循环
+
+### 调用栈与任务队列
+
+JavaScript 运行时的核心模型：
+
+```text
+        ┌──────────────────────────────────────┐
+        │           Call Stack（同步执行）      │
+        └──────────────┬───────────────────────┘
+                       │ 同步代码执行
+                       ↓
+        ┌──────────────────────────────────────┐
+        │       Microtask Queue（微任务）       │  ← Promise.then / queueMicrotask
+        └──────────────┬───────────────────────┘
+                       │ 当前栈空 + 当前批微任务全部执行完
+                       ↓
+        ┌──────────────────────────────────────┐
+        │        Task Queue（宏任务）           │  ← setTimeout / setInterval / I/O / UI 事件
+        └──────────────────────────────────────┘
+```
+
+执行模型可总结为以下规则：
+
+1. **同步代码**在调用栈上顺序执行；
+2. 调用栈清空后，引擎**清空全部微任务**（Microtask Queue）；
+3. 取出**一个**宏任务执行 → 再次清空微任务 → 取下一个宏任务；
+4. （浏览器）每轮宏任务后视情况执行渲染。
+
+### 宏任务 vs 微任务
+
+| 类别 | 来源 |
+| ---- | ---- |
+| 宏任务（task / macrotask） | `setTimeout` / `setInterval` / I/O / UI 事件 / `setImmediate`（Node）/ `MessageChannel` |
+| 微任务（microtask） | `Promise.then` / `queueMicrotask` / `MutationObserver` / `process.nextTick`（Node，优先级更高） |
+
+```js
+console.log('1')
+
+setTimeout(() => console.log('2'), 0)         // 宏任务
+
+Promise.resolve().then(() => console.log('3')) // 微任务
+
+queueMicrotask(() => console.log('4'))         // 微任务
+
+console.log('5')
+
+// 输出顺序：1 5 3 4 2
+```
+
+执行流程：
+
+1. 打印 `'1'`；
+2. `setTimeout` 注册宏任务；
+3. `.then` 注册微任务 #1；
+4. `queueMicrotask` 注册微任务 #2；
+5. 打印 `'5'`，调用栈清空；
+6. 执行所有微任务：`'3'`、`'4'`；
+7. 取一个宏任务：`'2'`。
+
+### 微任务的"清空"语义
+
+微任务被清空时，**新加入的微任务也会在同一轮中执行**：
+
+```js
+Promise.resolve().then(() => {
+  console.log('a')
+  Promise.resolve().then(() => console.log('b'))
+})
+Promise.resolve().then(() => console.log('c'))
+
+// 输出：a c b
+// b 是 a 中加入的，仍在本轮微任务清空中执行
+```
+
+这导致在递归 `.then` 中可能"无限"添加微任务，阻止后续宏任务运行。
+
+### Node.js 的细分阶段
+
+Node.js 事件循环由 libuv 驱动，分为多个阶段：
+
+```text
+timers      → 处理 setTimeout / setInterval 回调
+pending     → 系统 I/O 错误回调
+idle/prepare→ 内部使用
+poll        → 处理 I/O 事件
+check       → 处理 setImmediate
+close       → 关闭事件回调
+```
+
+每两个阶段之间会清空 microtask 与 `process.nextTick` 队列（`nextTick` 优先级高于 Promise）。
+
+```js
+// Node.js
+setImmediate(() => console.log('immediate'))
+setTimeout(() => console.log('timeout'), 0)
+process.nextTick(() => console.log('nextTick'))
+Promise.resolve().then(() => console.log('promise'))
+
+// 典型输出（顺序与启动状态相关）：
+// nextTick
+// promise
+// timeout
+// immediate
+```
+
+## 回调与回调地狱
+
+ES6 之前异步只能用回调：
+
+```js
+fs.readFile('a.txt', (err, a) => {
+  if (err) return cb(err)
+  fs.readFile('b.txt', (err, b) => {
+    if (err) return cb(err)
+    fs.writeFile('c.txt', a + b, err => {
+      if (err) return cb(err)
+      cb(null, 'done')
+    })
+  })
+})
+```
+
+回调地狱（callback hell）的核心问题：
+
+- 错误必须层层 `if (err) return`
+- 控制流随业务嵌套深化
+- 难以并行 / 取消 / 重试
+
+`Promise` 与 `async/await` 是对此的语法和模型升级。
+
+## Promise
+
+`Promise` 是 ES6 引入的对**异步操作最终结果**的抽象。每个 Promise 处于以下三种状态之一，且**只能从 `pending` 单向迁移**：
+
+```text
+       resolve(value)
+pending ───────────────► fulfilled
+   │
+   │  reject(reason)
+   └─────────────────► rejected
+```
+
+### 构造与基本用法
+
+```js
+const p = new Promise((resolve, reject) => {
+  setTimeout(() => resolve('done'), 100)
+})
+
+p.then(value => console.log(value))           // → 'done'
+
+// 链式
+fetch('/api')
+  .then(res => res.json())
+  .then(data => render(data))
+  .catch(err => console.error(err))
+  .finally(() => hideLoading())
+```
+
+### `.then` 的返回值
+
+`.then` **总是返回新的 Promise**，由回调的返回值决定：
+
+| 回调返回 | 返回 Promise 的状态 |
+| -------- | -------------------- |
+| 普通值 `v` | `fulfilled(v)` |
+| `throw err` | `rejected(err)` |
+| 另一个 Promise `p2` | 跟随 `p2` 的状态 |
+| `thenable`（带 `.then` 的对象） | 调用其 `.then` 跟随 |
+
+```js
+Promise.resolve(1)
+  .then(v => v + 1)                            // → 2
+  .then(v => Promise.resolve(v * 10))          // → 20
+  .then(v => { throw new Error('boom') })      // 转入 rejected
+  .catch(err => console.log('caught:', err.message))
+  .then(() => 'next')                          // catch 后继续链
+```
+
+### 静态方法
+
+| 方法 | 行为 |
+| ---- | ---- |
+| `Promise.resolve(v)` | 立即 fulfilled |
+| `Promise.reject(r)` | 立即 rejected |
+| `Promise.all([p1, p2])` | 全部 fulfilled 才 fulfilled；任一 rejected 立即 rejected |
+| `Promise.allSettled([...])` | 全部完成（无论成败）后 fulfilled，结果数组 |
+| `Promise.race([...])` | 第一个完成（无论成败） |
+| `Promise.any([...])` | 第一个 fulfilled；全部 rejected → `AggregateError` |
+| `Promise.withResolvers()`（ES2024） | 返回 `{ promise, resolve, reject }` |
+
+```js
+// 并行加载多个资源
+const [users, posts, tags] = await Promise.all([
+  fetchUsers(),
+  fetchPosts(),
+  fetchTags()
+])
+
+// 容忍部分失败
+const results = await Promise.allSettled([fetchA(), fetchB()])
+results.forEach(r => {
+  if (r.status === 'fulfilled') process(r.value)
+  else                          log(r.reason)
+})
+
+// 超时模式
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+  ])
+}
+```
+
+### Promise 的常见错误
+
+#### 1. 忘记 return
+
+```js
+// ✗ 内部 fetch 的结果丢失
+fn().then(() => {
+  fetch('/api')
+})
+
+// ✓ 必须 return 才能等待
+fn().then(() => {
+  return fetch('/api')
+})
+```
+
+#### 2. 嵌套 `.then`
+
+链式优于嵌套：
+
+```js
+// ✗
+a().then(va => {
+  b(va).then(vb => {
+    c(vb).then(vc => console.log(vc))
+  })
+})
+
+// ✓
+a().then(b).then(c).then(console.log)
+```
+
+#### 3. 错误未处理
+
+未被 `.catch` 的 Promise 会触发 `unhandledrejection` 事件（浏览器）/ Node 进程退出。务必在每条链终点放置 `.catch`，或使用 `async/await + try/catch`。
+
+## `async / await`
+
+ES2017 引入。本质是 Promise 的语法糖：
+
+```js
+async function load() {
+  const res = await fetch('/api')
+  const data = await res.json()
+  return data
+}
+```
+
+### `async` 的语义
+
+- `async` 函数**总是返回 Promise**：
+  - 显式返回普通值 `v` → `Promise.resolve(v)`
+  - 显式返回 Promise → 直接跟随
+  - 抛错 → `Promise.reject(err)`
+
+```js
+async function f() { return 1 }
+f() instanceof Promise                        // → true
+f().then(v => console.log(v))                 // → 1
+```
+
+### `await` 的语义
+
+`await expr`：
+
+1. 求值 `expr`（若不是 Promise 则包裹一层）
+2. **暂停**当前函数，控制权交还调用者
+3. 当 Promise settle 时，将结果作为 `await` 表达式的值，继续后续代码
+
+`await` 后续代码相当于在微任务中执行：
+
+```js
+async function f() {
+  console.log('1')
+  await null
+  console.log('2')                            // 微任务
+}
+f()
+console.log('3')
+
+// 输出：1 3 2
+```
+
+### 异常处理
+
+```js
+async function load() {
+  try {
+    const res = await fetch('/api')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  } catch (err) {
+    console.error('failed:', err)
+    return null
+  }
+}
+```
+
+### 串行 vs 并行
+
+```js
+// 串行：总耗时 t1 + t2 + t3
+const a = await fetchA()
+const b = await fetchB()
+const c = await fetchC()
+
+// 并行：总耗时 max(t1, t2, t3)
+const [a, b, c] = await Promise.all([fetchA(), fetchB(), fetchC()])
+
+// 启动并行但顺序消费（适合迭代场景）
+const tasks = [fetchA(), fetchB(), fetchC()]
+for (const t of tasks) {
+  console.log(await t)
+}
+```
+
+#### `forEach` 中的 `await` 失效
+
+```js
+// ✗ forEach 不会等待回调内的 await
+await items.forEach(async item => {
+  await save(item)
+})
+console.log('done')                           // 立即输出
+
+// ✓ for...of
+for (const item of items) {
+  await save(item)
+}
+
+// ✓ 并行
+await Promise.all(items.map(save))
+```
+
+### 顶层 await（ES2022）
+
+ES Module 中可在顶层使用 `await`：
+
+```js
+// app.mjs
+const config = await fetch('/config.json').then(r => r.json())
+export { config }
+```
+
+仅在 ESM 模块中生效；CommonJS 与脚本不可使用。
+
+### 取消（AbortController）
+
+`AbortController` 是规范定义的取消机制，被 `fetch` 等原生 API 接受：
+
+```js
+const ctrl = new AbortController()
+const timer = setTimeout(() => ctrl.abort(), 5_000)
+
+try {
+  const res = await fetch('/api', { signal: ctrl.signal })
+  clearTimeout(timer)
+  return await res.json()
+} catch (err) {
+  if (err.name === 'AbortError') console.log('cancelled')
+  else throw err
+}
+```
+
+## 定时器
+
+```js
+const id = setTimeout(() => console.log('once'), 1000)
+clearTimeout(id)
+
+const intervalId = setInterval(() => tick(), 1000)
+clearInterval(intervalId)
+
+// queueMicrotask：手动入微任务队列
+queueMicrotask(() => console.log('micro'))
+
+// setImmediate：仅 Node.js
+setImmediate(() => console.log('after I/O'))
+```
+
+注意 `setTimeout(fn, 0)` 并非"立即执行"——HTML 规范规定**最小延迟为 4ms**（嵌套 5 层之后）。微任务始终更早执行。
+
+## 网络请求 API
+
+### `Fetch`（推荐）
+
+```js
+const res = await fetch('https://api.example.com/users', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'js' })
+})
+
+if (!res.ok) throw new Error(`HTTP ${res.status}`)
+const data = await res.json()
+```
+
+特点：
+
+- 基于 Promise；
+- 默认不携带 cookie（设置 `credentials: 'include'`）；
+- HTTP 错误（4xx / 5xx）**不会** reject，需要手动检查 `res.ok`；
+- 网络错误才 reject。
+
+### `XMLHttpRequest`（遗留）
+
+事件驱动，已不推荐用于新代码：
+
+```js
+const xhr = new XMLHttpRequest()
+xhr.open('GET', '/api')
+xhr.onload = () => console.log(xhr.responseText)
+xhr.onerror = () => console.error('network error')
+xhr.send()
+```
+
+### 流式响应
+
+```js
+const res = await fetch('/big.json')
+const reader = res.body.getReader()
+const decoder = new TextDecoder()
+
+while (true) {
+  const { value, done } = await reader.read()
+  if (done) break
+  console.log(decoder.decode(value))
+}
+```
+
+## 调度优先级
+
+实战中应根据任务特性选择调度方式：
+
+| 需求 | 推荐方式 |
+| ---- | -------- |
+| 状态更新后做 DOM 同步操作 | `requestAnimationFrame`（浏览器）/ 微任务 |
+| 同步代码后立即继续 | `queueMicrotask` |
+| 让出主线程，避免阻塞 | `setTimeout(fn, 0)` 或 `MessageChannel` |
+| 空闲时执行 | `requestIdleCallback`（实验性） |
+
+## 小结
+
+- 单线程 + 事件循环是 JavaScript 异步的根基；
+- 微任务**插队执行**，宏任务**轮流取一个**；
+- Promise 提供值化的异步抽象，`async/await` 是其语法糖；
+- 始终区分串行与并行，`Promise.all` 是默认并行手段；
+- HTTP 错误不会让 `fetch` reject，必须手动判 `res.ok`。

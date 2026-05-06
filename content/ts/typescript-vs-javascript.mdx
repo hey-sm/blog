@@ -1,0 +1,557 @@
+---
+title: TypeScript vs JavaScript
+description: TypeScript 与 JavaScript 的对比、迁移策略与渐进式采用
+---
+
+# TypeScript vs JavaScript
+
+深入对比 TypeScript 和 JavaScript 的差异，以及如何从 JavaScript 迁移到 TypeScript。
+
+## 核心差异
+
+### 1. 类型系统
+
+**JavaScript**：动态类型，运行时检查
+
+```js
+// JavaScript
+function add(a, b) {
+  return a + b
+}
+
+add(1, 2)        // 3
+add('1', '2')    // '12'
+add(1, '2')      // '12' - 隐式类型转换
+add({}, [])      // '[object Object]' - 意外结果
+```
+
+**TypeScript**：静态类型，编译时检查
+
+```ts
+// TypeScript
+function add(a: number, b: number): number {
+  return a + b
+}
+
+add(1, 2)        // ✅ 3
+add('1', '2')    // ❌ 类型错误
+add(1, '2')      // ❌ 类型错误
+add({}, [])      // ❌ 类型错误
+```
+
+### 2. 错误发现时机
+
+**JavaScript**：运行时才发现错误
+
+```js
+// JavaScript
+const user = { name: 'Alice', age: 25 }
+
+// 拼写错误，运行时才报错
+console.log(user.nmae)  // undefined
+console.log(user.age.toUpperCase())  // 💥 运行时错误
+```
+
+**TypeScript**：编译时就发现错误
+
+```ts
+// TypeScript
+interface User {
+  name: string
+  age: number
+}
+
+const user: User = { name: 'Alice', age: 25 }
+
+console.log(user.nmae)  // ❌ 属性 'nmae' 不存在，你是不是想用 'name'？
+console.log(user.age.toUpperCase())  // ❌ 类型 'number' 上不存在 'toUpperCase'
+```
+
+### 3. IDE 支持
+
+**JavaScript**：有限的代码提示
+
+```js
+// JavaScript - IDE 只能猜测
+function processUser(user) {
+  // IDE 不知道 user 有什么属性
+  user.  // 没有自动补全
+}
+```
+
+**TypeScript**：完整的代码提示
+
+```ts
+// TypeScript - IDE 知道所有类型信息
+interface User {
+  id: number
+  name: string
+  email: string
+}
+
+function processUser(user: User) {
+  user.  // IDE 自动提示：id, name, email
+}
+```
+
+### 4. 重构能力
+
+**JavaScript**：重构风险高
+
+```js
+// JavaScript
+function getUserName(user) {
+  return user.name
+}
+
+// 修改属性名
+const user = { fullName: 'Alice' }  // 改了属性名
+
+getUserName(user)  // 💥 返回 undefined，运行时才发现
+```
+
+**TypeScript**：重构安全
+
+```ts
+// TypeScript
+interface User {
+  name: string  // 改为 fullName
+}
+
+function getUserName(user: User) {
+  return user.name  // ❌ 编译时就报错
+}
+```
+
+## 功能对比
+
+| 特性 | JavaScript | TypeScript |
+| ---- | ---------- | ---------- |
+| 类型检查 | 运行时 | 编译时 |
+| 类型注解 | ❌ | ✅ |
+| 接口 | ❌ | ✅ |
+| 枚举 | ❌ | ✅ |
+| 泛型 | ❌ | ✅ |
+| 装饰器 | Stage 3 提案 | ✅ 稳定支持 |
+| 命名空间 | ❌ | ✅ |
+| 抽象类 | ❌ | ✅ |
+| 访问修饰符 | ❌ | ✅ |
+| 编译步骤 | ❌ | ✅ 需要 |
+| 学习曲线 | 低 | 中等 |
+
+## React 中的对比
+
+### Props 类型安全
+
+**JavaScript**：需要 PropTypes 或运行时检查
+
+```jsx
+// JavaScript + PropTypes
+import PropTypes from 'prop-types'
+
+function Button({ label, onClick, variant }) {
+  return (
+    <button onClick={onClick} className={variant}>
+      {label}
+    </button>
+  )
+}
+
+Button.propTypes = {
+  label: PropTypes.string.isRequired,
+  onClick: PropTypes.func.isRequired,
+  variant: PropTypes.oneOf(['primary', 'secondary'])
+}
+
+// 使用时没有类型提示
+<Button label="Click" onClick={() => {}} variant="danger" />
+// ⚠️ 运行时警告：variant 应该是 'primary' 或 'secondary'
+```
+
+**TypeScript**：编译时类型检查
+
+```tsx
+// TypeScript
+interface ButtonProps {
+  label: string
+  onClick: () => void
+  variant?: 'primary' | 'secondary'
+}
+
+function Button({ label, onClick, variant = 'primary' }: ButtonProps) {
+  return (
+    <button onClick={onClick} className={variant}>
+      {label}
+    </button>
+  )
+}
+
+// 使用时有完整类型提示
+<Button label="Click" onClick={() => {}} variant="danger" />
+// ❌ 编译时错误：类型 '"danger"' 不能赋值给类型 '"primary" | "secondary"'
+```
+
+### State 类型推断
+
+**JavaScript**：类型不明确
+
+```jsx
+// JavaScript
+function Counter() {
+  const [count, setCount] = useState(0)
+  
+  // 可能出错
+  setCount('10')  // ⚠️ 运行时才发现问题
+  
+  return <div>{count}</div>
+}
+```
+
+**TypeScript**：类型安全
+
+```tsx
+// TypeScript
+function Counter() {
+  const [count, setCount] = useState(0)  // 推断为 number
+  
+  setCount('10')  // ❌ 编译时错误
+  setCount(10)    // ✅ 正确
+  
+  return <div>{count}</div>
+}
+
+// 复杂状态
+interface User {
+  id: number
+  name: string
+}
+
+function UserProfile() {
+  const [user, setUser] = useState<User | null>(null)
+  
+  // 类型守卫
+  if (user) {
+    console.log(user.name)  // ✅ TypeScript 知道 user 不为 null
+  }
+  
+  return <div>{user?.name}</div>
+}
+```
+
+### 事件处理
+
+**JavaScript**：事件类型不明确
+
+```jsx
+// JavaScript
+function Form() {
+  const handleSubmit = (e) => {
+    e.preventDefault()
+    // e 的类型不明确
+  }
+  
+  const handleChange = (e) => {
+    console.log(e.target.value)
+    // 可能访问不存在的属性
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input onChange={handleChange} />
+    </form>
+  )
+}
+```
+
+**TypeScript**：精确的事件类型
+
+```tsx
+// TypeScript
+function Form() {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    // e 的类型明确
+  }
+  
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log(e.target.value)  // ✅ 类型安全
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input onChange={handleChange} />
+    </form>
+  )
+}
+```
+
+## 迁移策略
+
+### 1. 渐进式迁移
+
+**阶段 1：添加 TypeScript 支持**
+
+```bash
+# 安装 TypeScript
+npm install --save-dev typescript @types/react @types/react-dom
+
+# 创建 tsconfig.json
+npx tsc --init
+```
+
+**阶段 2：重命名文件**
+
+```bash
+# 逐步重命名
+mv src/App.js src/App.tsx
+mv src/utils.js src/utils.ts
+```
+
+**阶段 3：添加类型注解**
+
+```tsx
+// 从简单的类型开始
+interface Props {
+  title: string
+}
+
+function Header({ title }: Props) {
+  return <h1>{title}</h1>
+}
+```
+
+**阶段 4：启用严格模式**
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true
+  }
+}
+```
+
+### 2. 允许 JavaScript 文件
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "allowJs": true,  // 允许 .js 文件
+    "checkJs": false  // 不检查 .js 文件
+  }
+}
+```
+
+这样可以混合使用 `.js` 和 `.ts` 文件。
+
+### 3. 使用 JSDoc 过渡
+
+在迁移前，可以用 JSDoc 添加类型信息：
+
+```js
+// JavaScript with JSDoc
+/**
+ * @param {string} name
+ * @param {number} age
+ * @returns {{ name: string, age: number }}
+ */
+function createUser(name, age) {
+  return { name, age }
+}
+```
+
+### 4. 处理第三方库
+
+```bash
+# 安装类型定义
+npm install --save-dev @types/lodash
+npm install --save-dev @types/axios
+```
+
+如果没有类型定义：
+
+```ts
+// 创建 types.d.ts
+declare module 'some-library' {
+  export function someFunction(): void
+}
+```
+
+## 常见迁移问题
+
+### 1. any 类型滥用
+
+```ts
+// ❌ 错误：失去类型安全
+function processData(data: any) {
+  return data.value
+}
+
+// ✅ 正确：使用具体类型
+interface Data {
+  value: string
+}
+
+function processData(data: Data) {
+  return data.value
+}
+
+// ✅ 或使用泛型
+function processData<T extends { value: string }>(data: T) {
+  return data.value
+}
+```
+
+### 2. 隐式 any
+
+```ts
+// ❌ 错误：参数隐式具有 'any' 类型
+function map(arr, fn) {
+  return arr.map(fn)
+}
+
+// ✅ 正确：添加类型注解
+function map<T, U>(arr: T[], fn: (item: T) => U): U[] {
+  return arr.map(fn)
+}
+```
+
+### 3. null 和 undefined
+
+```ts
+// JavaScript 中常见的问题
+function getUserName(user) {
+  return user.name  // user 可能是 null
+}
+
+// TypeScript 解决方案
+interface User {
+  name: string
+}
+
+function getUserName(user: User | null): string | null {
+  return user?.name ?? null
+}
+
+// 或使用类型守卫
+function getUserName(user: User | null): string {
+  if (!user) {
+    throw new Error('User is null')
+  }
+  return user.name
+}
+```
+
+## 性能对比
+
+### 编译时间
+
+- **JavaScript**：无编译，直接运行
+- **TypeScript**：需要编译，但可以增量编译
+
+```bash
+# 开发模式：增量编译很快
+tsc --watch
+
+# 生产构建：完整编译
+tsc --build
+```
+
+### 运行时性能
+
+TypeScript 编译为 JavaScript，**运行时性能完全相同**。
+
+### 包体积
+
+TypeScript 类型信息在编译后被移除，**不影响包体积**。
+
+```ts
+// TypeScript 源码
+interface User {
+  id: number
+  name: string
+}
+
+function greet(user: User): string {
+  return `Hello, ${user.name}!`
+}
+
+// 编译后的 JavaScript
+function greet(user) {
+  return `Hello, ${user.name}!`
+}
+```
+
+## 何时选择 TypeScript
+
+### ✅ 推荐使用 TypeScript
+
+1. **大型项目**：代码库超过 10,000 行
+2. **团队协作**：多人开发，需要明确接口
+3. **长期维护**：项目生命周期超过 1 年
+4. **复杂业务逻辑**：需要类型保护
+5. **频繁重构**：需要重构信心
+
+### ✅ 可以继续用 JavaScript
+
+1. **小型脚本**：少于 1,000 行代码
+2. **原型验证**：快速验证想法
+3. **学习阶段**：刚开始学习 React
+4. **简单项目**：逻辑简单，不需要类型保护
+
+## 迁移检查清单
+
+- [ ] 安装 TypeScript 和类型定义
+- [ ] 配置 tsconfig.json
+- [ ] 重命名 .js 为 .tsx/.ts
+- [ ] 添加接口和类型定义
+- [ ] 处理编译错误
+- [ ] 启用严格模式
+- [ ] 更新构建脚本
+- [ ] 配置 ESLint
+- [ ] 更新 CI/CD
+- [ ] 团队培训
+
+## 最佳实践
+
+### ✅ 从严格模式开始
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "strict": true
+  }
+}
+```
+
+### ✅ 避免 any
+
+```ts
+// ❌ 避免
+function process(data: any) {}
+
+// ✅ 使用具体类型
+function process(data: User) {}
+
+// ✅ 或使用 unknown
+function process(data: unknown) {
+  if (typeof data === 'object' && data !== null) {
+    // 类型守卫
+  }
+}
+```
+
+### ✅ 利用类型推断
+
+```ts
+// ❌ 不必要的类型注解
+const count: number = 0
+const name: string = 'Alice'
+
+// ✅ 让 TypeScript 推断
+const count = 0
+const name = 'Alice'
+```
+
+下一章 [安装与配置](/ts/setup) 详解 TypeScript 的安装和项目配置。

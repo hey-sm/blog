@@ -1,0 +1,506 @@
+---
+title: 工具类型（下）
+description: TypeScript 内建工具类型续篇：Record、Exclude、Extract、NonNullable、Parameters、ReturnType、Awaited 源码与实战
+---
+
+# 工具类型（下）
+
+本篇涵盖联合类型操作、函数类型提取、异步解包等高级工具类型的源码解析与实战。
+
+## Record\<K, V\>
+
+创建一个键为 K、值统一为 V 的对象类型：
+
+```ts
+// 源码实现
+type Record<K extends string | number | symbol, V> = {
+  [P in K]: V
+}
+```
+
+### 使用场景
+
+```ts
+// 构建字典映射
+type PageName = 'home' | 'about' | 'settings'
+
+const pageRoutes: Record<PageName, string> = {
+  home: '/',
+  about: '/about',
+  settings: '/settings'
+  // ❌ 遗漏任何 key 会报错
+}
+
+// 状态码映射
+type HttpStatusMap = Record<number, string>
+const statusMessages: HttpStatusMap = {
+  200: 'OK',
+  400: 'Bad Request',
+  404: 'Not Found',
+  500: 'Internal Server Error'
+}
+```
+
+**React 示例**：
+
+```tsx
+type Variant = 'primary' | 'secondary' | 'danger' | 'ghost'
+
+// ✅ 每个 variant 对应一组 CSS 类
+const variantStyles: Record<Variant, string> = {
+  primary: 'bg-blue-500 text-white hover:bg-blue-600',
+  secondary: 'bg-gray-200 text-gray-800 hover:bg-gray-300',
+  danger: 'bg-red-500 text-white hover:bg-red-600',
+  ghost: 'bg-transparent text-gray-600 hover:bg-gray-100'
+}
+
+interface ButtonProps {
+  variant: Variant
+  label: string
+  onClick: () => void
+}
+
+function Button({ variant, label, onClick }: ButtonProps) {
+  return (
+    <button
+      className={`px-4 py-2 rounded ${variantStyles[variant]}`}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  )
+}
+
+// ✅ 图标大小映射
+type IconSize = 'sm' | 'md' | 'lg'
+const iconSizes: Record<IconSize, number> = { sm: 16, md: 24, lg: 32 }
+```
+
+## Exclude\<T, U\>
+
+从联合类型 T 中排除 U：
+
+```ts
+// 源码实现
+type Exclude<T, U> = T extends U ? never : T
+```
+
+### 分布式条件类型的实际应用
+
+```ts
+type AllEvents = 'click' | 'scroll' | 'keydown' | 'resize' | 'submit'
+
+// ✅ 排除窗口事件
+type MouseAndFormEvents = Exclude<AllEvents, 'scroll' | 'resize'>
+// 'click' | 'keydown' | 'submit'
+
+// ✅ 排除数字类型
+type NonNumeric = Exclude<string | number | boolean | symbol, number | symbol>
+// string | boolean
+```
+
+**React 示例**：
+
+```tsx
+// 从原生 HTML 属性中排除已自定义的属性
+type BaseInputProps = React.InputHTMLAttributes<HTMLInputElement>
+type CustomInputProps = {
+  label: string
+  error?: string
+}
+
+// ✅ 排除 className、id（由组件管理）
+type PropsToExclude = 'className' | 'id'
+type CleanInputProps = Exclude<keyof BaseInputProps, PropsToExclude>
+```
+
+## Extract\<T, U\>
+
+从联合类型 T 中提取兼容 U 的成员：
+
+```ts
+// 源码实现
+type Extract<T, U> = T extends U ? T : never
+```
+
+### 使用场景
+
+```ts
+type Actions =
+  | { type: 'LOGIN'; payload: { email: string } }
+  | { type: 'LOGOUT' }
+  | { type: 'FETCH_USER'; payload: { id: number } }
+  | { type: 'UPDATE_USER'; payload: { id: number; name: string } }
+
+// ✅ 提取带 payload 的 actions
+type ActionsWithPayload = Extract<Actions, { payload: unknown }>
+// { type: 'LOGIN'; payload: { email: string } }
+// | { type: 'FETCH_USER'; payload: { id: number } }
+// | { type: 'UPDATE_USER'; payload: { id: number; name: string } }
+
+// ✅ 按 type 提取特定 action
+type UserActions = Extract<Actions, { type: `FETCH_${string}` | `UPDATE_${string}` }>
+```
+
+## NonNullable\<T\>
+
+从 T 中排除 null 和 undefined：
+
+```ts
+// 源码实现
+type NonNullable<T> = T & {}
+// 等价于 T extends null | undefined ? never : T
+```
+
+### 使用场景
+
+```ts
+type MaybeString = string | null | undefined
+type SafeString = NonNullable<MaybeString>
+// string
+
+// ✅ 过滤函数返回值
+function getUsername(): string | null { return null }
+type Username = NonNullable<ReturnType<typeof getUsername>>
+// string
+```
+
+**React 示例**：
+
+```tsx
+interface User {
+  name: string
+  email: string
+  bio: string | null
+  website: string | null
+}
+
+// ✅ 创建只包含必填字段的类型
+type RequiredUserFields = NonNullable<User[keyof User]>
+
+// ✅ 获取所有非 null 字段的键
+type NonNullableKeys<T> = {
+  [K in keyof T]: T[K] extends NonNullable<T[K]> ? K : never
+}[keyof T]
+
+type RequiredUserKeys = NonNullableKeys<User>
+// 'name' | 'email'
+```
+
+## ReturnType\<T\>
+
+提取函数类型的返回值类型：
+
+```ts
+// 源码实现
+type ReturnType<T extends (...args: any) => any> =
+  T extends (...args: any) => infer R ? R : never
+```
+
+### 使用场景
+
+```ts
+function createUser(name: string, email: string) {
+  return { id: Math.random(), name, email, createdAt: new Date() }
+}
+
+// ✅ 提取返回值类型（避免重复定义）
+type User = ReturnType<typeof createUser>
+// { id: number; name: string; email: string; createdAt: Date }
+
+// ✅ 提取第三方函数的返回值
+type Response = ReturnType<typeof fetch>
+// Promise<Response>
+
+// ✅ 提取 React Hook 返回值
+type UseStateReturn = ReturnType<typeof useState>
+// [unknown, Dispatch<SetStateAction<unknown>>]
+```
+
+**React 示例**：
+
+```tsx
+function useUserData(userId: number) {
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    setLoading(true)
+    fetchUser(userId)
+      .then(setUser)
+      .finally(() => setLoading(false))
+  }, [userId])
+
+  return { user, loading, refetch: () => setUser(null) }
+}
+
+// ✅ 从 Hook 提取返回值类型给子组件使用
+type UserDataReturn = ReturnType<typeof useUserData>
+
+interface UserProfileProps extends UserDataReturn {
+  editable?: boolean
+}
+
+function UserProfile({ user, loading, refetch, editable }: UserProfileProps) {
+  if (loading) return <div>Loading...</div>
+  if (!user) return <div>User not found</div>
+  return (
+    <div>
+      <h3>{user.name}</h3>
+      <button onClick={refetch}>Refresh</button>
+    </div>
+  )
+}
+```
+
+## Parameters\<T\>
+
+提取函数类型的参数类型（返回元组）：
+
+```ts
+// 源码实现
+type Parameters<T extends (...args: any) => any> =
+  T extends (...args: infer P) => any ? P : never
+```
+
+### 使用场景
+
+```ts
+function sendMessage(to: string, text: string, priority: 'high' | 'low' = 'low') {
+  // ...发送逻辑
+}
+
+// ✅ 提取参数类型
+type SendMessageArgs = Parameters<typeof sendMessage>
+// [to: string, text: string, priority?: 'high' | 'low']
+
+// ✅ 复用参数类型
+const draftArgs: SendMessageArgs = ['user@example.com', 'Hello', 'high']
+
+// ✅ 直接在另一个函数中复用
+function processMessage(...args: Parameters<typeof sendMessage>) {
+  const [to, text, priority] = args
+  console.log(`Sending to ${to}: ${text}`)
+  return sendMessage(...args)
+}
+```
+
+**React 示例**：
+
+```tsx
+function usePagination(fetchFn: (page: number, size: number) => Promise<unknown>) {
+  const [page, setPage] = useState(1)
+  const size = 20
+
+  return {
+    page, size,
+    nextPage: () => setPage(p => p + 1),
+    prevPage: () => setPage(p => Math.max(1, p - 1)),
+    fetchPage: () => fetchFn(page, size)
+  }
+}
+
+// ✅ 在其他组件中复用参数类型
+type PaginationArgs = Parameters<(typeof usePagination)>
+// [(page: number, size: number) => Promise<unknown>]
+```
+
+## Awaited\<T\>
+
+递归解包 Promise 链，获取最终 resolved 类型（TS 4.5+）：
+
+```ts
+// 源码实现（简化版）
+type Awaited<T> =
+  T extends null | undefined ? T :
+  T extends Promise<infer R> ? Awaited<R> :
+  T
+```
+
+### 使用场景
+
+```ts
+// ✅ 解包单层 Promise
+type T1 = Awaited<Promise<string>>
+// string
+
+// ✅ 解包嵌套 Promise
+type T2 = Awaited<Promise<Promise<number>>>
+// number
+
+// ✅ 解包 API 函数返回值
+async function fetchUser() {
+  const response = await fetch('/api/user')
+  return response.json()
+}
+type User = Awaited<ReturnType<typeof fetchUser>>
+// 直接得到 JSON 解析后的类型
+```
+
+**React 示例**：
+
+```tsx
+interface TodoApi {
+  getAll(): Promise<Todo[]>
+  getById(id: number): Promise<Todo>
+  create(data: Omit<Todo, 'id'>): Promise<Todo>
+}
+
+class TodoService {
+  private api: TodoApi
+
+  async getAll() {
+    return this.api.getAll()
+  }
+
+  async getById(id: number) {
+    return this.api.getById(id)
+  }
+}
+
+// ✅ 提取 service 方法的最终返回类型
+type TodoList = Awaited<ReturnType<TodoService['getAll']>>
+// Todo[]
+
+type SingleTodo = Awaited<ReturnType<TodoService['getById']>>
+// Todo
+```
+
+## ConstructorParameters\<T\>
+
+提取构造函数的参数类型：
+
+```ts
+// 源码实现
+type ConstructorParameters<T extends abstract new (...args: any) => any> =
+  T extends abstract new (...args: infer P) => any ? P : never
+
+// 使用
+class User {
+  constructor(public name: string, public age: number) {}
+}
+
+type UserConstructorArgs = ConstructorParameters<typeof User>
+// [name: string, age: number]
+```
+
+## InstanceType\<T\>
+
+提取构造函数创建的实例类型：
+
+```ts
+// 源码实现
+type InstanceType<T extends abstract new (...args: any) => any> =
+  T extends abstract new (...args: any) => infer R ? R : never
+
+// 使用
+type UserInstance = InstanceType<typeof User>
+// User
+
+// 通用工厂函数
+function createInstance<T extends abstract new (...args: any) => any>(
+  Ctor: T,
+  ...args: ConstructorParameters<T>
+): InstanceType<T> {
+  return new Ctor(...args)
+}
+```
+
+## ThisParameterType\<T\> 与 OmitThisParameter\<T\>
+
+```ts
+// ThisParameterType：提取 this 参数类型
+type ThisParameterType<T> =
+  T extends (this: infer U, ...args: never) => unknown ? U : unknown
+
+// OmitThisParameter：移除 this 参数
+type OmitThisParameter<T> =
+  T extends (this: any, ...args: infer A) => infer R
+    ? (...args: A) => R
+    : T
+
+// 使用
+function greet(this: { name: string }, greeting: string) {
+  return `${greeting}, ${this.name}!`
+}
+
+type GreetThis = ThisParameterType<typeof greet>
+// { name: string }
+
+type GreetFn = OmitThisParameter<typeof greet>
+// (greeting: string) => string
+```
+
+## Uppercase / Lowercase / Capitalize / Uncapitalize
+
+字符串字面量类型的内建工具（TS 4.1+）：
+
+```ts
+type T1 = Uppercase<'hello'>       // 'HELLO'
+type T2 = Lowercase<'HELLO'>       // 'hello'
+type T3 = Capitalize<'hello'>      // 'Hello'
+type T4 = Uncapitalize<'Hello'>    // 'hello'
+
+// ✅ 自动生成 getter 名称
+type GetterName<K extends string> = `get${Capitalize<K>}`
+type UserGetter = GetterName<'name'>
+// 'getName'
+```
+
+## 工具类型速查表
+
+| 工具类型 | 输入 | 输出 | 关键词 |
+|----------|------|------|--------|
+| `Partial<T>` | 对象类型 | 所有属性可选 | `-?` 映射 |
+| `Required<T>` | 对象类型 | 所有属性必填 | `-?` 映射 |
+| `Readonly<T>` | 对象类型 | 所有属性只读 | `readonly` 映射 |
+| `Pick<T, K>` | 对象+联合键 | 选取的子集 | `in` 约束 |
+| `Omit<T, K>` | 对象+联合键 | 排除剩下的 | `Exclude` |
+| `Record<K, V>` | 联合键+类型 | 统一值对象 | `in` 映射 |
+| `Exclude<T, U> ` | 联合+类型 | 排除后联合 | 分布式条件 |
+| `Extract<T, U>` | 联合+类型 | 提取后联合 | 分布式条件 |
+| `NonNullable<T>` | 联合 | 非 null/undefined | `T & {}` |
+| `ReturnType<T>` | 函数类型 | 返回值类型 | `infer R` |
+| `Parameters<T>` | 函数类型 | 参数元组 | `infer P` |
+| `Awaited<T>` | Promise 类型 | resolved 类型 | 递归 `infer` |
+
+## 最佳实践
+
+### ✅ 用 ReturnType 避免重复定义
+
+```ts
+// ❌ 手动定义 + 不同步
+type User = { id: number; name: string }
+function createUser(): User { /* ... */ }
+
+// ✅ 单一数据源
+function createUser(name: string) {
+  return { id: Math.random(), name, createdAt: new Date() }
+}
+type User = ReturnType<typeof createUser>
+```
+
+### ✅ 用 Awaited 解包异步函数返回值
+
+```ts
+async function getConfig() {
+  const res = await fetch('/api/config')
+  return res.json()  // Promise<Config>
+}
+
+type Config = Awaited<ReturnType<typeof getConfig>>
+// Config 类型直接使用，不需手动定义
+```
+
+### ✅ 用 Parameters 创建调用代理
+
+```ts
+function originalFn(a: string, b: number): boolean { return true }
+
+function wrapperFn(...args: Parameters<typeof originalFn>): boolean {
+  console.log('before', args)
+  return originalFn(...args)
+}
+```
+
+下一章 [映射类型](/ts/mapped-types) 深入自定义映射类型的实现原理。

@@ -1,0 +1,834 @@
+---
+title: tsconfig.json 详解
+description: TypeScript 编译器配置选项、严格模式、路径映射与项目引用
+---
+
+# tsconfig.json 详解
+
+`tsconfig.json` 是 TypeScript 项目的配置文件，控制编译器的行为。
+
+## 配置文件结构
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    // 编译器选项
+  },
+  "include": [
+    // 包含的文件
+  ],
+  "exclude": [
+    // 排除的文件
+  ],
+  "files": [
+    // 明确指定的文件
+  ],
+  "extends": "./base.json",  // 继承配置
+  "references": []            // 项目引用
+}
+```
+
+## 核心选项
+
+### target
+
+指定编译后的 JavaScript 版本：
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020"
+  }
+}
+```
+
+可选值：`ES3`、`ES5`、`ES6`/`ES2015`、`ES2016`-`ES2023`、`ESNext`
+
+**示例**：
+
+```ts
+// 源码
+const greet = (name: string) => `Hello, ${name}!`
+
+// target: ES5
+var greet = function (name) { return "Hello, " + name + "!"; }
+
+// target: ES2015
+const greet = (name) => `Hello, ${name}!`
+```
+
+### module
+
+指定模块系统：
+
+```json
+{
+  "compilerOptions": {
+    "module": "ESNext"
+  }
+}
+```
+
+可选值：`CommonJS`、`AMD`、`UMD`、`ES6`/`ES2015`、`ES2020`、`ESNext`、`Node16`、`NodeNext`
+
+**对比**：
+
+```ts
+// 源码
+export function add(a: number, b: number) {
+  return a + b
+}
+
+// module: CommonJS
+exports.add = function (a, b) {
+  return a + b
+}
+
+// module: ESNext
+export function add(a, b) {
+  return a + b
+}
+```
+
+### lib
+
+指定编译时包含的库文件：
+
+```json
+{
+  "compilerOptions": {
+    "lib": ["ES2020", "DOM", "DOM.Iterable"]
+  }
+}
+```
+
+常用库：
+- `ES2015`-`ES2023`：ECMAScript 标准库
+- `DOM`：浏览器 DOM API
+- `DOM.Iterable`：可迭代的 DOM 集合
+- `WebWorker`：Web Worker API
+- `ScriptHost`：Windows Script Host
+
+### jsx
+
+指定 JSX 编译方式：
+
+```json
+{
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}
+```
+
+可选值：
+- `preserve`：保留 JSX，输出 `.jsx` 文件
+- `react`：编译为 `React.createElement`
+- `react-jsx`：编译为 `_jsx`（React 17+）
+- `react-jsxdev`：开发模式
+- `react-native`：保留 JSX，输出 `.js` 文件
+
+**对比**：
+
+```tsx
+// 源码
+const element = <div>Hello</div>
+
+// jsx: react
+const element = React.createElement("div", null, "Hello")
+
+// jsx: react-jsx
+import { jsx as _jsx } from "react/jsx-runtime"
+const element = _jsx("div", { children: "Hello" })
+```
+
+## 严格模式选项
+
+### strict
+
+启用所有严格类型检查选项：
+
+```json
+{
+  "compilerOptions": {
+    "strict": true
+  }
+}
+```
+
+等价于启用以下所有选项：
+
+```json
+{
+  "compilerOptions": {
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true
+  }
+}
+```
+
+### noImplicitAny
+
+禁止隐式 `any` 类型：
+
+```ts
+// ❌ noImplicitAny: true
+function add(a, b) {  // 错误：参数隐式具有 'any' 类型
+  return a + b
+}
+
+// ✅ 正确
+function add(a: number, b: number): number {
+  return a + b
+}
+```
+
+### strictNullChecks
+
+严格的 null 检查：
+
+```ts
+// strictNullChecks: false
+let name: string = null  // ✅ 允许
+
+// strictNullChecks: true
+let name: string = null  // ❌ 错误
+
+// ✅ 正确
+let name: string | null = null
+```
+
+**React 示例**：
+
+```tsx
+interface User {
+  name: string
+}
+
+function UserProfile({ user }: { user: User | null }) {
+  // ❌ strictNullChecks: true
+  return <div>{user.name}</div>  // 错误：user 可能为 null
+  
+  // ✅ 正确
+  return <div>{user?.name ?? 'Guest'}</div>
+}
+```
+
+### strictFunctionTypes
+
+严格的函数类型检查：
+
+```ts
+interface Animal {
+  name: string
+}
+
+interface Dog extends Animal {
+  breed: string
+}
+
+// strictFunctionTypes: false
+let f1: (x: Animal) => void
+let f2: (x: Dog) => void
+f1 = f2  // ✅ 允许（不安全）
+
+// strictFunctionTypes: true
+f1 = f2  // ❌ 错误
+```
+
+### strictPropertyInitialization
+
+严格的类属性初始化检查：
+
+```ts
+// strictPropertyInitialization: true
+class User {
+  name: string  // ❌ 错误：属性未初始化
+  age: number = 0  // ✅ 正确
+  
+  constructor(name: string) {
+    this.name = name  // ✅ 正确
+  }
+}
+```
+
+## 模块解析选项
+
+### moduleResolution
+
+指定模块解析策略：
+
+```json
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler"
+  }
+}
+```
+
+可选值：
+- `node`：Node.js 风格解析
+- `classic`：TypeScript 1.6 之前的解析
+- `node16`/`nodenext`：Node.js ESM 解析
+- `bundler`：打包工具解析（Vite、Webpack）
+
+### baseUrl 和 paths
+
+配置路径映射：
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"],
+      "@utils/*": ["src/utils/*"],
+      "@hooks/*": ["src/hooks/*"],
+      "@types/*": ["src/types/*"]
+    }
+  }
+}
+```
+
+**使用**：
+
+```tsx
+// 不使用路径映射
+import Button from '../../../components/Button'
+import { formatDate } from '../../../utils/format'
+
+// 使用路径映射
+import Button from '@components/Button'
+import { formatDate } from '@utils/format'
+```
+
+**注意**：打包工具也需要配置别名：
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import path from 'path'
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+      '@components': path.resolve(__dirname, './src/components'),
+      '@utils': path.resolve(__dirname, './src/utils')
+    }
+  }
+})
+```
+
+### resolveJsonModule
+
+允许导入 JSON 文件：
+
+```json
+{
+  "compilerOptions": {
+    "resolveJsonModule": true
+  }
+}
+```
+
+```ts
+// 导入 JSON
+import config from './config.json'
+
+console.log(config.apiUrl)
+```
+
+## 输出选项
+
+### outDir
+
+指定输出目录：
+
+```json
+{
+  "compilerOptions": {
+    "outDir": "./dist"
+  }
+}
+```
+
+### rootDir
+
+指定输入文件的根目录：
+
+```json
+{
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist"
+  }
+}
+```
+
+### declaration
+
+生成 `.d.ts` 声明文件：
+
+```json
+{
+  "compilerOptions": {
+    "declaration": true,
+    "declarationDir": "./types"
+  }
+}
+```
+
+```ts
+// src/utils.ts
+export function add(a: number, b: number): number {
+  return a + b
+}
+
+// dist/utils.d.ts
+export declare function add(a: number, b: number): number
+```
+
+### sourceMap
+
+生成 source map 文件：
+
+```json
+{
+  "compilerOptions": {
+    "sourceMap": true
+  }
+}
+```
+
+### removeComments
+
+移除注释：
+
+```json
+{
+  "compilerOptions": {
+    "removeComments": true
+  }
+}
+```
+
+### noEmit
+
+不生成输出文件（仅类型检查）：
+
+```json
+{
+  "compilerOptions": {
+    "noEmit": true
+  }
+}
+```
+
+适用于使用 Babel 或其他工具编译的项目。
+
+## 类型检查选项
+
+### noUnusedLocals
+
+检查未使用的局部变量：
+
+```ts
+// noUnusedLocals: true
+function greet(name: string) {
+  const message = 'Hello'  // ❌ 错误：未使用的变量
+  return name
+}
+```
+
+### noUnusedParameters
+
+检查未使用的参数：
+
+```ts
+// noUnusedParameters: true
+function greet(name: string, age: number) {  // ❌ 错误：age 未使用
+  return `Hello, ${name}!`
+}
+
+// ✅ 使用下划线前缀忽略
+function greet(name: string, _age: number) {
+  return `Hello, ${name}!`
+}
+```
+
+### noImplicitReturns
+
+检查函数是否所有路径都有返回值：
+
+```ts
+// noImplicitReturns: true
+function getValue(x: number): string {
+  if (x > 0) {
+    return 'positive'
+  }
+  // ❌ 错误：不是所有路径都有返回值
+}
+
+// ✅ 正确
+function getValue(x: number): string {
+  if (x > 0) {
+    return 'positive'
+  }
+  return 'non-positive'
+}
+```
+
+### noFallthroughCasesInSwitch
+
+检查 switch 语句的 fallthrough：
+
+```ts
+// noFallthroughCasesInSwitch: true
+function getColor(value: number): string {
+  switch (value) {
+    case 1:
+      return 'red'
+    case 2:
+      console.log('blue')
+      // ❌ 错误：缺少 break 或 return
+    case 3:
+      return 'green'
+  }
+}
+```
+
+## 互操作性选项
+
+### esModuleInterop
+
+启用 ES 模块互操作性：
+
+```json
+{
+  "compilerOptions": {
+    "esModuleInterop": true
+  }
+}
+```
+
+```ts
+// esModuleInterop: false
+import * as React from 'react'
+
+// esModuleInterop: true
+import React from 'react'  // ✅ 更简洁
+```
+
+### allowSyntheticDefaultImports
+
+允许从没有默认导出的模块中默认导入：
+
+```json
+{
+  "compilerOptions": {
+    "allowSyntheticDefaultImports": true
+  }
+}
+```
+
+### forceConsistentCasingInFileNames
+
+强制文件名大小写一致：
+
+```json
+{
+  "compilerOptions": {
+    "forceConsistentCasingInFileNames": true
+  }
+}
+```
+
+```ts
+// ❌ 错误：大小写不一致
+import Button from './button'  // 文件名是 Button.tsx
+```
+
+## 高级选项
+
+### skipLibCheck
+
+跳过声明文件的类型检查：
+
+```json
+{
+  "compilerOptions": {
+    "skipLibCheck": true
+  }
+}
+```
+
+**推荐启用**，可以加快编译速度。
+
+### isolatedModules
+
+确保每个文件可以独立编译：
+
+```json
+{
+  "compilerOptions": {
+    "isolatedModules": true
+  }
+}
+```
+
+**Babel 和 Vite 需要启用此选项**。
+
+### incremental
+
+启用增量编译：
+
+```json
+{
+  "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": "./.tsbuildinfo"
+  }
+}
+```
+
+可以显著加快重新编译速度。
+
+## include 和 exclude
+
+### include
+
+指定要包含的文件：
+
+```json
+{
+  "include": [
+    "src/**/*",
+    "tests/**/*"
+  ]
+}
+```
+
+支持 glob 模式：
+- `*`：匹配零个或多个字符
+- `?`：匹配一个字符
+- `**/`：递归匹配任意子目录
+
+### exclude
+
+指定要排除的文件：
+
+```json
+{
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build",
+    "**/*.spec.ts",
+    "**/*.test.ts"
+  ]
+}
+```
+
+**默认排除**：`node_modules`、`bower_components`、`jspm_packages`、`outDir`
+
+## 项目引用
+
+用于大型项目的模块化：
+
+```json filename="tsconfig.json"
+{
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/utils" }
+  ]
+}
+```
+
+```json filename="packages/core/tsconfig.json"
+{
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "outDir": "./dist"
+  }
+}
+```
+
+## 推荐配置
+
+### React 项目（Vite）
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Path mapping */
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+```
+
+### React 项目（CRA）
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES5",
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src"]
+}
+```
+
+### 库项目
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "lib": ["ES2020"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+}
+```
+
+## 常见问题
+
+### 1. 路径别名不生效
+
+确保打包工具也配置了别名：
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import path from 'path'
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src')
+    }
+  }
+})
+```
+
+### 2. JSX 语法错误
+
+```json
+{
+  "compilerOptions": {
+    "jsx": "react-jsx"  // React 17+
+  }
+}
+```
+
+### 3. 模块解析错误
+
+```json
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler"  // Vite
+  }
+}
+```
+
+## 最佳实践
+
+### ✅ 启用严格模式
+
+```json
+{
+  "compilerOptions": {
+    "strict": true
+  }
+}
+```
+
+### ✅ 配置路径映射
+
+```json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}
+```
+
+### ✅ 启用增量编译
+
+```json
+{
+  "compilerOptions": {
+    "incremental": true
+  }
+}
+```
+
+### ✅ 跳过库检查
+
+```json
+{
+  "compilerOptions": {
+    "skipLibCheck": true
+  }
+}
+```
+
+下一章 [基本类型](/ts/basic-types) 介绍 TypeScript 的基本类型系统。

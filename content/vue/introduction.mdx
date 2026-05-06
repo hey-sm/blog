@@ -1,0 +1,320 @@
+---
+title: 简介与心智模型
+description: Vue 的响应式系统、声明式渲染、MVVM 架构与虚拟 DOM
+---
+
+# 简介与心智模型
+
+Vue 是尤雨溪创建的**渐进式 JavaScript 框架**。它的核心命题可以浓缩为：
+
+> **UI 是状态的函数，状态变化自动驱动视图更新**
+
+Vue 3 通过 **Proxy 响应式系统** 实现了这一理念，开发者只需关注数据，视图更新由框架自动完成。
+
+## 响应式系统：Vue 的核心
+
+Vue 最大的特点是**细粒度响应式**——当数据变化时，框架精确知道哪些组件需要更新。
+
+```vue filename="Counter.vue"
+<script setup>
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++  // 修改数据，视图自动更新
+}
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+</template>
+```
+
+执行流程：
+
+1. `ref(0)` 创建响应式引用，内部用 Proxy 拦截读写
+2. 模板编译时，`{{ count }}` 被记录为依赖
+3. `count.value++` 触发 setter → 通知依赖 → 重新渲染
+
+与 React 的对比：
+
+| 维度 | Vue | React |
+| ---- | --- | ----- |
+| 响应式 | 自动追踪依赖 | 手动调用 setState |
+| 更新粒度 | 组件级 + 细粒度 | 组件级（需手动优化） |
+| 心智模型 | 可变数据 + 响应式 | 不可变数据 + 重新渲染 |
+| 模板 | 模板语法 | JSX |
+
+## 声明式渲染
+
+Vue 使用**模板语法**描述 UI，而非命令式 DOM 操作：
+
+```vue filename="TodoList.vue"
+<script setup>
+import { ref } from 'vue'
+
+const todos = ref([
+  { id: 1, text: '学习 Vue', done: false },
+  { id: 2, text: '构建项目', done: false }
+])
+
+function toggle(todo) {
+  todo.done = !todo.done
+}
+</script>
+
+<template>
+  <ul>
+    <li v-for="todo in todos" :key="todo.id">
+      <input type="checkbox" :checked="todo.done" @change="toggle(todo)">
+      <span :class="{ done: todo.done }">{{ todo.text }}</span>
+    </li>
+  </ul>
+</template>
+
+<style scoped>
+.done {
+  text-decoration: line-through;
+  color: #999;
+}
+</style>
+```
+
+模板会被编译为**渲染函数**，返回虚拟 DOM 树。Vue 通过 diff 算法计算最小更新。
+
+## MVVM 架构
+
+Vue 遵循 **MVVM（Model-View-ViewModel）** 模式：
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│                        View                              │
+│                    (Template)                            │
+│                                                          │
+│  <template>                                              │
+│    <div>{{ message }}</div>                              │
+│    <button @click="update">Update</button>               │
+│  </template>                                             │
+└────────────────────┬────────────────────────────────────┘
+                     │
+                     │ 数据绑定（自动同步）
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│                   ViewModel                              │
+│              (Vue Component)                             │
+│                                                          │
+│  <script setup>                                          │
+│    const message = ref('Hello')                          │
+│    function update() { message.value = 'Hi' }            │
+│  </script>                                               │
+└────────────────────┬────────────────────────────────────┘
+                     │
+                     │ 响应式引用
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│                     Model                                │
+│                  (Data State)                            │
+│                                                          │
+│  { message: 'Hello' }                                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **Model**：纯数据对象
+- **View**：模板（编译为渲染函数）
+- **ViewModel**：Vue 组件实例，连接 Model 和 View
+
+## 虚拟 DOM 与 Diff 算法
+
+Vue 不直接操作真实 DOM，而是：
+
+1. **渲染函数** 生成虚拟 DOM 树（VNode）
+2. **Diff 算法** 对比新旧树，计算最小变更
+3. **Patch** 应用变更到真实 DOM
+
+```text
+State Change
+     │
+     ▼
+┌─────────────┐
+│ Render Fn   │  生成新 VNode 树
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│    Diff     │  对比新旧 VNode
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Patch     │  更新真实 DOM
+└─────────────┘
+```
+
+Vue 3 的 Diff 算法优化：
+
+- **静态提升**：静态节点只创建一次
+- **PatchFlags**：标记动态内容类型，跳过静态属性
+- **Block Tree**：扁平化动态节点，减少遍历
+
+## Composition API vs Options API
+
+Vue 3 引入 **Composition API**，与 Options API 并存：
+
+**Options API**（Vue 2 风格）：
+
+```vue
+<script>
+export default {
+  data() {
+    return { count: 0 }
+  },
+  methods: {
+    increment() {
+      this.count++
+    }
+  },
+  mounted() {
+    console.log('mounted')
+  }
+}
+</script>
+```
+
+**Composition API**（Vue 3 推荐）：
+
+```vue
+<script setup>
+import { ref, onMounted } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++
+}
+
+onMounted(() => {
+  console.log('mounted')
+})
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+</template>
+```
+
+对比：
+
+| 维度 | Options API | Composition API |
+| ---- | ----------- | --------------- |
+| 组织方式 | 按选项类型（data/methods/computed） | 按逻辑功能 |
+| 代码复用 | Mixins（易冲突） | 组合式函数（清晰） |
+| TypeScript | 类型推导弱 | 类型推导强 |
+| 学习曲线 | 平缓 | 稍陡 |
+| 适用场景 | 简单组件 | 复杂逻辑、代码复用 |
+
+本文档优先使用 **Composition API + `<script setup>`**。
+
+## 渐进式框架
+
+Vue 的"渐进式"体现在：
+
+1. **核心库**：只关注视图层，可嵌入现有项目
+2. **官方库**：Vue Router、Pinia 按需引入
+3. **构建工具**：Vite、Nuxt 等可选
+4. **使用方式**：从 CDN 引入到完整工程化
+
+```html
+<!-- 最简单的 Vue 应用 -->
+<script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+
+<div id="app">{{ message }}</div>
+
+<script>
+  const { createApp, ref } = Vue
+  
+  createApp({
+    setup() {
+      const message = ref('Hello Vue!')
+      return { message }
+    }
+  }).mount('#app')
+</script>
+```
+
+## Vue 3 的关键改进
+
+相比 Vue 2，Vue 3 带来：
+
+1. **性能提升**
+   - 响应式系统重写（Proxy 替代 Object.defineProperty）
+   - 编译器优化（静态提升、PatchFlags）
+   - Tree-shaking 支持
+
+2. **Composition API**
+   - 更好的逻辑复用
+   - 更好的 TypeScript 支持
+   - 更灵活的代码组织
+
+3. **新特性**
+   - Teleport（传送门）
+   - Suspense（异步组件）
+   - Fragment（多根节点）
+   - `<script setup>` 语法糖
+
+4. **更小的体积**
+   - 核心库 ~10KB gzipped
+   - 按需引入 API
+
+## Vue 心智模型清单
+
+读完本节后，请确认以下命题：
+
+1. **响应式优先**：数据变化自动驱动视图更新，无需手动操作 DOM
+2. **单向数据流**：父 → 子通过 props，子 → 父通过事件
+3. **模板是声明式的**：描述"UI 应该是什么样"，而非"如何修改 UI"
+4. **组件是独立的**：每个组件有自己的状态、逻辑、样式
+5. **副作用归位生命周期**：DOM 操作、订阅、请求在生命周期钩子中处理
+6. **Composition API 按逻辑组织**：相关代码放在一起，而非按选项类型分散
+
+## 一段最小示例
+
+```vue filename="App.vue"
+<script setup>
+import { ref } from 'vue'
+
+const name = ref('')
+</script>
+
+<template>
+  <div>
+    <input v-model="name" placeholder="Your name">
+    <p>{{ name ? `Hello, ${name}!` : 'Type something…' }}</p>
+  </div>
+</template>
+```
+
+执行流程：
+
+1. `ref('')` 创建响应式引用
+2. `v-model` 建立双向绑定
+3. 用户输入 → `name.value` 更新 → 模板重新渲染
+4. Vue 自动追踪依赖，只更新变化的部分
+
+## Vue 不做什么
+
+Vue 核心库只关注视图层，以下功能需要额外库：
+
+| 缺口 | 推荐方案 |
+| ---- | -------- |
+| 路由 | Vue Router、unplugin-vue-router |
+| 状态管理 | Pinia、VueUse |
+| 数据请求 | TanStack Query、Axios |
+| 表单校验 | Vee Validate、FormKit |
+| UI 组件库 | Element Plus、Vuetify、Naive UI |
+| SSR/SSG | Nuxt 3、VitePress |
+| 移动端 | Capacitor、Ionic Vue |
+
+这种"小核心 + 大生态"让 Vue 保持灵活性。
+
+下一章 [工具链](/vue/tooling) 会从零搭建一个生产级 Vue 3 项目。

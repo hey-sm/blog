@@ -1,0 +1,529 @@
+---
+title: 泛型
+description: TypeScript 泛型完整指南：泛型函数、泛型类、泛型约束 extends、默认类型参数、泛型推断与高级模式
+---
+
+# 泛型
+
+泛型（Generics）让你编写可复用的、类型安全的组件，将类型作为参数传递。这是 TypeScript 类型系统最强大的特性之一。
+
+## 为什么需要泛型
+
+```ts
+// ❌ 没有泛型：每个类型都要写一份
+function identityNumber(value: number): number { return value }
+function identityString(value: string): string { return value }
+
+// ❌ 用 any：丢失类型信息
+function identity(value: any): any { return value }
+const result = identity('hello')  // any，没有类型信息
+
+// ✅ 泛型：保留类型信息
+function identity<T>(value: T): T {
+  return value
+}
+
+const num = identity(42)       // number
+const str = identity('hello')  // string
+const arr = identity([1, 2])   // number[]
+```
+
+## 泛型函数
+
+### 基本用法
+
+```ts
+// 单一类型参数
+function firstElement<T>(arr: T[]): T | undefined {
+  return arr[0]
+}
+
+firstElement([1, 2, 3])        // number | undefined
+firstElement(['a', 'b', 'c'])  // string | undefined
+
+// 多个类型参数
+function pair<T, U>(first: T, second: U): [T, U] {
+  return [first, second]
+}
+
+pair('age', 25)          // [string, number]
+pair(true, { x: 1 })     // [boolean, { x: number }]
+```
+
+### 箭头函数泛型
+
+```ts
+// .tsx 文件中需要 <T extends unknown> 避免与 JSX 混淆
+const identity = <T,>(value: T): T => value
+
+const map = <T, U>(arr: T[], fn: (item: T) => U): U[] => arr.map(fn)
+
+map([1, 2, 3], n => n.toString())  // string[]
+```
+
+**React 示例**：
+
+```tsx
+// 泛型组件
+interface ListProps<T> {
+  items: T[]
+  renderItem: (item: T, index: number) => React.ReactNode
+  keyExtractor: (item: T) => string | number
+}
+
+function List<T>({ items, renderItem, keyExtractor }: ListProps<T>) {
+  return (
+    <ul>
+      {items.map((item, index) => (
+        <li key={keyExtractor(item)}>
+          {renderItem(item, index)}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// T 自动推断为 { id: number; name: string }
+<List
+  items={[
+    { id: 1, name: 'Alice' },
+    { id: 2, name: 'Bob' }
+  ]}
+  renderItem={(user) => <span>{user.name}</span>}
+  keyExtractor={(user) => user.id}
+/>
+```
+
+## 泛型约束（extends）
+
+使用 `extends` 限制泛型参数必须满足某个类型：
+
+```ts
+// 约束 T 必须有 length 属性
+interface HasLength {
+  length: number
+}
+
+function logLength<T extends HasLength>(value: T): T {
+  console.log(value.length)
+  return value
+}
+
+logLength('hello')          // ✅ string 有 length
+logLength([1, 2, 3])        // ✅ 数组有 length
+logLength({ length: 10 })   // ✅
+logLength(123)              // ❌ 错误：number 没有 length
+```
+
+### 使用类型参数约束另一个类型参数
+
+```ts
+// K 必须是 T 的键
+function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key]
+}
+
+const user = { id: 1, name: 'Alice', email: 'alice@example.com' }
+
+getProperty(user, 'name')   // ✅ string
+getProperty(user, 'id')     // ✅ number
+getProperty(user, 'age')    // ❌ 错误
+```
+
+### 泛型约束配合条件类型
+
+```ts
+// 约束 + 条件类型 = 精准控制
+type Flatten<T> = T extends Array<infer U> ? U : T
+
+type T1 = Flatten<string[]>    // string
+type T2 = Flatten<number>      // number
+```
+
+## 泛型接口与泛型类型别名
+
+```ts
+// 泛型接口
+interface Repository<T> {
+  items: T[]
+  getById(id: number): T | undefined
+  add(item: T): void
+}
+
+const userRepo: Repository<{ id: number; name: string }> = {
+  items: [],
+  getById(id) { return this.items.find(u => u.id === id) },
+  add(item) { this.items.push(item) }
+}
+
+// 泛型类型别名
+type Result<T, E = Error> =
+  | { ok: true; value: T }
+  | { ok: false; error: E }
+
+function divide(a: number, b: number): Result<number> {
+  if (b === 0) return { ok: false, error: new Error('Division by zero') }
+  return { ok: true, value: a / b }
+}
+```
+
+## 泛型类
+
+```ts
+class Stack<T> {
+  private items: T[] = []
+
+  push(item: T) {
+    this.items.push(item)
+  }
+
+  pop(): T | undefined {
+    return this.items.pop()
+  }
+
+  peek(): T | undefined {
+    return this.items[this.items.length - 1]
+  }
+}
+
+const numberStack = new Stack<number>()
+numberStack.push(1)
+numberStack.push(2)
+const top = numberStack.pop()  // number | undefined
+```
+
+**React 示例——状态管理器**：
+
+```tsx
+class Store<T> {
+  private state: T
+  private listeners = new Set<(state: T) => void>()
+
+  constructor(initialState: T) {
+    this.state = initialState
+  }
+
+  getState(): T {
+    return this.state
+  }
+
+  setState(updater: Partial<T> | ((state: T) => T)) {
+    this.state = typeof updater === 'function'
+      ? updater(this.state)
+      : { ...this.state, ...updater }
+
+    this.listeners.forEach(fn => fn(this.state))
+  }
+
+  subscribe(listener: (state: T) => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+}
+
+interface AppState {
+  user: { name: string } | null
+  theme: 'light' | 'dark'
+}
+
+const store = new Store<AppState>({
+  user: null,
+  theme: 'light'
+})
+
+store.subscribe(state => console.log(state.theme))
+store.setState({ theme: 'dark' })
+```
+
+## 默认类型参数
+
+```ts
+// 不给 T 时默认为 string
+interface Container<T = string> {
+  value: T
+}
+
+const c1: Container = { value: 'hello' }     // Container<string>
+const c2: Container<number> = { value: 42 }  // Container<number>
+
+// 常用模式：API 响应泛型默认值
+interface ApiResponse<T = unknown> {
+  code: number
+  message: string
+  data: T
+}
+```
+
+## 泛型推断
+
+### 从参数推断泛型
+
+```ts
+// TypeScript 自动从参数推断 T
+function wrap<T>(value: T) {
+  return { value }
+}
+
+const result = wrap('hello')
+// result: { value: string }
+```
+
+### 从返回值推断泛型
+
+```ts
+// TS 5.4+ 闭包类型推断改进
+function createCounter() {
+  let count = 0
+  return () => ++count       // 推断返回类型为 () => number
+}
+```
+
+### 手动指定泛型
+
+```ts
+function combine<T>(a: T, b: T): T[] {
+  return [a, b]
+}
+
+// ❌ 无法从不同类型推断
+combine('hello', 42)
+
+// ✅ 手动指定更宽泛的类型
+combine<string | number>('hello', 42)
+```
+
+## 高级泛型模式
+
+### 1. 泛型工厂函数
+
+```ts
+// 根据输入构造不同类型的对象
+function createFormField<T>(value: T) {
+  return {
+    value,
+    touched: false,
+    dirty: false,
+    setValue(newValue: T) { this.value = newValue },
+    markTouched() { this.touched = true }
+  }
+}
+
+const nameField = createFormField('')
+nameField.setValue('Alice')   // ✅ 类型安全
+// nameField.setValue(42)     // ❌
+```
+
+### 2. 泛型工具类型
+
+```ts
+type Nullable<T> = T | null
+type NullableFields<T> = { [K in keyof T]: T[K] | null }
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K]
+}
+```
+
+### 3. 泛型约束与条件类型联动
+
+```ts
+// 根据 key 类型筛选属性
+type PickByType<T, V> = {
+  [K in keyof T as T[K] extends V ? K : never]: T[K]
+}
+
+interface User {
+  id: number
+  name: string
+  age: number
+  email: string
+}
+
+type StringFields = PickByType<User, string>
+// { name: string; email: string }
+
+type NumberFields = PickByType<User, number>
+// { id: number; age: number }
+```
+
+### 4. 泛型重载
+
+```ts
+// 根据输入类型不同返回不同结果
+function process<T extends string>(value: T): T[]
+function process<T extends number>(value: T): T
+function process<T>(value: T): T | T[] {
+  if (typeof value === 'string') return value.split('')
+  return value
+}
+
+process('hello')  // string[]
+process(42)       // number
+```
+
+### 5. NoInfer 工具类型（TS 5.4+）
+
+```ts
+// 阻止某个位置的类型推断
+type NoInfer<T> = [T][T extends unknown ? 0 : never]
+
+function createMap<V>(keys: string[], value: NoInfer<V>): Map<string, V> {
+  const map = new Map<string, V>()
+  keys.forEach(key => map.set(key, value))
+  return map
+}
+
+// V 不从第一个参数推断
+const map = createMap(['a', 'b'], 42)  // Map<string, number>
+```
+
+## 泛型在 React 中的应用
+
+### 自定义 Hook
+
+```tsx
+// 泛型 useLocalStorage
+function useLocalStorage<T>(key: string, initialValue: T) {
+  const [storedValue, setStoredValue] = useState<T>(() => {
+    try {
+      const item = window.localStorage.getItem(key)
+      return item ? (JSON.parse(item) as T) : initialValue
+    } catch {
+      return initialValue
+    }
+  })
+
+  const setValue = (value: T | ((val: T) => T)) => {
+    const valueToStore = value instanceof Function ? value(storedValue) : value
+    setStoredValue(valueToStore)
+    window.localStorage.setItem(key, JSON.stringify(valueToStore))
+  }
+
+  return [storedValue, setValue] as const
+}
+
+// 使用
+const [theme, setTheme] = useLocalStorage<'light' | 'dark'>('theme', 'light')
+```
+
+### 泛型表单
+
+```tsx
+interface FormField<T> {
+  value: T
+  error?: string
+  validate: (value: T) => string | undefined
+}
+
+interface UseFormReturn<T extends Record<string, unknown>> {
+  fields: { [K in keyof T]: FormField<T[K]> }
+  values: T
+  setField: <K extends keyof T>(name: K, value: T[K]) => void
+  validateAll: () => boolean
+}
+
+function useForm<T extends Record<string, unknown>>(
+  initialConfig: { [K in keyof T]: Omit<FormField<T[K]>, 'error'> }
+): UseFormReturn<T> {
+  // 实现泛型表单逻辑
+  // ...
+}
+
+// 使用：完全类型安全
+const form = useForm({
+  name: { value: '', validate: (v: string) => v ? undefined : 'Required' },
+  age: { value: 0, validate: (v: number) => v > 0 ? undefined : 'Must be positive' },
+  subscribe: { value: false, validate: () => undefined }
+})
+
+form.values.name    // string
+form.values.age     // number
+form.setField('name', 'Alice')  // ✅
+// form.setField('name', 42)    // ❌
+```
+
+## 陷阱
+
+### 1. 泛型过于宽泛
+
+```ts
+// ❌ 什么都接受
+function handle<T>(data: T) {
+  // data 可以是任何类型，无法安全操作
+}
+
+// ✅ 添加约束
+function handle<T extends { id: number }>(data: T) {
+  console.log(data.id)  // ✅ 安全
+}
+```
+
+### 2. 泛型枚举不能直接使用 extends
+
+```ts
+// ❌ 不能直接约束泛型到枚举
+enum Color { Red, Green, Blue }
+
+// ❌ 不允许
+function paint<T extends Color>(color: T) {}
+
+// ✅ 使用 typeof Color[key]
+function paint<T extends Color>(color: T) {}
+```
+
+### 3. `tsx` 环境下箭头函数泛型
+
+```tsx
+// ❌ JSX 解析问题
+const foo = <T>(x: T) => x
+
+// ✅ 加逗号或 extends
+const foo = <T,>(x: T) => x
+const foo = <T extends unknown>(x: T) => x
+```
+
+## 最佳实践
+
+### ✅ 泛型名语义化
+
+```ts
+// ❌ 无意义的单字母
+function f<X, Y, Z>(a: X, b: Y): Z {}
+
+// ✅ 有意义的泛型名
+function transform<TInput, TOutput>(input: TInput): TOutput {}
+
+// ✅ 惯例单字母场景：T（泛型本身）、K（键）、V（值）、E（错误）
+type Record<K extends string | number | symbol, V> = { [P in K]: V }
+```
+
+### ✅ 使用泛型默认值避免推断失败
+
+```ts
+// ✅ 提供合理默认值
+interface State<T = string> {
+  value: T
+  onChange: (value: T) => void
+}
+
+const s1: State = { value: 'hello', onChange: (v) => {} }  // T = string
+const s2: State<number> = { value: 42, onChange: (v) => {} }
+```
+
+### ✅ 善用 extends 约束泛型
+
+```ts
+// ✅ 确保泛型可以被操作
+function sortByKey<T, K extends keyof T>(items: T[], key: K): T[] {
+  return [...items].sort((a, b) => {
+    if (a[key] > b[key]) return 1
+    if (a[key] < b[key]) return -1
+    return 0
+  })
+}
+
+sortByKey(users, 'name')   // ✅
+sortByKey(users, 'age')    // ✅
+sortByKey(users, 'xxx')    // ❌
+```
+
+下一章 [函数类型](/ts/functions) 深入函数签名、重载与 `this` 类型。

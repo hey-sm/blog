@@ -1,0 +1,582 @@
+---
+title: 列表虚拟化
+description: vue-virtual-scroller、TanStack Vue Virtual、动态高度、表格虚拟化与无限滚动
+---
+
+# 列表虚拟化
+
+> Vue 渲染 10000 行数据同样会卡——虚拟化在 Vue 中与 React 同样必要。
+
+虚拟化的原理在 [React 列表虚拟化](/performance/react/virtualization) 已详尽——本章聚焦 Vue 生态的具体实现：vue-virtual-scroller、@tanstack/vue-virtual、vueuse 工具、与组合式 API 的协同。
+
+## 为什么 Vue 也需要虚拟化
+
+Vue 的细粒度响应式让"小数据量"应用默认就快——但**渲染本身的成本**与框架无关：
+
+```text
+渲染 10000 行（每行 50 px 高度）：
+
+无虚拟化：
+  ├─ 创建 10000 个 vnode
+  ├─ 创建 10000 个 DOM 节点
+  ├─ 每个节点应用 CSS / Layout
+  └─ 总耗时：3-5 s（中端设备）
+
+虚拟化：
+  ├─ 视口 800 px → 仅渲染 ~ 16 行
+  ├─ 16 个 vnode + 16 个 DOM
+  └─ 总耗时：< 30 ms
+```
+
+虽然 Vue 编译时优化让 vnode 创建更快——但 DOM 节点数本身就是浏览器层面的瓶颈。
+
+## vue-virtual-scroller
+
+[vue-virtual-scroller](https://github.com/Akryum/vue-virtual-scroller) 是 Vue 生态最成熟的虚拟化库。
+
+### 安装
+
+```bash
+npm install vue-virtual-scroller
+```
+
+```ts
+// main.ts
+import VueVirtualScroller from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
+
+app.use(VueVirtualScroller)
+```
+
+### RecycleScroller：固定高度
+
+```vue
+<template>
+  <RecycleScroller
+    class="scroller"
+    :items="items"
+    :item-size="50"                   /* 每项固定 50px */
+    key-field="id"                     /* 关键：稳定 key */
+    v-slot="{ item }"
+  >
+    <UserCard :user="item" />
+  </RecycleScroller>
+</template>
+
+<style scoped>
+.scroller { height: 100vh; }
+</style>
+```
+
+实现原理：
+
+- 容器内只渲染视口可见的项
+- 滚动时复用 DOM 节点（"recycle"——比新建更便宜）
+- 占位高度 = items.length × itemSize
+
+### DynamicScroller：动态高度
+
+```vue
+<template>
+  <DynamicScroller
+    :items="items"
+    :min-item-size="60"              /* 最小高度估计 */
+    key-field="id"
+  >
+    <template #default="{ item, index, active }">
+      <DynamicScrollerItem
+        :item="item"
+        :active="active"
+        :data-index="index"
+      >
+        <Comment :data="item" />     /* 高度不固定（取决于内容） */
+      </DynamicScrollerItem>
+    </template>
+  </DynamicScroller>
+</template>
+```
+
+`active` 是关键——`true` 时表示该项在视口附近（应渲染），`false` 时应渲染占位。`DynamicScrollerItem` 负责测量真实高度并存入 cache。
+
+### 网格
+
+```vue
+<template>
+  <RecycleScroller
+    class="scroller"
+    :items="photos"
+    :item-size="200"
+    direction="vertical"
+    :grid-items="3"                  /* 每行 3 列 */
+    :item-secondary-size="200"       /* 列宽 */
+    key-field="id"
+    v-slot="{ item }"
+  >
+    <img :src="item.url" />
+  </RecycleScroller>
+</template>
+```
+
+### 横向滚动
+
+```vue
+<RecycleScroller
+  :items="items"
+  :item-size="200"
+  direction="horizontal"
+  ...
+/>
+```
+
+### 与窗口滚动协同
+
+整页滚动而非容器滚动：
+
+```vue
+<RecycleScroller
+  page-mode                          /* 整页滚动 */
+  :items="items"
+  :item-size="50"
+  key-field="id"
+/>
+```
+
+`page-mode` 让虚拟滚动跟随 window 滚动而非自身——适合"列表是页面主内容"的场景。
+
+### 性能优化技巧
+
+#### 1. v-memo 配合
+
+```vue
+<RecycleScroller :items="items" :item-size="50" key-field="id" v-slot="{ item }">
+  <div v-memo="[item.id, item.updated]">
+    <ExpensiveItem :data="item" />
+  </div>
+</RecycleScroller>
+```
+
+即使 RecycleScroller 把视口外的项滚出又滚入，`v-memo` 让相同数据不重新渲染。详见 [模板与指令](/performance/vue/template-directives)。
+
+#### 2. shallowRef 数据
+
+```vue
+<script setup>
+import { shallowRef } from 'vue'
+
+const items = shallowRef([])
+
+async function load() {
+  items.value = await fetch('/api/items').then(r => r.json())
+}
+</script>
+```
+
+避免对大数组深度代理。详见 [浅层与只读优化](/performance/vue/shallow-optimization)。
+
+## @tanstack/vue-virtual
+
+[`@tanstack/vue-virtual`](https://tanstack.com/virtual/latest/docs/framework/vue/vue-virtual) 是 TanStack 的 Vue 适配器——更底层、完全可控。
+
+### 基础用法
+
+```vue
+<script setup>
+import { useVirtualizer } from '@tanstack/vue-virtual'
+import { ref } from 'vue'
+
+const props = defineProps({ items: Array })
+const parentRef = ref(null)
+
+const virtualizer = useVirtualizer({
+  count: props.items.length,
+  getScrollElement: () => parentRef.value,
+  estimateSize: () => 50,
+  overscan: 5
+})
+</script>
+
+<template>
+  <div ref="parentRef" style="height: 600px; overflow: auto">
+    <div :style="{
+      height: `${virtualizer.getTotalSize()}px`,
+      position: 'relative'
+    }">
+      <div
+        v-for="virtualRow in virtualizer.getVirtualItems()"
+        :key="virtualRow.key"
+        :style="{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          transform: `translateY(${virtualRow.start}px)`
+        }"
+      >
+        <UserCard :user="items[virtualRow.index]" />
+      </div>
+    </div>
+  </div>
+</template>
+```
+
+### 动态高度
+
+```ts
+const virtualizer = useVirtualizer({
+  count: items.length,
+  getScrollElement: () => parentRef.value,
+  estimateSize: () => 80,                       // 估计
+  measureElement: (el) => el.getBoundingClientRect().height
+})
+```
+
+```vue
+<div
+  v-for="vRow in virtualizer.getVirtualItems()"
+  :ref="(el) => el && virtualizer.measureElement(el)"
+  ...
+>
+```
+
+### 与 TanStack Vue Table 协同
+
+```vue
+<script setup>
+import { useVueTable, getCoreRowModel, getSortedRowModel } from '@tanstack/vue-table'
+import { useVirtualizer } from '@tanstack/vue-virtual'
+import { ref } from 'vue'
+
+const props = defineProps({ data: Array, columns: Array })
+
+const sorting = ref([])
+
+const table = useVueTable({
+  get data() { return props.data },
+  get columns() { return props.columns },
+  state: { get sorting() { return sorting.value } },
+  onSortingChange: (updater) => {
+    sorting.value = typeof updater === 'function' ? updater(sorting.value) : updater
+  },
+  getCoreRowModel: getCoreRowModel(),
+  getSortedRowModel: getSortedRowModel()
+})
+
+const parentRef = ref(null)
+const rows = computed(() => table.getRowModel().rows)
+
+const virtualizer = useVirtualizer({
+  count: rows.value.length,
+  getScrollElement: () => parentRef.value,
+  estimateSize: () => 50,
+  overscan: 10
+})
+</script>
+
+<template>
+  <div ref="parentRef" style="height: 600px; overflow: auto">
+    <table>
+      <thead>
+        <tr v-for="hg in table.getHeaderGroups()" :key="hg.id">
+          <th
+            v-for="header in hg.headers"
+            :key="header.id"
+            @click="header.column.getToggleSortingHandler()?.($event)"
+          >
+            {{ header.column.columnDef.header }}
+          </th>
+        </tr>
+      </thead>
+      <tbody :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }">
+        <tr
+          v-for="vRow in virtualizer.getVirtualItems()"
+          :key="vRow.key"
+          :style="{
+            position: 'absolute',
+            transform: `translateY(${vRow.start}px)`
+          }"
+        >
+          <td v-for="cell in rows[vRow.index].getVisibleCells()" :key="cell.id">
+            <FlexRender :render="cell.column.columnDef.cell" :props="cell.getContext()" />
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</template>
+```
+
+强大组合——大表格 + 排序 + 虚拟化。
+
+## 选型对比
+
+| 维度 | vue-virtual-scroller | @tanstack/vue-virtual |
+| ---- | -------------------- | --------------------- |
+| Bundle | 中 | 小 |
+| 上手 | 容易 | 中等 |
+| 动态高度 | DynamicScroller | 内建 |
+| 网格 | 内建 | 手动 |
+| 完全自定义 | 较难 | ✅ |
+| 与 vue-table 协同 | 需手动 | 官方推荐 |
+| 维护 | 活跃 | 活跃 |
+
+**选型**：
+
+- 一般列表 / 网格 → vue-virtual-scroller
+- 复杂表格（排序/过滤/分组） → tanstack 组合
+- 完全自定义渲染 → tanstack
+
+## 无限滚动
+
+### vue-virtual-scroller + IntersectionObserver
+
+```vue
+<template>
+  <RecycleScroller :items="items" :item-size="50" key-field="id" v-slot="{ item, index }">
+    <div>
+      <UserCard :user="item" />
+      <div v-if="index === items.length - 5" ref="loadMoreTrigger"></div>
+    </div>
+  </RecycleScroller>
+</template>
+
+<script setup>
+import { ref, onMounted, watch } from 'vue'
+
+const items = ref([])
+const loadMoreTrigger = ref(null)
+const hasMore = ref(true)
+
+async function loadMore() {
+  if (!hasMore.value) return
+  const newItems = await fetch(`/api/items?cursor=${cursor.value}`).then(r => r.json())
+  items.value.push(...newItems.data)
+  hasMore.value = newItems.hasMore
+}
+
+watch(loadMoreTrigger, (el) => {
+  if (!el) return
+  const io = new IntersectionObserver(([entry]) => {
+    if (entry.isIntersecting) loadMore()
+  })
+  io.observe(el)
+})
+</script>
+```
+
+### useInfiniteQuery（@tanstack/vue-query）
+
+更声明式：
+
+```vue
+<script setup>
+import { useInfiniteQuery } from '@tanstack/vue-query'
+
+const { data, fetchNextPage, hasNextPage, isFetching } = useInfiniteQuery({
+  queryKey: ['posts'],
+  queryFn: ({ pageParam = 0 }) =>
+    fetch(`/api/posts?cursor=${pageParam}`).then(r => r.json()),
+  getNextPageParam: (last) => last.nextCursor,
+  initialPageParam: 0
+})
+
+const items = computed(() => data.value?.pages.flatMap(p => p.items) ?? [])
+</script>
+
+<template>
+  <RecycleScroller :items="items" :item-size="50" key-field="id" v-slot="{ item, index }">
+    <PostCard :post="item" />
+  </RecycleScroller>
+  <button v-if="hasNextPage" @click="fetchNextPage()">Load more</button>
+</template>
+```
+
+## 动态变高的常见场景
+
+### 评论展开 / 收起
+
+```vue
+<DynamicScroller :items="comments" :min-item-size="80" key-field="id">
+  <template #default="{ item, active }">
+    <DynamicScrollerItem :item="item" :active="active">
+      <CommentItem
+        :comment="item"
+        :expanded="expanded.has(item.id)"
+        @toggle="toggleExpand(item.id)"
+      />
+    </DynamicScrollerItem>
+  </template>
+</DynamicScroller>
+
+<script setup>
+const expanded = ref(new Set())
+
+function toggleExpand(id) {
+  const next = new Set(expanded.value)
+  next.has(id) ? next.delete(id) : next.add(id)
+  expanded.value = next
+}
+</script>
+```
+
+DynamicScroller 自动监听内容尺寸变化——展开后高度自动重新测量。
+
+### 实时数据插入
+
+```ts
+ws.onmessage = (e) => {
+  const newPost = JSON.parse(e.data)
+  items.value = [newPost, ...items.value]       // 顶部插入
+}
+```
+
+`vue-virtual-scroller` 会自动调整滚动位置——但有时希望"用户在顶部时自动滚到新项"：
+
+```ts
+const isAtTop = ref(true)
+
+function onScroll(e) {
+  isAtTop.value = e.target.scrollTop < 100
+}
+
+ws.onmessage = (e) => {
+  items.value = [JSON.parse(e.data), ...items.value]
+  if (isAtTop.value) {
+    nextTick(() => scroller.value?.scrollToItem(0))
+  }
+}
+```
+
+## 滚动还原
+
+进入路由切换离开后回来希望保留滚动位置——配合 KeepAlive：
+
+```vue
+<script setup>
+import { ref, onActivated, onDeactivated } from 'vue'
+
+const scroller = ref(null)
+const savedScrollTop = ref(0)
+
+onDeactivated(() => {
+  savedScrollTop.value = scroller.value?.$el.scrollTop ?? 0
+})
+
+onActivated(() => {
+  if (scroller.value) {
+    scroller.value.$el.scrollTop = savedScrollTop.value
+  }
+})
+</script>
+```
+
+或在 Vue Router 中配置：
+
+```ts
+const router = createRouter({
+  scrollBehavior(to, from, savedPosition) {
+    return savedPosition || { top: 0 }
+  }
+})
+```
+
+但**虚拟列表的 scrollTop 不在 window**——需自定义保存。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 1000+ 直接 v-for | 卡死 | 虚拟化 |
+| 容器无明确高度 | 虚拟化失效（看到全部） | 显式 height 或 page-mode |
+| 用 index 作 key-field | 数据更新错位 | 稳定 ID |
+| 用 reactive 大数组 | 深度代理慢 | shallowRef |
+| 行内 v-if 多层 | 视口切换抖动 | 简化或 v-show |
+| 动态高度用 RecycleScroller | 高度估算错乱 | 改 DynamicScroller |
+| 无限滚动不去重 | 重复项 | id Set 去重 |
+| 滚动用 onScroll setState | 阻塞主线程 | 库内置 + IntersectionObserver |
+| KeepAlive 列表无 scroll 还原 | 返回滚到顶 | onActivated 还原 |
+
+## 监控
+
+### 滚动 FPS
+
+```ts
+let lastTime = performance.now()
+let frames = 0
+
+function tick() {
+  frames++
+  const now = performance.now()
+  if (now - lastTime >= 1000) {
+    if (frames < 50) console.warn('Low FPS:', frames)
+    frames = 0
+    lastTime = now
+  }
+  requestAnimationFrame(tick)
+}
+requestAnimationFrame(tick)
+```
+
+### Vue DevTools
+
+录制 Performance Timeline 看：
+
+- 渲染了多少个组件实例？
+- 单 commit 耗时？
+
+详见 [Vue 性能工具](/performance/vue/tools)。
+
+## 实战：万行表格
+
+```vue
+<script setup>
+import { ref, computed } from 'vue'
+import { useVueTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel } from '@tanstack/vue-table'
+import { useVirtualizer } from '@tanstack/vue-virtual'
+
+const props = defineProps({ data: Array, columns: Array })
+
+const sorting = ref([])
+const filter = ref('')
+
+const table = useVueTable({
+  get data() { return props.data },
+  get columns() { return props.columns },
+  state: {
+    get sorting() { return sorting.value },
+    get globalFilter() { return filter.value }
+  },
+  onSortingChange: (u) => sorting.value = typeof u === 'function' ? u(sorting.value) : u,
+  getCoreRowModel: getCoreRowModel(),
+  getSortedRowModel: getSortedRowModel(),
+  getFilteredRowModel: getFilteredRowModel()
+})
+
+const parentRef = ref(null)
+const rows = computed(() => table.getRowModel().rows)
+const virtualizer = useVirtualizer({
+  count: rows.value.length,
+  getScrollElement: () => parentRef.value,
+  estimateSize: () => 40,
+  overscan: 10
+})
+</script>
+
+<template>
+  <input v-model="filter" placeholder="Search..." />
+  <div ref="parentRef" style="height: 600px; overflow: auto">
+    <!-- table impl 同前文 -->
+  </div>
+</template>
+```
+
+支持 10 万行 + 排序 + 过滤 + 虚拟化，60 FPS 稳定。
+
+## 小结
+
+- vue-virtual-scroller 的 RecycleScroller / DynamicScroller 是 Vue 列表虚拟化最成熟的方案；
+- @tanstack/vue-virtual 更底层但完全可控，与 @tanstack/vue-table 是大表格的最强组合；
+- 配合 shallowRef 数据 + v-memo 行 = 大列表性能最优；
+- 动态高度场景用 DynamicScroller 或 tanstack 的 measureElement 自动测量；
+- 无限滚动 = 虚拟化 + IntersectionObserver / @tanstack/vue-query；
+- KeepAlive 中的虚拟列表需手动保存 scrollTop（DOM 在但状态可能丢）；
+- 容器必须有明确高度，行 key 必须稳定——这两点错则虚拟化失效。

@@ -1,0 +1,449 @@
+---
+title: 颜色与背景
+description: 颜色模型、渐变、不透明度、color-mix 与 light-dark
+---
+
+# 颜色与背景
+
+## 颜色模型
+
+CSS 中的颜色可用多种格式表达：
+
+### Named Colors
+
+```css
+.x { color: red; }
+.y { color: rebeccapurple; }
+.z { color: transparent; }
+```
+
+CSS 定义了 ~140 个具名颜色。生产中除 `transparent` / `currentColor` / `inherit` 外不推荐使用——可读性与可维护性差。
+
+### HEX
+
+```css
+.x { color: #ff0000; }                        /* 红 */
+.y { color: #f00; }                           /* 短形式 = #ff0000 */
+.z { color: #ff000080; }                      /* 8 位 = 含 alpha */
+.a { color: #f008; }                          /* 4 位 = 含 alpha */
+```
+
+### RGB / RGBA
+
+```css
+.x { color: rgb(255, 0, 0); }
+.y { color: rgb(255 0 0); }                   /* 现代语法（无逗号） */
+.z { color: rgb(255 0 0 / 50%); }             /* 50% alpha */
+.a { color: rgba(255, 0, 0, 0.5); }           /* 老语法 */
+```
+
+### HSL / HSLA
+
+```css
+.x { color: hsl(0 100% 50%); }                /* 红 */
+.y { color: hsl(120, 100%, 50%); }            /* 绿 */
+.z { color: hsl(240 100% 50% / 0.5); }
+```
+
+HSL 比 RGB 直观——**色相 / 饱和度 / 亮度**对应人类感知：
+
+```css
+:root {
+  --hue: 220;
+  --primary:        hsl(var(--hue) 80% 50%);
+  --primary-light:  hsl(var(--hue) 80% 70%);
+  --primary-dark:   hsl(var(--hue) 80% 30%);
+}
+```
+
+仅改 hue 即可生成整套颜色变体。
+
+### `oklch` / `lch`（推荐）
+
+CSS Color 4 引入感知均匀的色彩空间：
+
+```css
+.x { color: oklch(0.7 0.15 240); }            /* 亮度 / 色度 / 色相 */
+.y { color: lch(70% 50 240); }
+```
+
+`oklch` 比 `hsl` 在色相空间上分布更均匀——**等亮度的红色与蓝色看起来真的一样亮**，而 `hsl` 不一定。Tailwind 4 默认调色板就基于 oklch。
+
+### `color()` 与广色域
+
+```css
+.x { color: color(display-p3 1 0 0); }        /* 在 P3 色域显示器上更鲜艳 */
+.y { color: color(rec2020 1 0 0); }
+```
+
+适合追求鲜艳度的设计型应用，普通屏幕会自动降级为 sRGB。
+
+### `currentColor`
+
+```css
+.icon {
+  color: red;
+  fill: currentColor;                          /* SVG 填充随文字色变化 */
+  border: 1px solid currentColor;
+}
+```
+
+继承当前 `color` 值，避免在多处硬编码同一颜色。
+
+## 不透明度
+
+### `opacity`
+
+```css
+.faded { opacity: 0.5; }                      /* 整个元素 + 子元素都半透明 */
+```
+
+### 颜色 alpha
+
+```css
+.semi-bg {
+  background: rgb(0 0 0 / 50%);                /* 仅背景半透明，文字不变 */
+}
+```
+
+实战要点：**优先在颜色值上加 alpha**，仅在确实希望"整组元素一起淡化"时才用 `opacity`。
+
+### Tailwind
+
+```html
+<div class="opacity-50">整体半透明</div>
+<div class="bg-black/50">仅背景半透明</div>
+<div class="bg-blue-500/25 text-white/75">分别控制</div>
+```
+
+`bg-black/50` 是 Tailwind 4 的颜色 alpha 语法——`/<n>` 表示百分数。
+
+## 背景
+
+### 背景色
+
+```css
+.box { background-color: #f5f5f5; }
+.box { background: #f5f5f5; }                 /* 简写 */
+```
+
+### 背景图
+
+```css
+.hero {
+  background-image: url('/hero.jpg');
+  background-size: cover;                      /* 覆盖容器 */
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* 简写 */
+.hero {
+  background: url('/hero.jpg') center / cover no-repeat;
+}
+```
+
+| 属性 | 取值 |
+| ---- | ---- |
+| `background-size` | `cover` / `contain` / `100%` / `200px 100px` |
+| `background-position` | `center` / `top right` / `50% 25%` / `10px 20px` |
+| `background-repeat` | `no-repeat` / `repeat` / `repeat-x` / `repeat-y` / `space` / `round` |
+| `background-attachment` | `scroll` / `fixed` / `local` |
+
+### 多层背景
+
+```css
+.banner {
+  background:
+    linear-gradient(to bottom, transparent, rgba(0,0,0,0.6)),
+    url('/photo.jpg') center / cover;
+}
+```
+
+多个 `background` 用逗号分隔，**先写的在上层**。
+
+### 渐变
+
+#### 线性渐变
+
+```css
+.x {
+  background: linear-gradient(to right, red, blue);
+  background: linear-gradient(45deg, red, blue);
+  background: linear-gradient(in oklch, red, blue);  /* 色彩空间插值 */
+}
+```
+
+多色停靠点：
+
+```css
+.rainbow {
+  background: linear-gradient(
+    to right,
+    red 0%,
+    orange 16%,
+    yellow 33%,
+    green 50%,
+    blue 66%,
+    indigo 83%,
+    violet 100%
+  );
+}
+```
+
+#### 径向渐变
+
+```css
+.x {
+  background: radial-gradient(circle at center, red, blue);
+  background: radial-gradient(ellipse at top right, red, transparent);
+}
+```
+
+#### 锥形渐变
+
+```css
+.pie {
+  background: conic-gradient(red 0deg, red 90deg, blue 90deg, blue 360deg);
+  /* 25% 红 + 75% 蓝，可用作饼图 */
+}
+```
+
+#### Tailwind 渐变
+
+```html
+<div class="bg-gradient-to-r from-blue-500 to-purple-500">
+  线性
+</div>
+
+<div class="bg-radial-[at_center] from-blue-500 to-transparent">
+  径向（任意值语法）
+</div>
+```
+
+Tailwind 4 直接支持 `from-* via-* to-*` 三段渐变，配合 `bg-gradient-to-{方向}` 表达大多数线性渐变。
+
+## `color-mix()`（CSS Color 5）
+
+在不引入新颜色变量的前提下混合两种颜色：
+
+```css
+.btn:hover {
+  background: color-mix(in oklch, var(--primary) 80%, black);
+}
+
+.btn:disabled {
+  background: color-mix(in srgb, var(--primary) 50%, transparent);
+}
+```
+
+可彻底取代 Sass 的 `darken()` / `lighten()` / `mix()`：
+
+```css
+/* 旧：Sass */
+.btn:hover { background: darken($primary, 10%); }
+
+/* 新：原生 CSS */
+.btn:hover { background: color-mix(in oklch, var(--primary), black 10%); }
+```
+
+#### Tailwind 4
+
+```html
+<div class="bg-blue-500/80">透明混合</div>
+```
+
+任意 color-mix 用任意值语法：
+
+```html
+<div class="bg-[color-mix(in_oklch,var(--primary)_80%,black)]">...</div>
+```
+
+## `light-dark()`（CSS Color 5）
+
+根据 `color-scheme` 自动切换：
+
+```css
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  background: light-dark(white, #111);
+  color: light-dark(#111, white);
+}
+```
+
+不需要写两套媒体查询——浏览器根据 `color-scheme` 自动选择。配合 `:root[data-theme=dark] { color-scheme: dark; }` 可实现明暗切换。
+
+#### Tailwind 4
+
+Tailwind 的 `dark:` 变体仍是事实标准：
+
+```html
+<div class="bg-white text-gray-900 dark:bg-gray-900 dark:text-white">
+  ...
+</div>
+```
+
+通过 `<html class="dark">` 或 `[data-theme="dark"]`（自定义）触发。
+
+## 阴影
+
+### Box Shadow
+
+```css
+.card {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* 多层阴影：更立体 */
+.elevated {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 4px 12px rgba(0, 0, 0, 0.10);
+}
+
+/* 内阴影 */
+.inset {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+}
+```
+
+#### Tailwind 阴影
+
+```html
+<div class="shadow">轻微</div>
+<div class="shadow-md">中等</div>
+<div class="shadow-lg">大</div>
+<div class="shadow-2xl">最大</div>
+<div class="shadow-inner">内阴影</div>
+```
+
+### Drop Shadow（含轮廓的阴影）
+
+```css
+.icon {
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.3));
+}
+```
+
+`drop-shadow` 跟随元素的实际形状（含 SVG 路径、PNG 透明），而 `box-shadow` 只跟随盒子边界。
+
+## 滤镜
+
+```css
+.x { filter: blur(8px); }
+.y { filter: brightness(0.8); }
+.z { filter: contrast(1.2); }
+.a { filter: grayscale(1); }
+.b { filter: hue-rotate(45deg); }
+.c { filter: saturate(1.5); }
+.d { filter: invert(1); }
+.e { filter: sepia(0.8); }
+
+/* 链式 */
+.image { filter: brightness(0.9) contrast(1.1) saturate(1.05); }
+```
+
+### `backdrop-filter`（毛玻璃）
+
+```css
+.glass {
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(10px);
+}
+```
+
+`backdrop-filter` 在元素**背后**应用滤镜（穿透到下层），是 macOS / iOS 风格毛玻璃效果的核心。
+
+#### Tailwind
+
+```html
+<div class="filter blur-md brightness-90">普通滤镜</div>
+<div class="backdrop-blur-md bg-white/50">毛玻璃</div>
+```
+
+## 实战配方
+
+### 主题切换
+
+```css
+/* 颜色令牌 */
+@theme {
+  --color-primary: oklch(0.65 0.15 240);
+  --color-bg: white;
+  --color-text: oklch(0.2 0 0);
+}
+
+/* 暗色覆盖 */
+[data-theme='dark'] {
+  --color-bg: oklch(0.18 0 0);
+  --color-text: oklch(0.95 0 0);
+}
+
+/* 使用 */
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+```
+
+```ts
+function setTheme(theme: 'light' | 'dark') {
+  document.documentElement.dataset.theme = theme
+  localStorage.setItem('theme', theme)
+}
+```
+
+### 设计令牌：12 阶颜色刻度
+
+借鉴 [Radix Colors](https://www.radix-ui.com/colors) 的 12 阶系统：
+
+```css
+@theme {
+  --color-blue-1:  oklch(0.99 0.005 240);     /* 应用背景 */
+  --color-blue-2:  oklch(0.97 0.012 240);     /* 微妙背景 */
+  --color-blue-3:  oklch(0.93 0.04 240);      /* 元素背景 */
+  --color-blue-4:  oklch(0.88 0.06 240);      /* 悬停背景 */
+  --color-blue-5:  oklch(0.83 0.08 240);      /* 激活背景 */
+  --color-blue-6:  oklch(0.78 0.09 240);      /* 微妙边框 */
+  --color-blue-7:  oklch(0.72 0.10 240);      /* UI 边框 */
+  --color-blue-8:  oklch(0.65 0.13 240);      /* 悬停边框 / 焦点 */
+  --color-blue-9:  oklch(0.55 0.18 240);      /* 实色填充 */
+  --color-blue-10: oklch(0.50 0.18 240);      /* 悬停实色 */
+  --color-blue-11: oklch(0.42 0.15 240);      /* 低亮文字 */
+  --color-blue-12: oklch(0.18 0.10 240);      /* 高亮文字 */
+}
+```
+
+每个阶都有"语义角色"，跨色系共享同一含义。是设计系统的进阶玩法。
+
+### 交互态颜色
+
+```css
+.btn {
+  background: var(--color-blue-9);
+  color: white;
+  transition: background 150ms;
+}
+.btn:hover  { background: var(--color-blue-10); }
+.btn:active { background: var(--color-blue-11); }
+```
+
+或用 `color-mix` 动态派生：
+
+```css
+.btn { background: var(--primary); }
+.btn:hover  { background: color-mix(in oklch, var(--primary), black 10%); }
+.btn:active { background: color-mix(in oklch, var(--primary), black 20%); }
+```
+
+## 小结
+
+- 现代项目优先 `oklch` / `hsl` 等感知友好的色彩空间，`hex` 仅作沟通约定；
+- 颜色 alpha 优于整体 `opacity`——前者只半透明背景，后者带文字一起淡化；
+- `linear-gradient` / `radial-gradient` / `conic-gradient` + 多层背景能实现绝大多数视觉效果；
+- `color-mix()` 与 `light-dark()` 让原生 CSS 拥有了过去 Sass 的色彩工具能力；
+- `backdrop-filter` 是毛玻璃效果的关键 API，注意性能（详见 [最佳实践](/css/best-practices)）；
+- Tailwind 4 默认调色板基于 oklch，alpha 用 `/n` 语法，渐变用 `from-* to-*`。

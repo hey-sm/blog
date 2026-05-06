@@ -1,0 +1,688 @@
+---
+title: 工程化
+description: BEM、Sass、PostCSS、CSS Modules、CSS-in-JS 与现代 CSS 工程实践
+---
+
+# 工程化
+
+CSS 工程化是把"能写出样式"提升到"能在团队中长期维护数万行样式而不腐烂"的工具与方法集。本章覆盖：
+
+- **命名方法论**：BEM 与现代命名约定
+- **预处理器**：Sass / PostCSS 详解
+- **作用域方案**：CSS Modules、CSS-in-JS、@scope
+- **设计系统化**：Design Tokens、组件库
+
+## 命名方法论：BEM
+
+**BEM = Block / Element / Modifier**：
+
+```css
+.card                                          /* Block */
+.card__title                                   /* Element：Block 的子部分 */
+.card__image
+.card--featured                                /* Modifier：Block 的变体 */
+.card--small
+.card__title--bold                             /* Element 的变体 */
+```
+
+```html
+<article class="card card--featured">
+  <h2 class="card__title card__title--bold">Title</h2>
+  <p class="card__body">Body</p>
+</article>
+```
+
+#### 优点
+
+- **语义明确**：从类名一眼看出"块 / 子元素 / 变体"关系
+- **避免冲突**：长且具体的类名不会撞车
+- **特异性平等**：所有类名都是 `(0, 0, 1, 0)`，覆盖关系由源码顺序决定
+
+#### 缺点
+
+- 类名冗长
+- 不适合多变体组合（A 与 B 都启用时类名爆炸）
+- 与 Tailwind 等现代方案理念冲突
+
+#### 何时用 BEM
+
+仍维护遗留项目；或团队偏向 vanilla CSS、组件少而稳定时。新项目通常选 CSS Modules + utility（Tailwind）的混合方案，已不主动追求 BEM。
+
+## 现代命名约定
+
+如果不用 BEM，常见替代：
+
+```css
+.Card { ... }                                  /* PascalCase 表示组件 */
+.Card-title { ... }                            /* 短横线表示子部分 */
+.is-active { ... }                             /* 状态类（前缀 is- / has-） */
+.has-icon { ... }
+.u-truncate { ... }                            /* 工具类（前缀 u-） */
+```
+
+或更现代的"组合 className"：
+
+```tsx
+import { cva } from 'class-variance-authority'
+
+const card = cva('rounded-lg p-4', {
+  variants: {
+    variant: { default: 'bg-white', featured: 'bg-blue-50' },
+    size: { sm: 'p-2', lg: 'p-6' }
+  }
+})
+
+<div className={card({ variant: 'featured', size: 'lg' })} />
+```
+
+详见 [React 样式方案](/react/styling#cva-class-variance-authority)。
+
+## Sass / SCSS
+
+Sass 是历史最悠久、生态最完整的 CSS 预处理器。它的核心特性：变量、嵌套、Mixin、函数、模块化。
+
+#### 现代视角：哪些 Sass 特性已被 CSS 取代
+
+| Sass | CSS 等价 | 状态 |
+| ---- | -------- | ---- |
+| `$variable` | `--variable` | CSS 变量已普及，几乎全替代 |
+| 嵌套选择器 | CSS Nesting | 现代浏览器全支持 |
+| `darken()` / `lighten()` | `color-mix()` | 已有等价 |
+| `@import` | `@import` / `@layer` | CSS 原生但慢，建议构建工具处理 |
+| `@mixin` / `@include` | `@apply`（Tailwind） | 部分场景仍需 Sass |
+| `@function` | 无原生等价 | Sass 仍领先 |
+| 数学运算 | `calc()` | CSS 已支持 |
+
+**结论**：纯样式表达层面，原生 CSS 已能覆盖 Sass 90% 用例。Sass 仍有价值的场景：复杂 mixin、跨文件抽象、自定义函数、生成 utility 类。
+
+### 安装与配置
+
+```bash
+pnpm add -D sass
+```
+
+Vite 原生支持 `.scss`：
+
+```ts
+import './styles.scss'
+```
+
+### 变量
+
+```scss
+$primary: #1d4ed8;
+$space-base: 8px;
+
+.btn {
+  background: $primary;
+  padding: $space-base * 2 $space-base * 3;
+}
+```
+
+vs CSS 变量：
+
+```css
+:root { --primary: #1d4ed8; }
+.btn { background: var(--primary); }
+```
+
+新代码优先 CSS 变量——可运行时修改、媒体查询切换、JS 可读写。Sass 变量适合"永远不会变"的设计常量。
+
+### 嵌套
+
+```scss
+.card {
+  padding: 16px;
+
+  &__title {
+    font-size: 18px;
+  }
+
+  &:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+
+  &.is-featured {
+    background: #f0f9ff;
+  }
+}
+```
+
+CSS Nesting（2024 全浏览器支持）已实现相同语法：
+
+```css
+.card {
+  padding: 16px;
+
+  & .card__title {
+    font-size: 18px;
+  }
+
+  &:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+}
+```
+
+⚠️ 嵌套层数控制在 **2~3 层** 内——更深时类名定位困难，且生成的选择器特异性飙升。
+
+### Mixin
+
+参数化的样式块，是 Sass 最强大的特性之一：
+
+```scss
+@mixin focus-ring($color: blue, $offset: 2px) {
+  &:focus-visible {
+    outline: 2px solid $color;
+    outline-offset: $offset;
+  }
+}
+
+.btn {
+  @include focus-ring(orange);
+}
+
+.input {
+  @include focus-ring;
+}
+```
+
+```scss
+@mixin clamp-text($lines) {
+  display: -webkit-box;
+  -webkit-line-clamp: $lines;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.title { @include clamp-text(2); }
+.body  { @include clamp-text(5); }
+```
+
+#### 媒体查询 Mixin
+
+```scss
+@mixin md { @media (min-width: 768px) { @content; } }
+@mixin lg { @media (min-width: 1024px) { @content; } }
+
+.container {
+  padding: 16px;
+  @include md { padding: 24px; }
+  @include lg { padding: 32px; }
+}
+```
+
+### 函数
+
+```scss
+@function rem($px) {
+  @return $px / 16 * 1rem;
+}
+
+.x {
+  font-size: rem(18);                           /* → 1.125rem */
+}
+```
+
+CSS 没有用户定义函数的原生等价——这是 Sass 仍不可替代的领域。
+
+### 模块（@use）
+
+```scss
+// _variables.scss
+$primary: #1d4ed8;
+$space: 8px;
+
+// _mixins.scss
+@mixin focus-ring { ... }
+
+// main.scss
+@use 'variables' as v;
+@use 'mixins' as m;
+
+.btn {
+  background: v.$primary;
+  @include m.focus-ring;
+}
+```
+
+`@use` 是现代 Sass 的模块化方式（取代旧的 `@import`）。每个 `@use` 引入一个独立命名空间。
+
+### 控制流
+
+```scss
+@for $i from 1 through 6 {
+  h#{$i} { font-size: 2.5rem - $i * 0.25rem; }
+}
+
+@each $name, $color in (primary: blue, danger: red, success: green) {
+  .text-#{$name} { color: $color; }
+}
+
+@if $theme == 'dark' { ... }
+```
+
+非常适合**生成 utility 类**——8px 间距系统、12 阶颜色刻度等。
+
+### Sass 的取舍
+
+#### 仍推荐用 Sass 的场景
+
+- 需要复杂 mixin（如完整的卡片皮肤、表单 reset）
+- 需要自定义函数（`rem()` / `column()` 等）
+- 已有大量 Sass 资产
+- 团队熟悉、不打算迁移
+
+#### 不需要 Sass 的场景
+
+- 用 Tailwind / CSS Modules 为主
+- 仅需要变量与嵌套——CSS 变量与 Nesting 已足够
+- 颜色操作——`color-mix()` / 相对颜色已替代
+
+## PostCSS
+
+PostCSS 不是预处理器，而是 **CSS 后处理框架**——它解析 CSS 为 AST，让插件转换：
+
+```bash
+pnpm add -D postcss postcss-cli
+```
+
+```js filename="postcss.config.mjs"
+export default {
+  plugins: {
+    'postcss-import': {},
+    'postcss-nested': {},                       /* 嵌套语法 */
+    'autoprefixer': {},                         /* 自动加浏览器前缀 */
+    'postcss-preset-env': { stage: 2 },         /* 现代 CSS 转旧浏览器可读 */
+    'cssnano': process.env.NODE_ENV === 'production' ? {} : false
+  }
+}
+```
+
+#### 关键插件
+
+| 插件 | 作用 |
+| ---- | ---- |
+| `postcss-import` | 处理 `@import` |
+| `autoprefixer` | 自动加 `-webkit-` 等前缀 |
+| `postcss-nested` | 嵌套语法（在 CSS Nesting 普及前） |
+| `postcss-preset-env` | 转译未来 CSS 为当前可用语法 |
+| `tailwindcss` | Tailwind 是基于 PostCSS 的插件 |
+| `cssnano` | 压缩（去注释、合并、缩短） |
+| `stylelint` | linter |
+
+### Tailwind 4 与 PostCSS
+
+Tailwind 4 起，独立 Vite / Webpack 插件取代了 PostCSS 集成（性能大幅提升），但 PostCSS 集成仍可用：
+
+```js filename="postcss.config.mjs"
+export default {
+  plugins: {
+    '@tailwindcss/postcss': {}
+  }
+}
+```
+
+### Autoprefixer
+
+```css
+/* 你写： */
+.x { display: flex; user-select: none; }
+
+/* Autoprefixer 编译为： */
+.x {
+  display: -webkit-box;
+  display: -ms-flexbox;
+  display: flex;
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+```
+
+根据 `browserslist` 配置自动决定加哪些前缀：
+
+```json filename="package.json"
+{
+  "browserslist": [
+    "> 0.5%",
+    "last 2 versions",
+    "Firefox ESR",
+    "not dead"
+  ]
+}
+```
+
+### Sass vs PostCSS 选型
+
+| 维度 | Sass | PostCSS |
+| ---- | ---- | ------- |
+| 类型 | 编程式预处理器 | 插件化转换框架 |
+| 自定义语法 | 内置（变量、mixin、控制流） | 插件提供 |
+| 学习曲线 | 中（学一门小语言） | 低（按需引入插件） |
+| 兼容性补全 | ❌ | ✅ Autoprefixer |
+| 现代 CSS 转译 | ❌ | ✅ postcss-preset-env |
+| 生态 | 成熟稳定 | 极广（Tailwind、cssnext、Lightning CSS） |
+
+实战推荐：**用 PostCSS 做兼容性补全 + 现代 CSS 转译，用 Sass 做复杂 mixin / 函数**——二者并不互斥。
+
+## CSS Modules
+
+每个 `.module.css` 文件作用域隔离——类名在编译期被改写为唯一标识：
+
+```css filename="Button.module.css"
+.button {
+  padding: 8px 16px;
+  border-radius: 4px;
+}
+
+.primary {
+  background: blue;
+  color: white;
+}
+```
+
+```tsx filename="Button.tsx"
+import styles from './Button.module.css'
+
+export function Button({ variant }: { variant: 'primary' | 'secondary' }) {
+  return (
+    <button className={`${styles.button} ${styles[variant]}`}>
+      Click
+    </button>
+  )
+}
+```
+
+编译后：
+
+```html
+<button class="Button_button__a3xR2 Button_primary__9kLm4">Click</button>
+```
+
+#### 类名拼接
+
+```ts
+import clsx from 'clsx'
+
+<button className={clsx(styles.button, styles[variant], disabled && styles.disabled)} />
+```
+
+#### TypeScript 类型
+
+```bash
+pnpm add -D typescript-plugin-css-modules
+```
+
+`tsconfig.json`：
+
+```json
+{
+  "compilerOptions": {
+    "plugins": [{ "name": "typescript-plugin-css-modules" }]
+  }
+}
+```
+
+获得 IDE 类名补全 + 错字检测。
+
+#### `:global` 与 `composes`
+
+```css
+.button {
+  composes: base from './_base.module.css';   /* 组合多个类 */
+  background: blue;
+}
+
+:global(.dark) .button {                       /* 不被 hash 化 */
+  background: black;
+}
+```
+
+#### 适用场景
+
+- 中小型组件库
+- 喜欢"普通 CSS 写法 + 自动作用域"
+- 不想用 Tailwind 但担心类名冲突
+
+## CSS-in-JS
+
+```tsx
+import { styled } from '@emotion/styled'
+
+const Button = styled.button`
+  padding: 8px 16px;
+  background: ${props => props.variant === 'primary' ? 'blue' : 'gray'};
+`
+```
+
+| 库 | 风格 | 运行时 | RSC 友好 |
+| -- | ---- | ------ | -------- |
+| **Emotion** | 模板字符串 / 对象 | ✅ 有 | ❌ |
+| **styled-components** | 模板字符串 | ✅ 有 | ❌ |
+| **vanilla-extract** | TS + 编译期 | ❌ | ✅ |
+| **Linaria / Pigment CSS** | 模板字符串 + 编译期 | ❌ | ✅ |
+
+#### CSS-in-JS 的衰落
+
+React 19 / Server Components 时代，运行时 CSS-in-JS 的代价显著：
+
+- SSR 流式注入复杂
+- 与 RSC 不兼容
+- 运行时开销
+
+新项目几乎不再选 Emotion / styled-components。如果坚持 CSS-in-JS，选 **vanilla-extract** 或 **Pigment CSS**——编译期生成 CSS，无运行时。
+
+```tsx filename="Button.css.ts"
+import { style } from '@vanilla-extract/css'
+
+export const button = style({
+  padding: '8px 16px',
+  background: 'blue',
+  ':hover': { background: 'darkblue' }
+})
+```
+
+```tsx
+import { button } from './Button.css'
+<button className={button}>Click</button>
+```
+
+类型完整、零运行时、与 RSC 兼容。
+
+详见 [React 样式方案](/react/styling)。
+
+## @scope（CSS Scoping）
+
+CSS 原生作用域——介于全局 CSS 与 CSS Modules 之间：
+
+```css
+@scope (.card) {
+  h2 { color: blue; }                          /* 仅在 .card 内的 h2 */
+  p { font-size: 0.875rem; }
+}
+
+@scope (.card) to (.card-content) {
+  /* 仅在 .card 内、但 .card-content 之前 */
+  h2 { color: red; }
+}
+```
+
+```html
+<article class="card">
+  <h2>Affected</h2>                              <!-- color: blue -->
+  <div class="card-content">
+    <h2>Not affected</h2>                         <!-- 不在 scope 内 -->
+  </div>
+</article>
+```
+
+兼容性：Chrome 118+ / Safari 17.4+ / Firefox 待支持。生产使用前查 [caniuse](https://caniuse.com/css-cascade-scope)。
+
+## Design Tokens
+
+设计系统的"原子级单位"——颜色、间距、字号、阴影、圆角等设计常量。
+
+```css
+@theme {
+  /* 颜色 */
+  --color-blue-500: oklch(0.65 0.15 240);
+  --color-gray-100: oklch(0.97 0 0);
+
+  /* 字号 */
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+
+  /* 间距 */
+  --spacing: 0.25rem;
+
+  /* 圆角 */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 1rem;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+```
+
+#### 跨工具的 Token 标准：W3C Design Tokens Format
+
+```json
+{
+  "color": {
+    "blue": {
+      "500": { "$value": "oklch(0.65 0.15 240)", "$type": "color" }
+    }
+  },
+  "spacing": {
+    "base": { "$value": "0.25rem", "$type": "dimension" }
+  }
+}
+```
+
+工具：
+
+- **Style Dictionary**：把 JSON tokens 编译为 CSS / SCSS / Swift / Kotlin / iOS / Android
+- **Tokens Studio for Figma**：从 Figma 导出 tokens
+- **Tailwind 4 `@theme`**：直接消费 tokens
+
+让设计师与开发者**共享同一份 token 源**——色板调整在 Figma 完成，CLI 一行同步到代码。
+
+## 文件组织
+
+### Tailwind / 现代 React 项目
+
+```text
+src/
+├── app/
+├── components/
+│   └── Button/
+│       ├── Button.tsx
+│       └── Button.module.css      (可选)
+├── styles/
+│   ├── globals.css                /* @import 'tailwindcss' + @theme */
+│   ├── reset.css
+│   └── prose.css                  /* 长文章排版 */
+└── lib/
+```
+
+### Sass / vanilla CSS 项目
+
+```text
+styles/
+├── abstracts/                     /* 工具：变量 / mixin / 函数（不输出 CSS） */
+│   ├── _variables.scss
+│   ├── _mixins.scss
+│   └── _functions.scss
+├── base/                          /* reset / 类型 / 表单基础 */
+│   ├── _reset.scss
+│   └── _typography.scss
+├── components/                    /* 组件 */
+│   └── _button.scss
+├── layout/                        /* 页面布局 */
+│   ├── _header.scss
+│   └── _footer.scss
+├── pages/                         /* 页面特定 */
+└── main.scss                      /* 入口 @use 全部 */
+```
+
+### 命名一致
+
+无论选哪种结构，保持：
+
+- 文件夹名复数（`components/`）
+- 文件名 PascalCase（与组件对应）或 kebab-case（一致即可）
+- 工具 / 局部 / 引用文件用 `_` 前缀（Sass 约定）
+
+## CSS Linter
+
+```bash
+pnpm add -D stylelint stylelint-config-standard stylelint-config-tailwindcss
+```
+
+```json filename=".stylelintrc.json"
+{
+  "extends": [
+    "stylelint-config-standard",
+    "stylelint-config-tailwindcss"
+  ],
+  "rules": {
+    "selector-class-pattern": null,
+    "no-descending-specificity": null
+  }
+}
+```
+
+集成到 ESLint / Prettier 工作流——CI 阶段 lint，提交前自动修复。
+
+## 实战配方：现代 CSS 工程栈
+
+```text
+项目类型：中型 React + TypeScript SaaS
+
+样式：
+├── Tailwind 4         主要 utility（90% 样式）
+├── @theme             tokens（CSS 变量）
+├── @layer components  复杂组件（剩余 5-10%）
+└── CSS Modules        极少数需要严格作用域的组件
+
+构建：
+├── Vite + @tailwindcss/vite
+├── Lightning CSS（Vite 内置：autoprefixer + minify）
+└── stylelint + Prettier
+
+设计令牌：
+├── Figma + Tokens Studio
+└── Style Dictionary → @theme 输出
+```
+
+不再需要 Sass / PostCSS（Vite 内置 Lightning CSS 已涵盖兼容性）；CSS-in-JS 不必要。这是 2026 年中型项目的事实标准。
+
+#### 仍坚持 Sass 的栈
+
+```text
+项目类型：维护中的中型 vanilla 项目
+
+样式：
+├── Sass + BEM
+├── Sass mixin / 函数
+├── PostCSS + Autoprefixer
+└── 自定义 utility 类（@mixin generate-utilities）
+
+迁移路径：
+├── CSS 变量替换 Sass 变量（增量）
+├── CSS Nesting 替换 Sass 嵌套（构建工具支持后）
+└── color-mix() 替换 darken/lighten
+```
+
+## 小结
+
+- BEM 命名约定仍有效，但已不强求——现代项目偏向 CSS Modules + utility 混合；
+- Sass 在变量、嵌套、颜色操作上的功能已被原生 CSS 大量覆盖，仍领先在 mixin 与函数；
+- PostCSS 不是预处理器而是插件框架，最关键插件是 Autoprefixer 与 postcss-preset-env；
+- CSS Modules 是"普通 CSS + 作用域"的折中方案，简单可靠；
+- 运行时 CSS-in-JS 在 RSC 时代已退居二线；选 vanilla-extract 等编译期方案；
+- Design Tokens 是跨工具协作的关键——`@theme` 直接消费 W3C 标准格式 tokens；
+- 现代 React 项目栈：Tailwind + @theme + Vite + Lightning CSS，无需 Sass / PostCSS / CSS-in-JS。

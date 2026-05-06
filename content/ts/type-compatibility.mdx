@@ -1,0 +1,459 @@
+---
+title: 类型兼容性
+description: TypeScript 结构化类型系统、协变与逆变、函数兼容性、可选属性兼容规则
+---
+
+# 类型兼容性
+
+TypeScript 使用**结构化类型**（Structural Typing）系统，也称为"鸭子类型"。两个类型是否兼容取决于它们的内部结构，而非声明关系。
+
+## 结构化类型 vs 名义类型
+
+```ts
+// 两个独立定义的类型
+interface Point {
+  x: number
+  y: number
+}
+
+interface Vector {
+  x: number
+  y: number
+}
+
+let point: Point = { x: 10, y: 20 }
+let vector: Vector = { x: 5, y: 10 }
+
+// ✅ 两个类型结构相同，互相兼容
+point = vector
+vector = point
+```
+
+**对比名义类型**（如 Java/C#）——即使结构相同，不同名称的类型也不兼容。TypeScript 的灵活性正来自结构化类型。
+
+## 对象类型兼容性
+
+### 基本规则：目标类型的所有属性必须存在于源类型中
+
+```ts
+interface User {
+  name: string
+  age: number
+}
+
+interface Admin {
+  name: string
+  age: number
+  role: string
+}
+
+let user: User = { name: 'Alice', age: 25 }
+let admin: Admin = { name: 'Bob', age: 30, role: 'super' }
+
+// ✅ Admin 包含 User 的所有属性
+user = admin
+
+// ❌ 错误：User 缺少 role 属性
+admin = user
+```
+
+**React 示例**：
+
+```tsx
+interface BaseCardProps {
+  title: string
+  className?: string
+}
+
+interface ImageCardProps {
+  title: string
+  className?: string
+  imageUrl: string
+  altText: string
+}
+
+function BaseCard({ title, className }: BaseCardProps) {
+  return <div className={className}><h3>{title}</h3></div>
+}
+
+function ImageCard({ title, className, imageUrl, altText }: ImageCardProps) {
+  return (
+    <div className={className}>
+      <img src={imageUrl} alt={altText} />
+      <h3>{title}</h3>
+    </div>
+  )
+}
+
+// ✅ ImageCardProps 可以赋值给 BaseCardProps（多余属性会被忽略）
+const props: BaseCardProps = {
+  title: 'Hello',
+  className: 'card',
+  imageUrl: '/img.png',  // ❌ 直接赋值会触发多余属性检查
+  altText: 'Image'
+}
+```
+
+## 多余属性检查
+
+对象字面量**直接赋值**时，TypeScript 会触发多余属性检查：
+
+```ts
+interface User {
+  name: string
+  age: number
+}
+
+// ❌ 错误：对象字面量包含未声明的 role 属性
+const user: User = {
+  name: 'Alice',
+  age: 25,
+  role: 'admin'  // 多余属性检查失败
+}
+
+// ✅ 通过中间变量绕过多余属性检查
+const temp = {
+  name: 'Alice',
+  age: 25,
+  role: 'admin'
+}
+const user: User = temp  // 类型兼容性检查通过
+```
+
+### 绕过方式
+
+```ts
+// 方式 1：类型断言
+const user: User = {
+  name: 'Alice',
+  age: 25,
+  role: 'admin'
+} as User
+
+// 方式 2：索引签名
+interface User {
+  name: string
+  age: number
+  [key: string]: unknown  // 允许额外属性
+}
+
+// 方式 3：中间变量（赋值兼容性检查为宽松模式）
+const intermediate = { name: 'Alice', age: 25, role: 'admin' }
+const user: User = intermediate
+```
+
+**React 示例**：
+
+```tsx
+interface ButtonProps {
+  label: string
+  onClick: () => void
+}
+
+// ❌ 多余属性检查失败
+<button onClick={() => {}} label="Click" customProp="value" />
+
+// ✅ 方式 1：扩展 HTML 属性
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  label: string
+}
+
+// ✅ 方式 2：使用展开运算符
+function Button(props: ButtonProps) {
+  const { label, onClick, ...rest } = props
+  return <button onClick={onClick} {...rest}>{label}</button>
+}
+```
+
+## 函数类型兼容性
+
+### 参数兼容性（逆变）
+
+函数参数类型检查是**逆变**的——目标函数的参数类型必须兼容源函数的参数类型：
+
+```ts
+// 更宽泛的类型
+type Handler = (value: string | number) => void
+
+// 更具体的类型
+type StringHandler = (value: string) => void
+
+let h1: Handler = (value) => console.log(value)
+let h2: StringHandler = (value) => value.toUpperCase()
+
+// ✅ StringHandler 可以赋值给 Handler（参数类型更窄）
+h1 = h2
+
+// ❌ 错误：Handler 的参数更宽，不能赋值给 StringHandler
+h2 = h1
+```
+
+直观理解：回调函数接收的参数越多（类型越宽），能兼容的场景就越多。
+
+### 参数数量
+
+```ts
+// 参数少的函数可以赋值给参数多的函数
+type Handler = (a: number, b: string) => void
+
+// ✅ 参数更少，兼容
+const h: Handler = (a: number) => console.log(a)
+
+// ✅ 也兼容
+const h: Handler = () => console.log('no args')
+```
+
+**React 示例**：
+
+```tsx
+// onChange 期望 (event: ChangeEvent) => void
+// 但 (value: string) => void 也能赋值
+interface InputProps {
+  onChange: (event: React.ChangeEvent<HTMLInputElement>) => void
+}
+
+function Input({ onChange }: InputProps) {
+  // 我们在内部调用时传递完整 event
+  return <input onChange={onChange} />
+}
+
+// 使用：传入参数更少的函数是兼容的
+function Form() {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log(e.target.value)
+  }
+  // ✅ 兼容
+  return <Input onChange={handleChange} />
+}
+```
+
+### 返回值兼容性（协变）
+
+返回值类型检查是**协变**的——源函数的返回值必须兼容目标函数的返回值：
+
+```ts
+type Factory = () => { name: string }
+type AdminFactory = () => { name: string; role: string }
+
+let f1: Factory = () => ({ name: 'Alice' })
+let f2: AdminFactory = () => ({ name: 'Bob', role: 'admin' })
+
+// ❌ 错误：Factory 返回值缺少 role
+f2 = f1
+
+// ✅ AdminFactory 返回值包含 Factory 要求的全部属性
+f1 = f2
+```
+
+### 函数双向协变（TS 2.6 前默认行为）
+
+```ts
+// strictFunctionTypes: true（推荐）——参数严格逆变
+// strictFunctionTypes: false ——参数双向协变（旧行为）
+
+// 推荐启用严格函数类型检查
+```
+
+## 类兼容性
+
+类实例的兼容性只比较**实例成员**，不包含静态成员和构造函数：
+
+```ts
+class Point {
+  x: number
+  y: number
+  constructor(x: number, y: number) {
+    this.x = x
+    this.y = y
+  }
+}
+
+class Position {
+  x: number
+  y: number
+  static origin = { x: 0, y: 0 }
+  constructor(x: number, y: number) {
+    this.x = x
+    this.y = y
+  }
+}
+
+let point: Point
+let position: Position
+
+// ✅ 实例结构相同
+point = position
+position = point
+```
+
+**private/protected 成员**：如果源类型包含 private 或 protected 成员，目标类型必须来自同一类声明：
+
+```ts
+class Animal {
+  private name: string
+  constructor(name: string) {
+    this.name = name
+  }
+}
+
+class Dog {
+  private name: string
+  constructor(name: string) {
+    this.name = name
+  }
+}
+
+let animal: Animal
+let dog: Dog
+
+// ❌ 错误：虽然结构相同，但 private 成员来自不同声明
+animal = dog
+```
+
+## 泛型兼容性
+
+泛型的兼容性由使用方式决定：
+
+```ts
+// 空泛型接口——互相兼容
+interface Container<T> {}
+let c1: Container<number> = {}
+let c2: Container<string> = {}
+c1 = c2  // ✅ 都没有成员，兼容
+
+// 有成员的泛型——取决于类型参数
+interface Box<T> {
+  value: T
+}
+let b1: Box<number> = { value: 1 }
+let b2: Box<string> = { value: 'hello' }
+// ❌ 错误
+b1 = b2
+```
+
+## 枚举兼容性
+
+```ts
+// 数字枚举与 number 相互兼容
+enum Status {
+  Ready,
+  Waiting
+}
+let status: Status = Status.Ready
+let n: number = 0
+status = n       // ✅ number 可以赋值给枚举
+n = status       // ✅ 枚举可以赋值给 number
+
+// 字符串枚举只与自身兼容
+enum Color {
+  Red = 'RED',
+  Blue = 'BLUE'
+}
+let color: Color = Color.Red
+// ❌ 错误
+color = 'RED'
+```
+
+## 类型兼容性速查表
+
+| 方向 | 规则 | 示例 |
+|------|------|------|
+| 对象 A → B | A 至少有 B 的全部属性 | `objWithExtra = objBasic` ❌ |
+| 对象 B → A | B 多余属性被忽略 | `objBasic = objWithExtra` ✅ |
+| 函数参数 | 逆变（窄 → 宽） | `(s: string) => void` ← `(v: string\|number) => void` |
+| 函数返回值 | 协变（宽 → 窄） | `() => Admin` → `() => User` ✅ |
+| 枚举（数字） | 与 number 双向兼容 | `Status = 0` ✅ |
+| 枚举（字符串） | 仅自身兼容 | `Color = 'RED'` ❌ |
+
+## 陷阱
+
+### 1. 空数组类型推断
+
+```ts
+// 推断为 never[]，只能接受 never 类型的值
+const arr = []
+arr.push(1)      // ❌ 错误
+arr.push('str')  // ❌ 错误
+
+// ✅ 显式声明
+const arr: number[] = []
+```
+
+### 2. 函数参数少的兼容参数多的
+
+```ts
+const cb: (x: number, y: string) => void = (x: number) => {}
+// ✅ 这是合法的！但容易在回调中遗漏参数
+
+// Array.prototype.forEach 的回调有三个参数
+[1, 2, 3].forEach((value) => console.log(value))
+// ✅ 只使用一个参数完全没问题
+```
+
+### 3. any 类型短路
+
+```ts
+// any 与所有类型双向兼容（除 never）
+let x: any = 123
+let s: string = x       // ✅
+let n: number = x       // ✅
+let u: undefined = x    // ✅
+```
+
+## 最佳实践
+
+### ✅ 启用 strictFunctionTypes
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "strictFunctionTypes": true
+  }
+}
+```
+
+防止意外的函数参数协变导致的运行时错误。
+
+### ✅ 使用 Exact 类型（变通）
+
+TypeScript 没有原生 Exact 类型，但可以通过泛型实现：
+
+```ts
+// 确保对象只有声明的属性，无多余属性
+type Exact<T, U extends T> =
+  T & Record<Exclude<keyof U, keyof T>, never>
+
+interface User { name: string; age: number }
+
+function createUser<T extends User>(user: Exact<User, T>) {
+  return user
+}
+
+// ❌ 错误
+createUser({ name: 'Alice', age: 25, role: 'admin' })
+```
+
+### ✅ 理解而非绕过结构化类型
+
+```ts
+// ❌ 不要为了类型兼容添加无意义属性
+interface ApiUser {
+  name: string
+  age: number
+  _tag: 'ApiUser'  // 不优雅
+}
+
+// ✅ 使用品牌类型（Branded Types）
+type Brand<T, B> = T & { __brand: B }
+type ApiUser = Brand<{ name: string; age: number }, 'ApiUser'>
+type DbUser = Brand<{ name: string; age: number }, 'DbUser'>
+
+let apiUser: ApiUser = { name: 'Alice', age: 25 } as ApiUser
+let dbUser: DbUser = { name: 'Bob', age: 30 } as DbUser
+
+// ❌ 错误：品牌类型不兼容
+apiUser = dbUser
+dbUser = apiUser
+```
+
+下一章 [联合与交叉类型](/ts/union-intersection) 介绍类型的组合运算。

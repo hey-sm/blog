@@ -1,0 +1,641 @@
+---
+title: 字体优化
+description: WOFF2、font-display、字体子集、preconnect、可变字体与 CLS 防治
+---
+
+# 字体优化
+
+Web 字体让设计师的视觉规范在浏览器里得以呈现，但**默认引入方式**几乎都是性能杀手——一套中文字体可能 5-10 MB，加载期间还会让文字"闪一下"或"看不见"。本章覆盖字体格式、`font-display` 策略、子集化、preconnect、可变字体、CLS 防治与本地 fallback 匹配。
+
+## 字体的四大成本
+
+```text
+1. 网络成本：传输字节
+   - 1 个 woff2 英文字体：~ 30-50 KB
+   - 1 个 woff2 中文字体（无子集）：~ 5-10 MB
+
+2. 渲染成本：FOIT / FOUT
+   - 默认行为：浏览器最多等 3 s，看不到文字
+   - 加载完后切换字体：可能引起 CLS
+
+3. 解析成本：字体引擎初始化 ~ 10-30 ms
+
+4. 关键路径成本：字体阻塞 LCP
+   - LCP 可能是带文字的元素
+   - 字体没就绪时浏览器选择"延迟显示"
+```
+
+字体优化的目标：**让用户最快看到文字（用什么字体不重要），同时减少传输量**。
+
+## 字体格式
+
+### 现代格式对比
+
+| 格式 | 压缩率 | 浏览器支持 | 备注 |
+| ---- | ------ | ---------- | ---- |
+| TTF / OTF | 无压缩 | 100% | 桌面字体源格式 |
+| EOT | 无压缩 | 仅 IE | 已淘汰 |
+| WOFF | zlib 压缩 | ~ 100% | WOFF2 之前的标准 |
+| **WOFF2** | Brotli 压缩 | 96%+ | **现代默认** |
+
+WOFF2 比 WOFF 小约 30%，比 TTF 小约 50%。**2024 年只用 WOFF2 即可**。
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+}
+```
+
+### 多 src fallback（已不需要）
+
+```css
+/* 旧写法：兼容 IE */
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter.eot');
+  src: url('/inter.eot?#iefix') format('embedded-opentype'),
+       url('/inter.woff2') format('woff2'),
+       url('/inter.woff')  format('woff'),
+       url('/inter.ttf')   format('truetype');
+}
+```
+
+2024 年只需：
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter.woff2') format('woff2');
+}
+```
+
+## font-display：控制加载行为
+
+`font-display` 决定浏览器在字体未就绪时的行为：
+
+| 值 | block 期 | swap 期 | 失败期 |
+| -- | -------- | ------- | ------ |
+| `auto` | 短（~3s） | 短 | 永久 fallback |
+| `block` | 短（~3s） | 永久 | 永久 |
+| `swap` | 0 | 永久 | 永久 |
+| `fallback` | 100 ms | 短（~3s） | 永久 |
+| `optional` | 100 ms | 0 | 永久 |
+
+```text
+block 期：文字不显示（FOIT）
+swap 期：用 fallback 字体显示，加载完替换（FOUT）
+失败期：超过期限永久使用 fallback
+```
+
+### swap：最常用
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter.woff2') format('woff2');
+  font-display: swap;
+}
+```
+
+**立即用 fallback 显示**，字体加载完后无缝替换。
+
+收益：
+
+- 用户立即能看到文字（FCP 不被字体阻塞）
+- 字体加载完平滑过渡
+
+代价：
+
+- 字体替换时可能"闪一下"（FOUT）
+- 不同字体宽度不同会引起 CLS
+
+### optional：性能优先
+
+```css
+@font-face {
+  font-display: optional;
+}
+```
+
+策略：
+
+- 100 ms 内加载完 → 用自定义字体
+- 否则 → **永久** fallback，本次访问不再尝试加载
+
+收益：完全消除 FOUT 与 CLS——要么早就绪要么永远不上场。
+
+代价：弱网用户首次访问可能看不到自定义字体。
+
+适合：字体只是"锦上添花"的场景（产品文档、博客）。
+
+### block：避免 FOUT，但有 FOIT
+
+```css
+@font-face {
+  font-display: block;
+}
+```
+
+文字暂不显示直到字体就绪——视觉一致性优先，但 LCP / FCP 会被推迟。慎用。
+
+### fallback：折中
+
+短 block + 短 swap，超时锁定。适合"如果字体快就用，慢就放弃"的策略。
+
+### 实践决策
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 普通业务网站 | `swap` |
+| 设计敏感的官网（Apple / Stripe） | `block` 或 `optional` |
+| 性能敏感的工具站 | `optional` |
+| 图标字体 | `block`（避免显示原始字符） |
+
+## 字体子集化（Subsetting）
+
+> 一套中文字体含几万个字符，但你的页面可能只用到几百个。
+
+### 子集策略
+
+| 策略 | 适用 | 复杂度 |
+| ---- | ---- | ------ |
+| 静态全集 | 简单，但 5 MB+ 体积 | 极低 |
+| 静态子集（按字符范围） | 中文字体常用 | 低 |
+| 静态子集（按页面字符） | 极致优化 | 中 |
+| Unicode-range 分包 | 自动按需加载 | 中 |
+| 动态子集（CDN） | 完全按需 | 低（依赖第三方） |
+
+### 子集工具
+
+#### `fonttools` (Python)
+
+```bash
+pip install fonttools brotli
+
+# 提取常用字符
+pyftsubset NotoSansSC.ttf \
+  --output-file=NotoSansSC-subset.woff2 \
+  --flavor=woff2 \
+  --unicodes="U+0020-007E,U+4E00-9FFF" \
+  --layout-features=*
+```
+
+#### `subset-font` / `glyphhanger`（Node.js）
+
+```bash
+npx glyphhanger --subset=*.html --formats=woff2 --output=fonts/
+```
+
+`glyphhanger` 会扫描 HTML 提取所有用到的字符，生成最小子集。
+
+### Unicode-range 分包
+
+CSS 让浏览器**只下载页面实际用到的字符范围**：
+
+```css
+/* 拉丁基础 */
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153;
+  font-display: swap;
+}
+
+/* 拉丁扩展 */
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-024F, U+0259, U+1E00-1EFF;
+  font-display: swap;
+}
+
+/* 中文常用 */
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter-zh-cjk.woff2') format('woff2');
+  unicode-range: U+4E00-9FFF;
+  font-display: swap;
+}
+```
+
+浏览器仅在页面**包含对应范围字符时**才下载该 woff2。Google Fonts 默认采用此策略——一个 NotoSansSC 被拆成 100+ 个小包，每包仅几十 KB。
+
+### 中文字体的特殊处理
+
+中文字体即使全子集也通常 1-3 MB。常用方案：
+
+#### 1. CDN 动态子集
+
+```html
+<link rel="stylesheet"
+      href="https://cn.cdn.example.com/css?family=NotoSansSC&text=你好世界">
+```
+
+CDN 根据 `text` 参数动态生成最小字体（仅含给定字符）。CDN 提供商：FontShare、字蛛（中文专用）。
+
+#### 2. 客户端切片
+
+[chinese-webfont](https://github.com/qiqiboy/chinese-webfont) 等工具把中文字体按使用频率切成 100+ 个 WOFF2 + Unicode-range CSS，浏览器按需加载。
+
+#### 3. 系统字体回退
+
+```css
+body {
+  font-family: 'Inter', -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+```
+
+**英文用自定义字体，中文用系统字体**——很多产品的实用妥协。系统字体速度极快（已在用户设备）。
+
+### 系统字体堆栈
+
+```css
+font-family:
+  -apple-system,           /* iOS / macOS */
+  BlinkMacSystemFont,      /* macOS Chrome */
+  'Segoe UI',              /* Windows */
+  Roboto,                  /* Android */
+  'Helvetica Neue',        /* 老 macOS */
+  Arial, sans-serif;       /* 兜底 */
+```
+
+零下载、跨平台风格统一、加载即用。是博客 / 文档站的最优选择。
+
+## 加载顺序优化
+
+### preconnect 第三方字体
+
+```html
+<!-- Google Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap">
+```
+
+⚠️ 字体的 `preconnect` 必须加 `crossorigin`，否则连接池不命中，等于白加。详见 [资源预加载 § preconnect](/performance/preload#preconnect)。
+
+### preload 关键字体
+
+```html
+<link rel="preload"
+      href="/inter-400.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin>
+```
+
+⚠️ 字体 `preload` 必须加 `crossorigin`，否则会下载两次。
+
+### 自托管 vs Google Fonts
+
+**Google Fonts 的优势**：
+
+- 自动子集（Unicode-range）
+- CDN 加速
+- 零运维
+
+**自托管的优势**：
+
+- 不依赖第三方（Google Fonts 在某些地区慢或被屏蔽）
+- 更早建立 preconnect（同源域已在 HTML 之前连接）
+- 可与 hash 化资源一起长缓存
+
+**实测**：自托管 + preload + WOFF2 通常比 Google Fonts 快 100-300 ms（同主域优势）。
+
+### 工具：自动下载 Google Fonts 到本地
+
+```bash
+# Fontsource：每个字体作为 npm 包
+npm install @fontsource/inter
+```
+
+```js
+import '@fontsource/inter/400.css'
+import '@fontsource/inter/700.css'
+```
+
+Next.js 内置：
+
+```jsx
+import { Inter } from 'next/font/google'
+
+const inter = Inter({
+  subsets: ['latin'],
+  display: 'swap',
+  preload: true
+})
+
+export default function Layout({ children }) {
+  return <html className={inter.className}>{children}</html>
+}
+```
+
+`next/font` 自动：下载字体、生成 self-host woff2、注入 preload、配 `font-display: swap`、防 CLS（详下）。
+
+## CLS 防治
+
+字体替换时尺寸变化是 CLS 的主要来源之一。
+
+### 问题示例
+
+```text
+fallback (Arial) 显示 ──► [Hello World]   ← 占 100 px
+                                            ↓
+                              字体加载完
+                                            ↓
+custom (Inter) 显示   ──► [Hello World]   ← 占 110 px
+                                            ↓
+                              下方内容跳了 10 px
+```
+
+### 解法：fallback 字体匹配
+
+通过 `size-adjust` / `ascent-override` / `descent-override` 让 fallback 字体在尺寸上**逼近**自定义字体：
+
+```css
+@font-face {
+  font-family: 'Inter Fallback';     /* 自定义 fallback */
+  src: local('Arial');                /* 用本地 Arial */
+  size-adjust: 107.0%;                /* 整体放大 7% */
+  ascent-override: 90%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
+body {
+  font-family: 'Inter', 'Inter Fallback', sans-serif;
+}
+```
+
+加载完后 Inter 替换 'Inter Fallback'，**几何尺寸几乎一致**——CLS 接近 0。
+
+### 自动生成 fallback
+
+[fontaine](https://github.com/unjs/fontaine) 自动生成匹配的 fallback：
+
+```js
+// vite.config.js
+import { FontaineTransform } from 'fontaine'
+
+export default {
+  plugins: [
+    FontaineTransform.vite({
+      fallbacks: ['Arial', 'Helvetica'],
+      resolvePath: (id) => new URL(`./public${id}`, import.meta.url)
+    })
+  ]
+}
+```
+
+Next.js / Nuxt 都内置类似机制。
+
+### 测量字体替换的影响
+
+```js
+document.fonts.ready.then(() => {
+  performance.mark('fonts-loaded')
+  console.log('Fonts loaded at:', performance.now(), 'ms')
+})
+
+// 监听 LCP，判断是否在字体加载前后变化
+new PerformanceObserver(list => {
+  for (const entry of list.getEntries()) {
+    console.log('LCP:', entry.startTime, entry.element)
+  }
+}).observe({ type: 'largest-contentful-paint', buffered: true })
+```
+
+## 可变字体（Variable Fonts）
+
+传统：每个字重 + 字宽 = 一个 woff2 文件。一个产品可能 10+ 个文件 × 80 KB = 800 KB。
+
+可变字体：**一个文件包含整个字体的所有字重 / 字宽 / 倾斜度**。
+
+```css
+@font-face {
+  font-family: 'Inter Variable';
+  src: url('/inter-variable.woff2') format('woff2-variations');
+  font-weight: 100 900;          /* 整个范围 */
+  font-style: normal;
+  font-display: swap;
+}
+
+/* CSS 中可以用任意字重 */
+.thin   { font-weight: 200 }
+.normal { font-weight: 400 }
+.bold   { font-weight: 700 }
+.heavy  { font-weight: 850 }      /* 非整百也行 */
+```
+
+### 体积对比（Inter）
+
+| 方式 | 体积 |
+| ---- | ---- |
+| 8 个静态字重 | 8 × 80 KB = 640 KB |
+| 可变字体 | 280 KB |
+
+只用 2-3 个字重时，静态字体可能更小。**一旦用 4+ 个字重，可变字体一定更优**。
+
+### 可变字体的"字重"维度
+
+```css
+/* font-variation-settings 控制更多维度 */
+.title {
+  font-variation-settings:
+    'wght' 700,    /* 字重 */
+    'slnt' -10,    /* 倾斜 */
+    'opsz' 24;     /* 光学尺寸 */
+}
+```
+
+### 浏览器支持
+
+WOFF2 可变字体在 Chrome 66+、Firefox 62+、Safari 11+ 支持。2024 年完全可放心使用。
+
+## 图标字体 vs SVG
+
+### 图标字体（Font Awesome 等）的问题
+
+- 字体加载阻塞图标显示
+- 单色（不能多色）
+- 可访问性差（屏幕阅读器读出乱码）
+- 整包加载（即使只用几个图标）
+
+### SVG 图标的优势
+
+- 即时显示（HTML 内联 / 单独请求）
+- 多色 / 渐变 / 动画
+- 可访问性更好
+- 真正的按需加载
+
+```jsx
+// React + lucide-react
+import { Home, Settings } from 'lucide-react'
+<Home size={24} />
+```
+
+详见 [图片格式选择 § 矢量 vs 位图](/performance/image-format#矢量-vs-位图)。
+
+> 2024 年新项目几乎不应使用图标字体。
+
+## 字体的 CSP 与跨域
+
+```http
+# 允许字体的 CSP 配置
+Content-Security-Policy:
+  font-src 'self' fonts.gstatic.com data:;
+```
+
+跨域字体需要 `Access-Control-Allow-Origin`：
+
+```http
+# CDN 上的字体响应头
+Access-Control-Allow-Origin: *
+```
+
+否则：
+
+```text
+Console: Access to font at '...' from origin '...' has been blocked by CORS policy
+```
+
+`crossorigin` 属性 + 服务端 CORS 头双管齐下。
+
+## 监控
+
+### Lighthouse
+
+| 项 | 含义 |
+| -- | ---- |
+| Avoid invisible text during webfont load | 是否使用 `font-display` |
+| Preload key requests | 关键字体是否 preload |
+| Avoid large layout shifts | 字体替换引起的 CLS |
+| Reduce unused CSS | 字体的 `@font-face` 是否被用到 |
+
+### `document.fonts` API
+
+```js
+// 检测字体加载状态
+document.fonts.ready.then(() => {
+  console.log('All fonts loaded')
+})
+
+// 单个字体
+document.fonts.load('700 16px Inter').then(() => {
+  console.log('Inter 700 loaded')
+})
+
+// 监听
+document.fonts.addEventListener('loadingdone', (e) => {
+  console.log('Loaded:', e.fontfaces.map(f => f.family))
+})
+```
+
+### 实测字体使用率
+
+```js
+// 收集页面实际用到的字符
+const allText = document.body.innerText
+const uniqueChars = new Set(allText)
+console.log('Used chars:', uniqueChars.size)
+console.log('Sample:', [...uniqueChars].slice(0, 50).join(''))
+```
+
+跑一遍主要页面 → 把字符集合并 → 用 `glyphhanger` 生成最小子集。
+
+## 字体大小预算
+
+> "Keep the web font size under 300kb"（roadmap 条目）
+
+| 站点类型 | 推荐字体总预算 |
+| -------- | -------------- |
+| 工具 / 文档 | 0（系统字体） |
+| 博客 / 媒体 | 50-100 KB |
+| 产品官网 | 100-200 KB |
+| 设计敏感的 SaaS | < 300 KB |
+| 中文产品（含中文字体） | 自托管必须子集，否则 1 MB+ |
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 加载完整中文字体 | 5 MB+ 流量 | 子集化或 CDN 动态子集 |
+| 不指定 `font-display` | 默认 `auto` 引起 FOIT | 加 `swap` |
+| `preload` 字体不加 `crossorigin` | 下载两次 | 加 `crossorigin` |
+| 8 个字重各自单独 woff2 | 600 KB+ | 用可变字体 |
+| 图标字体（Font Awesome 整包） | 200 KB+ | 改用 SVG 图标 |
+| Google Fonts 直连（无 preconnect） | 多 1-2 RTT | preconnect 或自托管 |
+| 没 fallback 匹配 | 字体替换 CLS | size-adjust / fontaine |
+| 加载用不到的字重 | 字体浪费 | 仅加载实际使用的 |
+
+## 框架集成
+
+### Next.js
+
+```jsx
+// 内置 next/font
+import { Inter, Noto_Sans_SC } from 'next/font/google'
+
+const inter = Inter({ subsets: ['latin'], display: 'swap' })
+const noto = Noto_Sans_SC({ subsets: ['latin'], display: 'swap' })
+
+export default function Layout({ children }) {
+  return (
+    <html className={`${inter.variable} ${noto.variable}`}>
+      <body>{children}</body>
+    </html>
+  )
+}
+```
+
+next/font 自动：
+
+- 下载字体到本地
+- 子集化
+- 注入 preload
+- 生成 fallback 匹配防 CLS
+
+### Nuxt 3
+
+```ts
+// nuxt.config.ts
+export default {
+  modules: ['@nuxtjs/google-fonts'],
+  googleFonts: {
+    families: { Inter: [400, 700] },
+    display: 'swap',
+    preload: true,
+    download: true               // 下载到本地
+  }
+}
+```
+
+或用 [`@nuxtjs/fontaine`](https://github.com/nuxt-modules/fontaine) 自动 fallback 匹配。
+
+### Astro
+
+```astro
+---
+import '@fontsource-variable/inter'
+---
+<html>
+  <head>
+    <link rel="preload" href="/_astro/inter-variable.woff2"
+          as="font" type="font/woff2" crossorigin>
+  </head>
+</html>
+```
+
+## 小结
+
+- WOFF2 是 2024 年的唯一选择，比 WOFF / TTF 小 30-50%；
+- `font-display: swap` 是大多数项目的最佳实践，`optional` 适合性能至上的场景；
+- 子集化是中文字体的必修课，Unicode-range 让浏览器按需加载；
+- 自托管 + preload + preconnect 通常比 Google Fonts CDN 快 100-300 ms；
+- 可变字体在 4+ 个字重时一定优于多个静态字体；
+- fallback 字体匹配（size-adjust）能消除字体替换引起的 CLS；
+- 系统字体堆栈是博客 / 文档类产品的最优选择，零成本最稳定；
+- Next.js / Nuxt 内置的字体方案已经做完所有最佳实践，新项目直接用即可。

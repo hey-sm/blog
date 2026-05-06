@@ -1,0 +1,634 @@
+---
+title: 浅层与只读优化
+description: shallowRef、shallowReactive、readonly、markRaw 与大数据集的响应式追踪控制
+---
+
+# 浅层与只读优化
+
+> 这是 Vue 3 最实用的性能优化主题——大多数 Vue 应用的"莫名其妙慢"都能通过本章的几个 API 解决。
+
+`reactive` 默认对对象做**深度代理**——每一层属性都被 Proxy 拦截。对于小型表单这是合理的；但对于大数据集、第三方对象、不变的引用，深度代理是巨大浪费。Vue 提供了 `shallowRef` / `shallowReactive` / `readonly` / `markRaw` 让你按需关闭追踪。本章详尽这四个 API。
+
+## 深度代理的代价
+
+```ts
+const data = await fetch('/api/users').then(r => r.json())  // 10000 个用户对象
+const users = reactive(data)
+```
+
+发生了什么：
+
+```text
+1. 创建顶层 Proxy 包装 data
+2. 用户访问 users[0]：
+   ├─ get 触发 → 内部检查 data[0] 是否对象
+   └─ 是 → 创建新 Proxy 包装 data[0] → 返回
+3. 访问 users[0].profile：
+   ├─ get 触发 → 检查 data[0].profile 是否对象
+   └─ 是 → 创建新 Proxy 包装 → 返回
+4. ... 任何深嵌套都按需建立 Proxy
+```
+
+按需建立看似聪明——但在**列表渲染场景**：
+
+```vue
+<div v-for="user in users" :key="user.id">
+  {{ user.name }} - {{ user.email }}
+</div>
+```
+
+每个用户的 `name` 和 `email` 访问都触发 Proxy trap → 10000 个用户 × 2 字段 = 20000 次 trap。
+
+而且**模板会自动追踪**：每次访问都把渲染 effect 注册到该字段的依赖列表——这意味着**任何一个字段变化都会触发整个组件重渲染**。
+
+## shallowRef
+
+`shallowRef` 创建一个 ref，但**只有 .value 自身的替换**会触发响应——内部修改不响应：
+
+```ts
+import { shallowRef } from 'vue'
+
+const list = shallowRef([1, 2, 3])
+
+list.value = [4, 5, 6]                    // ✅ 触发响应
+list.value[0] = 99                        // ❌ 不触发响应（内部不追踪）
+list.value.push(4)                        // ❌ 不触发响应
+```
+
+### 适用场景
+
+#### 1. 大数据列表（最常见）
+
+```ts
+const tableData = shallowRef([])
+
+// 加载数据时整体替换
+async function load() {
+  tableData.value = await fetch('/api/data').then(r => r.json())
+}
+
+// 不要试图原地修改某项
+// tableData.value[0].name = 'X'   ← 不会触发响应
+
+// 修改某项的正确做法：替换整体
+function update(index, newRow) {
+  tableData.value = [
+    ...tableData.value.slice(0, index),
+    newRow,
+    ...tableData.value.slice(index + 1)
+  ]
+}
+```
+
+或用不可变更新工具：
+
+```ts
+import { produce } from 'immer'
+
+tableData.value = produce(tableData.value, draft => {
+  draft[0].name = 'X'
+})
+```
+
+#### 2. 第三方实例（Map、Set、复杂对象）
+
+```ts
+import { shallowRef } from 'vue'
+
+// 第三方编辑器实例
+const editor = shallowRef(null)
+
+onMounted(() => {
+  editor.value = new SomeEditor(el)        // 整体替换
+})
+
+// 调用方法：不需响应
+editor.value.format()
+```
+
+如果用 `ref(new SomeEditor())` —— 整个编辑器内部状态都被代理 → 每个字段都成了响应式 → 编辑器内部读写性能崩溃。
+
+#### 3. 大对象配置
+
+```ts
+const config = shallowRef({
+  api: { /* ... */ },
+  ui: { /* ... */ },
+  i18n: { /* ... */ }
+})
+
+// 整体替换才响应
+config.value = { ...config.value, ui: newUi }
+```
+
+### 性能差异（实测）
+
+10000 项数组的列表渲染：
+
+| 方案 | 初始化 | 首屏渲染 | 内存 |
+| ---- | ------ | -------- | ---- |
+| `ref(array)` 或 `reactive(array)` | ~ 50 ms | ~ 1500 ms | 高 |
+| `shallowRef(array)` | < 1 ms | ~ 800 ms | 低 |
+
+差距来自两点：
+
+- 没有递归创建 Proxy
+- 模板渲染时不再每个字段都追踪
+
+## shallowReactive
+
+`shallowReactive` 是对象版的 shallow——**只有顶层属性响应**：
+
+```ts
+import { shallowReactive } from 'vue'
+
+const state = shallowReactive({
+  count: 0,
+  user: { name: 'A' }
+})
+
+state.count++                              // ✅ 响应
+state.user = { name: 'B' }                 // ✅ 响应（替换顶层属性）
+state.user.name = 'C'                      // ❌ 不响应（user 内部不被代理）
+```
+
+### vs shallowRef
+
+| 维度 | shallowRef | shallowReactive |
+| ---- | ---------- | --------------- |
+| API | `obj.value = newObj` | `obj.field = newValue` |
+| 解构 | 不会丢响应（仍是 ref） | 解构后丢响应 |
+| 推荐 | 大数组 / 整体替换 | 顶层多字段对象 |
+
+```ts
+// shallowRef：整体替换
+const data = shallowRef({ a: 1, b: 2 })
+data.value = { ...data.value, b: 3 }
+
+// shallowReactive：直接修改顶层
+const state = shallowReactive({ a: 1, b: 2 })
+state.b = 3
+```
+
+### 适用场景
+
+#### 1. 顶层字段足够的状态
+
+```ts
+const filters = shallowReactive({
+  category: 'all',
+  sortBy: 'date',
+  searchQuery: '',
+  pagination: { page: 1, size: 20 }    // 嵌套对象内部不响应
+})
+
+// 修改顶层 ✅
+filters.searchQuery = 'foo'
+filters.pagination = { page: 2, size: 20 }   // 替换整个 pagination
+
+// ❌ 修改嵌套不响应
+filters.pagination.page = 2
+```
+
+如果你确认嵌套对象不会被原地修改——shallowReactive 就够。
+
+#### 2. 包含大子对象的状态
+
+```ts
+const editorState = shallowReactive({
+  isOpen: false,
+  doc: largeDocumentObject,                // 大对象，不响应
+  cursor: { line: 0, col: 0 }
+})
+```
+
+`isOpen` 与 `cursor` 响应——`doc` 内部修改不响应（也不需要）。
+
+## readonly
+
+`readonly` 创建只读响应式——任何修改都被忽略并报警告：
+
+```ts
+import { reactive, readonly } from 'vue'
+
+const original = reactive({ count: 0 })
+const ro = readonly(original)
+
+ro.count++                                // ⚠️ 警告：Set operation on key "count" failed: target is readonly.
+console.log(ro.count)                     // 0（仍是响应式读）
+
+original.count++                          // ✅ 通过原对象修改
+console.log(ro.count)                     // 1
+```
+
+### 性能上的"价值"
+
+`readonly` 本身不是性能优化——但它在以下场景间接帮助：
+
+#### 1. 防止意外修改导致的过多触发
+
+```ts
+const config = readonly(reactive(loadConfig()))
+
+// 任何"想改 config"的代码都被拒绝
+// → 减少 bug 与不必要的重新渲染
+```
+
+#### 2. 清晰的数据流
+
+```ts
+// composable
+function useUser() {
+  const user = ref(null)
+  return {
+    user: readonly(user),                  // 暴露只读
+    setUser: (u) => { user.value = u }     // 只允许通过函数修改
+  }
+}
+```
+
+类似 React 的 useState 模式——避免外部直接 mutate。
+
+### `shallowReadonly`
+
+只读 + 浅层：
+
+```ts
+const ro = shallowReadonly({ a: 1, nested: { b: 2 } })
+ro.a = 10                                 // ⚠️ 警告
+ro.nested.b = 20                          // ✅ 允许（嵌套不被代理）
+```
+
+适合"顶层只读，子对象可改"。
+
+## markRaw
+
+`markRaw` 标记一个对象**永远不被响应化**：
+
+```ts
+import { markRaw, reactive } from 'vue'
+
+const heavy = markRaw(new HeavyClass())
+const state = reactive({
+  light: { a: 1 },                        // 会被代理
+  heavy                                    // 不会被代理（已标记 raw）
+})
+
+state.heavy === heavy                     // true（同一引用）
+```
+
+### 适用场景
+
+#### 1. 类实例 / 第三方对象
+
+```ts
+import { markRaw } from 'vue'
+
+// Three.js Scene
+const scene = markRaw(new THREE.Scene())
+
+// Chart.js instance
+const chart = markRaw(new Chart(canvas, config))
+
+// Map / Set
+const cache = markRaw(new Map())
+```
+
+代理这些对象会破坏其内部状态——必须 markRaw。
+
+#### 2. 大数据但**不需要响应**
+
+```ts
+const allCountries = markRaw(loadCountries())   // 1MB 静态数据，绝不变
+
+const state = reactive({
+  selectedCountry: null,
+  countries: allCountries                       // 引用 raw 对象
+})
+```
+
+`countries` 不会被代理——零追踪开销。
+
+#### 3. 路由 / Vue Router 实例
+
+```ts
+const router = markRaw(useRouter())             // 不需要响应化路由实例
+```
+
+### markRaw 的"传染性"
+
+```ts
+const raw = markRaw({ inner: { value: 1 } })
+const state = reactive({ raw })
+
+state.raw                                  // raw 自身（未代理）
+state.raw.inner                            // 也未代理（深层都不代理）
+```
+
+`markRaw` 标记的对象**整棵子树**都不会被代理——这正是性能优化所需。
+
+### 与 toRaw 的区别
+
+```ts
+import { toRaw, markRaw } from 'vue'
+
+// toRaw：从 reactive 取出原始对象（一次性）
+const original = toRaw(reactiveProxy)
+
+// markRaw：标记对象，未来 reactive 调用对它无效（持久）
+const obj = markRaw({ value: 1 })
+```
+
+## 选择策略
+
+```text
+我有什么数据？
+│
+├─ 小型表单（< 10 字段，多字段都需响应）
+│   └─ ref / reactive
+│
+├─ 大列表（100+ 项）
+│   ├─ 整体替换为主 ──► shallowRef
+│   └─ 频繁原地修改 ──► 重新设计（不该原地改大列表）
+│
+├─ 顶层多字段，嵌套不变
+│   └─ shallowReactive
+│
+├─ 类实例 / 库对象 / 巨大不变数据
+│   └─ markRaw
+│
+├─ 暴露给外部的状态（防止误改）
+│   └─ readonly / shallowReadonly
+│
+└─ 不知道？
+    └─ 先用 ref，性能问题时再优化
+```
+
+## 实战：大表格
+
+假设你正在做一个 10000 行 × 20 列的表格：
+
+### 反模式
+
+```vue
+<script setup>
+import { ref, reactive } from 'vue'
+
+const tableData = reactive(largeArray)        // ❌ 全代理
+const columns = reactive(columnDefs)          // ❌ 列定义不需响应
+</script>
+
+<template>
+  <table>
+    <tr v-for="row in tableData" :key="row.id">
+      <td v-for="col in columns" :key="col.key">
+        {{ row[col.key] }}
+      </td>
+    </tr>
+  </table>
+</template>
+```
+
+性能：每个单元格读取都触发 Proxy trap → 200000 次 trap → 卡几秒。
+
+### 优化版
+
+```vue
+<script setup>
+import { shallowRef, markRaw } from 'vue'
+
+const tableData = shallowRef(largeArray)      // ✅ 整体响应
+const columns = markRaw(columnDefs)            // ✅ 列定义不响应
+</script>
+
+<template>
+  <table>
+    <tr v-for="row in tableData" :key="row.id">
+      <td v-for="col in columns" :key="col.key">
+        {{ row[col.key] }}
+      </td>
+    </tr>
+  </table>
+</template>
+```
+
+性能：单元格直接读普通对象 → 几乎零 trap → 流畅。
+
+修改某行？换整个数组：
+
+```ts
+function updateRow(id, changes) {
+  tableData.value = tableData.value.map(r =>
+    r.id === id ? { ...r, ...changes } : r
+  )
+}
+```
+
+或配合虚拟化（详见 [列表虚拟化](/performance/vue/virtualization)）——绝大多数大表格场景的最优方案。
+
+## 实战：图表组件
+
+```vue
+<script setup>
+import { shallowRef, markRaw, onMounted } from 'vue'
+import { Chart } from 'chart.js/auto'
+
+const props = defineProps({ data: Array })
+
+const canvas = ref(null)
+const chartInstance = shallowRef(null)         // 仅 .value 替换响应
+
+onMounted(() => {
+  chartInstance.value = markRaw(                // 实例本身不响应
+    new Chart(canvas.value, {
+      type: 'line',
+      data: { datasets: [{ data: props.data }] }
+    })
+  )
+})
+
+watch(() => props.data, (newData) => {
+  if (chartInstance.value) {
+    chartInstance.value.data.datasets[0].data = newData
+    chartInstance.value.update()
+  }
+})
+
+onUnmounted(() => {
+  chartInstance.value?.destroy()
+})
+</script>
+
+<template>
+  <canvas ref="canvas"></canvas>
+</template>
+```
+
+要点：
+
+- `chartInstance` 用 `shallowRef`：仅在挂载/卸载时整体替换
+- 实例本身用 `markRaw`：避免 chart.js 内部数百对象都被代理
+
+## 实战：编辑器
+
+```vue
+<script setup>
+import { shallowRef, markRaw, onMounted, onUnmounted } from 'vue'
+import { Editor } from '@tiptap/core'
+import StarterKit from '@tiptap/starter-kit'
+
+const editor = shallowRef(null)
+const el = ref(null)
+
+onMounted(() => {
+  editor.value = markRaw(
+    new Editor({
+      element: el.value,
+      extensions: [StarterKit],
+      content: '<p>Hello</p>'
+    })
+  )
+})
+
+onUnmounted(() => editor.value?.destroy())
+</script>
+
+<template>
+  <div ref="el"></div>
+  <button @click="editor.chain().focus().toggleBold().run()">B</button>
+</template>
+```
+
+不 markRaw 的话，编辑器内部状态全被代理——输入卡顿肉眼可见。
+
+## toRefs：解构友好的 reactive
+
+```ts
+import { reactive, toRefs } from 'vue'
+
+const state = reactive({ a: 1, b: 2 })
+
+// ❌ 解构丢失响应
+const { a, b } = state
+
+// ✅ toRefs：每个字段转成 ref
+const { a, b } = toRefs(state)
+console.log(a.value, b.value)
+```
+
+适用：
+
+```ts
+// composable 返回多个状态
+function useFeature() {
+  const state = reactive({
+    isOpen: false,
+    items: []
+  })
+
+  return {
+    ...toRefs(state),                    // ✅ 调用方可解构
+    open() { state.isOpen = true },
+    close() { state.isOpen = false }
+  }
+}
+
+// 使用
+const { isOpen, items, open, close } = useFeature()
+```
+
+## customRef
+
+需要精细控制 ref 的 track / trigger 时：
+
+```ts
+import { customRef } from 'vue'
+
+function useDebouncedRef(value, delay = 200) {
+  let timeout
+  return customRef((track, trigger) => ({
+    get() {
+      track()
+      return value
+    },
+    set(newValue) {
+      clearTimeout(timeout)
+      timeout = setTimeout(() => {
+        value = newValue
+        trigger()
+      }, delay)
+    }
+  }))
+}
+
+// 使用
+const search = useDebouncedRef('', 300)
+
+// 模板中输入快速变化，但 trigger 被防抖
+```
+
+实现自定义防抖 / 节流 / 序列化等高级行为。
+
+## VueUse 中的相关工具
+
+[VueUse](https://vueuse.org/) 提供了很多基于这些 API 的便利工具：
+
+```ts
+import { useStorage, refDebounced, useDocumentVisibility } from '@vueuse/core'
+
+// 自动 localStorage 持久化
+const settings = useStorage('settings', { theme: 'light' })
+
+// 防抖 ref
+const search = ref('')
+const debouncedSearch = refDebounced(search, 300)
+
+// 页面可见性
+const visibility = useDocumentVisibility()
+watchEffect(() => {
+  if (visibility.value === 'hidden') pauseExpensiveTasks()
+})
+```
+
+性能敏感场景优先用 VueUse——它们都正确使用了 shallow / markRaw 等优化。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 大数组用 ref / reactive | 深度代理 + 每访问 trap | shallowRef |
+| 第三方实例 reactive | 内部状态全代理 + 可能错乱 | markRaw |
+| 列表中需要精细 mutate | shallowRef 不响应 | reactive 或重新设计 |
+| toRaw 后修改原对象 | 不触发响应 | 通过 reactive 代理修改 |
+| markRaw 后又试图响应 | markRaw 永久生效 | 重新创建对象 |
+| 用 readonly 当性能优化 | 它不是优化 API | shallowRef / markRaw |
+| 解构 reactive | 丢失响应 | toRefs |
+
+## 实战诊断流程
+
+```text
+组件慢？
+│
+1. Vue DevTools → Performance Timeline 录制操作
+2. 看渲染时间最长的组件
+3. 检查它的状态：
+   ├─ 大数组 / 大对象 ──► shallowRef / shallowReactive
+   ├─ 第三方实例 ──► markRaw
+   └─ 高频访问 ──► toRaw 或局部变量
+4. 重新录制对比
+```
+
+## 与编译时优化的协同
+
+下章 [编译时优化](/performance/vue/compilation) 会展示 Vue 编译器如何配合响应式系统——shallowRef 的项即使在模板中也只追踪整体替换，PatchFlag 让编译器跳过 shallow 项的内部 diff。
+
+## 小结
+
+- `shallowRef` 让 ref 只响应 .value 整体替换——大列表与第三方实例的首选；
+- `shallowReactive` 让对象只响应顶层字段——多字段配置 / 包含大子对象的状态；
+- `readonly` / `shallowReadonly` 是数据流的纪律工具，让外部不能误改；
+- `markRaw` 标记对象永不被代理，整棵子树跳过追踪——大对象 / 类实例的最优解；
+- `toRaw` 一次性取出原始对象，热路径中减少 Proxy 开销；
+- `toRefs` 让 reactive 对象可以安全解构；
+- `customRef` 让你精细控制 track / trigger 时机，实现防抖 / 节流等；
+- 不要把"全用 reactive"当作 Vue 的最佳实践——按数据特性选择正确的 API 是性能优化的核心。

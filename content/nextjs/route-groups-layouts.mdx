@@ -1,0 +1,215 @@
+---
+title: 路由组与布局
+description: (group) 路由组的布局隔离、多根布局模式、template.tsx 与 layout.tsx 的选择
+---
+
+# 路由组与布局
+
+路由组通过 `(groupName)` 命名文件夹来实现两个目标：
+
+1. **组织路由，但不影响 URL 路径**
+2. **为不同路由分配不同的 layout**
+
+## 路由组语法
+
+```text
+app/
+├── (marketing)/
+│   ├── layout.tsx        ← 仅对 marketing 组生效
+│   ├── page.tsx          → /
+│   └── about/
+│       └── page.tsx      → /about
+└── (dashboard)/
+    ├── layout.tsx        ← 仅对 dashboard 组生效
+    ├── page.tsx          → /
+    └── settings/
+        └── page.tsx      → /settings
+```
+
+URL 中**不出现** `(marketing)` 或 `(dashboard)`：
+
+```text
+/            →  由 marketing 或 dashboard 中的 index page 匹配
+/about       →  (marketing)/about/page.tsx
+/settings    →  (dashboard)/settings/page.tsx
+```
+
+## 多根布局（Multiple Root Layouts）
+
+路由组的核心价值——**同项目内可以有多个"根布局"**：
+
+```tsx filename="app/(marketing)/layout.tsx"
+export default function MarketingLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <div className="marketing-shell">
+      <NavBar />
+      <main>{children}</main>
+      <CookieBanner />
+    </div>
+  )
+}
+```
+
+```tsx filename="app/(dashboard)/layout.tsx"
+import { requireAuth } from '@/lib/auth'
+
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  await requireAuth()
+
+  return (
+    <div className="dashboard-shell">
+      <Sidebar />
+      <main className="pl-64">{children}</main>
+    </div>
+  )
+}
+```
+
+但是注意：上面例子中的 `<html>` 和 `<body>` 还是由顶层 `app/layout.tsx` 提供。路由组 layout 是嵌套在根 layout 之内的。
+
+### 真正的多根布局（移除顶层 layout）
+
+要实现完全独立的 HTML 骨架（不同 `<html>` 结构），**需要删除顶层 `app/layout.tsx`**，让每个路由组自己提供根 layout：
+
+```text
+app/
+├── (marketing)/
+│   └── layout.tsx        ← 含 <html> + <body>
+└── (dashboard)/
+    └── layout.tsx        ← 含 <html> + <body>（不同 className / 无 CookieBanner）
+```
+
+每个含有 `<html>` + `<body>` 的 layout 都称为"根布局"——项目可以有多个根布局。Next.js 会在路由切换时选择对应的根布局。
+
+## 路由组与路由优先级
+
+当多个路由组包含同一 URL 时，Next.js 会**报编译错误**：
+
+```text
+app/
+├── (a)/
+│   └── about/
+│       └── page.tsx     → /about
+└── (b)/
+    └── about/
+        └── page.tsx     → /about  ← 冲突！
+```
+
+不能有 2 个 `page` 匹配同一路径。多个组中有共同 URL 时，需要合并到一个组，或使用不同的路径。
+
+## `template.tsx` vs `layout.tsx`
+
+| 维度 | `layout.tsx` | `template.tsx` |
+| ---- | ------------ | -------------- |
+| 导航时 | 保持挂载，不重新渲染 | 卸载 + 重新挂载 |
+| 状态 | 保留 `useState` 值 | 丢失（新实例） |
+| Suspense | 共享边界 | 每次新建边界 |
+| 动画 | 需要 `useEffect` 监听路径变化 | 天然支持进入动画 |
+| 典型用途 | 持久导航栏、侧边栏 | 页间动画、滚动重置 |
+
+```tsx filename="app/template.tsx"
+export default function Template({ children }: { children: React.ReactNode }) {
+  return <div className="animate-fade-in">{children}</div>
+}
+```
+
+每次导航到新的子路由，`Template` 重新挂载——`animate-fade-in` 动画重新播放。
+
+### 同时使用 template 和 layout
+
+```text
+app/
+├── layout.tsx       ← 外层，保持挂载
+├── template.tsx     ← 内层，每次重新挂载
+└── page.tsx         ← 被 template 和 layout 包裹
+```
+
+渲染顺序：
+
+```text
+<Layout>
+  <Template>
+    <Page />
+  </Template>
+</Layout>
+```
+
+## 路由组的布局组织策略
+
+常见模式：按"用户场景"切分路由组：
+
+```text
+app/
+├── (public)/            # 未登录：首页、关于、价格
+│   ├── layout.tsx       # 含公共导航
+│   ├── page.tsx
+│   ├── about/page.tsx
+│   └── pricing/page.tsx
+├── (app)/               # 已登录：核心应用
+│   ├── layout.tsx       # 含侧边栏 + 认证守卫
+│   ├── page.tsx
+│   └── projects/page.tsx
+└── (admin)/             # 管理员：后台
+    ├── layout.tsx       # 含管理导航 + 角色守卫
+    ├── page.tsx
+    └── users/page.tsx
+```
+
+每个组有独立的 layout 与 auth 逻辑，URL 完全干净。
+
+## 陷阱
+
+### 路由组 layout 不能共享 Server Component 数据
+
+不同路由组中的 layout 是独立的 Server Component 实例。如果两个组需要共享同一份数据（如用户信息），需要各自 fetch——或在顶层 layout 中获取并通过 Context 传递（需 `'use client'`）。
+
+### 动态段与路由组
+
+```text
+app/
+├── (shop)/
+│   └── [slug]/
+│       └── page.tsx   → /:slug
+└── blog/
+    └── [slug]/
+        └── page.tsx   → /blog/:slug
+```
+
+`(shop)/[slug]/page.tsx` 会匹配 `/anything`——小心不要让路由组中的通用动态段"吃掉"所有路由。确保其他路由（如 `/blog`）的匹配优先级靠前（App Router 按路由具体性匹配，静态优先于动态）。
+
+### 不要过度使用路由组
+
+3 个以上的路由组通常意味着应该在布局中使用条件逻辑或 component slot 替代：
+
+```tsx filename="app/layout.tsx"
+// 考虑用 slot 而不是更多路由组
+export default function RootLayout({
+  children,
+  sidebar,
+}: {
+  children: React.ReactNode
+  sidebar: React.ReactNode
+}) {
+  return (
+    <div>
+      {sidebar}
+      {children}
+    </div>
+  )
+}
+```
+
+## 小结
+
+- 路由组 `(group)` 用于组织路由而不影响 URL；
+- 不同路由组可拥有独立 layout（乃至独立根布局）；
+- `template.tsx` 每次导航时重新挂载，适合动画与滚动重置；`layout.tsx` 保持挂载，适合持久导航；
+- 路由组的典型使用是"按登录状态 / 用户角色"分配不同的外壳。

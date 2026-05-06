@@ -1,0 +1,20 @@
+export default {
+  index: '导读',
+  metrics: '性能指标与预算',
+  network: '网络层基础',
+  cdn: 'CDN',
+  caching: '缓存策略',
+  preload: '资源预加载',
+  html: 'HTML 优化',
+  css: 'CSS 优化',
+  javascript: 'JavaScript 优化',
+  'image-format': '图片格式选择',
+  'image-responsive': '响应式图片',
+  'image-lazy': '图片懒加载',
+  fonts: '字体优化',
+  cookies: 'Cookie 性能',
+  dependencies: '依赖管理',
+  tools: '通用性能工具链',
+  react: 'React 性能优化',
+  vue: 'Vue 性能优化'
+}

@@ -1,0 +1,681 @@
+---
+title: Nuxt SSR / SSG / 水合
+description: Nuxt 渲染模式、payload 控制、客户端水合优化、岛屿架构与边缘部署
+---
+
+# Nuxt SSR / SSG / 水合
+
+Nuxt 是 Vue 生态最完整的 SSR / SSG / Hybrid 框架——本章覆盖 Nuxt 3 的渲染模式选择、payload 优化、客户端水合调优、岛屿架构与边缘部署。原理与对应的 React/Next.js 类似，但 Nuxt 的 API 与默认行为有显著差异。
+
+## Nuxt 的渲染模式
+
+### Universal（默认）
+
+```ts
+// nuxt.config.ts
+export default defineNuxtConfig({
+  ssr: true                                    // 默认
+})
+```
+
+行为：
+
+- 服务端预渲染 HTML（每次请求或缓存）
+- 客户端水合（hydration）
+- 后续路由切换走客户端路由（SPA 模式）
+
+### SPA
+
+```ts
+export default defineNuxtConfig({
+  ssr: false
+})
+```
+
+完全客户端渲染——无 SEO，部署简单。
+
+### Static（SSG）
+
+```bash
+npx nuxi generate
+```
+
+构建期生成所有页面 HTML——适合内容站、文档、营销页。
+
+### 路由级混合（Hybrid Rendering）
+
+Nuxt 3 强大的功能——每个路由单独配置：
+
+```ts
+export default defineNuxtConfig({
+  routeRules: {
+    '/': { prerender: true },                  // SSG
+    '/blog/**': { isr: 60 },                   // ISR
+    '/api/**': { cors: true },
+    '/admin/**': { ssr: false },               // 该路由走 SPA
+    '/users/**': { swr: 600 }                  // SWR：6 分钟缓存
+  }
+})
+```
+
+| 模式 | 含义 |
+| ---- | ---- |
+| `prerender: true` | 构建期生成（SSG） |
+| `isr: 60` | 60 秒 ISR |
+| `swr: 600` | 600 秒 SWR（边缘缓存 + 后台刷新） |
+| `ssr: false` | 改为 SPA 模式 |
+| `static: true` | 强制静态化 |
+
+### 与 Next.js 的对比
+
+| 维度 | Nuxt 3 | Next.js |
+| ---- | ------ | ------- |
+| 默认 | Universal SSR | App Router 智能混合 |
+| 路由级配置 | routeRules | 文件级（dynamic / cache 配置）|
+| 边缘运行时 | 内建（nitro） | Edge Runtime |
+| RSC | 实验中 | 生产可用 |
+| Hybrid | ✅ | ✅ |
+
+## SSR 的工作流
+
+```text
+T+0     用户请求 /products
+T+0     Nitro 服务器接收：
+          ├─ 路由匹配
+          ├─ 执行 setup（含数据获取）
+          ├─ 渲染 HTML
+          └─ 返回 HTML + payload
+
+T+200   浏览器收到 HTML（FCP）
+T+250   浏览器开始下载 JS
+T+800   JS 加载完成
+T+900   水合（hydration）开始
+T+1100  水合完成（可交互）
+        ↑ T+200 ~ T+1100 是"幽灵期"
+```
+
+### useFetch / useAsyncData
+
+```vue
+<script setup>
+const { data: products } = await useFetch('/api/products')
+</script>
+
+<template>
+  <ul>
+    <li v-for="p in products" :key="p.id">{{ p.name }}</li>
+  </ul>
+</template>
+```
+
+特点：
+
+- SSR 时在服务端 fetch
+- 数据序列化到 HTML payload
+- 客户端水合时复用 payload（不重新请求）
+
+```ts
+// 自定义 key 与缓存
+const { data, refresh } = await useFetch('/api/users', {
+  key: 'users',
+  default: () => [],
+  transform: (data) => data.map(u => ({ ...u, name: u.name.toUpperCase() })),
+  pick: ['id', 'name', 'email']                // 只取需要的字段
+})
+```
+
+`pick` 减少 payload 体积——客户端不需要的字段不传。
+
+## payload 优化
+
+> Payload = 服务端渲染时附带的状态数据，让客户端水合时无需重复请求。
+
+### 检查 payload 体积
+
+```bash
+# 开发模式访问页面
+# 看 HTML 中的 <script id="__NUXT_DATA__">
+```
+
+或用：
+
+```ts
+// 自定义中间件检查
+export default defineEventHandler(async (event) => {
+  const result = await /* render */
+  console.log('Payload size:', result.payload.length)
+})
+```
+
+### 常见 payload 膨胀原因
+
+#### 1. 全量数据塞进 useFetch
+
+```ts
+// ❌ 列表页拉了所有用户的所有字段
+const { data } = await useFetch('/api/users')
+```
+
+修复：
+
+```ts
+const { data } = await useFetch('/api/users', {
+  pick: ['id', 'name', 'avatar']                // 只要列表需要的
+})
+```
+
+或后端只返回必要字段。
+
+#### 2. 把不需要响应的数据放 ref / reactive
+
+```ts
+const allCountries = ref(largeCountriesData)    // ❌ 进入 payload
+```
+
+修复：
+
+```ts
+import { markRaw } from 'vue'
+const allCountries = markRaw(largeCountriesData) // 不进入 payload
+```
+
+详见 [浅层与只读优化](/performance/vue/shallow-optimization)。
+
+或用 `useState` 仅在客户端初始化：
+
+```ts
+const allCountries = useState('countries', () => [])
+
+if (import.meta.client) {
+  allCountries.value = await fetch('...').then(r => r.json())
+}
+```
+
+#### 3. 实例 / 类对象的序列化失败
+
+Nuxt 默认尝试 JSON 序列化所有 ref / reactive 状态——遇到 Map / Set / Date 实例时表现各异。简单的 fix 是用 `useState` + 在客户端 hydrate 时还原：
+
+```ts
+const cache = useState('cache', () => ({}))
+
+onMounted(() => {
+  if (Object.keys(cache.value).length > 0) {
+    realCache.value = new Map(Object.entries(cache.value))   // 客户端转 Map
+  }
+})
+```
+
+### Payload 序列化 API
+
+Nuxt 3.4+ 支持自定义 reducer/reviver：
+
+```ts
+// plugins/payload-reducer.ts
+export default defineNuxtPlugin((nuxtApp) => {
+  nuxtApp.hook('app:rendered', () => {
+    // 自定义如何序列化
+  })
+})
+```
+
+或用 Devalue（Nuxt 内部用的）支持更多类型。
+
+## SSR 中的限制
+
+### 1. 浏览器 API 不可用
+
+```vue
+<script setup>
+const width = window.innerWidth                 // ❌ SSR 报错
+</script>
+```
+
+修复：
+
+```ts
+import { onMounted, ref } from 'vue'
+
+const width = ref(0)
+onMounted(() => {
+  width.value = window.innerWidth
+})
+```
+
+或用 `import.meta.client`：
+
+```ts
+if (import.meta.client) {
+  // 仅客户端运行
+}
+```
+
+### 2. localStorage / cookies
+
+```ts
+// 用 nuxt 提供的
+const userPreferences = useCookie('preferences', {
+  default: () => ({ theme: 'light' }),
+  watch: 'shallow'
+})
+```
+
+`useCookie` 在服务端从 request header 读，客户端从 document.cookie 读——完全跨平台。
+
+### 3. 仅客户端组件
+
+```vue
+<ClientOnly>
+  <SomeComponentThatNeedsBrowser />
+  <template #fallback><Skeleton /></template>
+</ClientOnly>
+```
+
+整个组件只在客户端挂载，SSR 时显示 fallback。适合：
+
+- 第三方依赖浏览器的库（地图、图表的某些版本）
+- 极重的客户端逻辑
+
+## 客户端水合优化
+
+### 水合的代价
+
+```text
+1. 下载 JS bundle
+2. 解析 + 执行 JS
+3. Vue 重新创建组件实例
+4. 走遍 DOM 树绑定事件 + 同步状态
+5. 进入"可交互"状态
+```
+
+低端设备上水合可能 1-3 秒——这是 SSR 的"幽灵期"。
+
+### Lazy Hydration（Nuxt 3.x）
+
+> Nuxt 3.10+ 引入实验性 Lazy Hydration——按需水合组件。
+
+```vue
+<!-- 视口可见时才水合 -->
+<LazyMyComponent hydrate-on-visible />
+
+<!-- 浏览器空闲时水合 -->
+<LazyMyComponent hydrate-on-idle />
+
+<!-- 鼠标悬停时水合 -->
+<LazyMyComponent hydrate-on-interaction="mouseover" />
+
+<!-- 媒体查询匹配时 -->
+<LazyMyComponent :hydrate-on-media-query="'(min-width: 768px)'" />
+
+<!-- 永不水合（纯静态） -->
+<LazyMyComponent hydrate-never />
+```
+
+效果：首屏不需要交互的组件保持纯 HTML，节省客户端 JS 解析与水合时间。
+
+### 岛屿架构
+
+> 岛屿（Islands）= 在静态 HTML 中嵌入"水合岛"，每个岛是独立的交互组件。
+
+Nuxt 实验性的 [Server Components / Islands](https://nuxt.com/docs/guide/directory-structure/components#server-components)：
+
+```vue
+<!-- 服务端组件（不水合）-->
+<MyServerComponent />
+
+<!-- 客户端组件（水合） -->
+<MyComponent />
+```
+
+```vue
+<!-- pages/index.vue -->
+<template>
+  <Header />                                    <!-- 客户端 -->
+  <ArticleContent.server />                    <!-- 服务端，零客户端 JS -->
+  <CommentsForm />                              <!-- 客户端 -->
+  <RelatedPosts.server />                      <!-- 服务端 -->
+  <Footer />                                    <!-- 服务端可放 -->
+</template>
+```
+
+`.server.vue` 后缀让组件只在服务端运行——完全不进入客户端 bundle。
+
+### useState：跨组件共享状态
+
+```ts
+// 服务端 + 客户端共享
+const counter = useState('counter', () => 0)
+```
+
+- 服务端渲染时用 default 函数初始化
+- 序列化到 payload
+- 客户端水合时从 payload 读取
+
+类似 React 的 useState，但**自动跨组件共享**（key 一致即同一份状态）。
+
+## 性能优化具体技巧
+
+### 1. 避免不必要的 await
+
+```ts
+// ❌ async setup 串行
+const a = await fetch('/api/a').then(r => r.json())
+const b = await fetch('/api/b').then(r => r.json())
+
+// ✅ 并行
+const [{ data: a }, { data: b }] = await Promise.all([
+  useFetch('/api/a'),
+  useFetch('/api/b')
+])
+```
+
+### 2. 静态资源构建期生成
+
+```ts
+// nuxt.config.ts
+export default {
+  routeRules: {
+    '/': { prerender: true },
+    '/about': { prerender: true },
+    '/blog': { prerender: true }
+  }
+}
+```
+
+`nuxi generate` / 构建时生成 HTML——CDN 直出。
+
+### 3. 边缘部署
+
+```ts
+// nuxt.config.ts
+export default {
+  nitro: {
+    preset: 'cloudflare-pages'                  // 或 vercel-edge / netlify-edge
+  }
+}
+```
+
+Nitro 输出可在 Cloudflare Workers / Vercel Edge / Netlify 上运行——TTFB 极低。
+
+### 4. CDN 缓存控制
+
+```ts
+// 路由级
+export default {
+  routeRules: {
+    '/blog/**': {
+      isr: 60,
+      cache: { swr: true, maxAge: 60 }
+    }
+  }
+}
+```
+
+或在 server route 中：
+
+```ts
+// server/api/data.ts
+export default defineEventHandler(async (event) => {
+  setHeader(event, 'Cache-Control', 's-maxage=60, stale-while-revalidate=300')
+  return await fetchData()
+})
+```
+
+详见通用章 [缓存策略](/performance/caching) 与 [CDN](/performance/cdn)。
+
+### 5. 缩减 client bundle
+
+```ts
+// 仅服务端用的依赖
+import sharp from 'sharp'    // ❌ 不应在客户端组件 import
+
+// 在 server/ 目录或 .server.ts 后缀文件中 import
+```
+
+或用 `import.meta.server`：
+
+```ts
+let sharp
+if (import.meta.server) {
+  sharp = await import('sharp')
+}
+```
+
+### 6. NuxtImg 与图片优化
+
+```vue
+<NuxtImg
+  src="/hero.jpg"
+  width="1200" height="600"
+  format="avif"
+  quality="60"
+  preload
+  sizes="sm:100vw md:80vw lg:1200px"
+/>
+
+<NuxtPicture src="/hero.jpg" />
+```
+
+`@nuxt/image` 支持构建期 / 运行时图片变换、CDN 集成（Cloudinary、Imgix 等）。
+
+详见通用章 [响应式图片](/performance/image-responsive)。
+
+### 7. 字体优化
+
+```ts
+// nuxt.config.ts with @nuxt/fonts
+export default {
+  modules: ['@nuxt/fonts'],
+  fonts: {
+    families: [
+      { name: 'Inter', provider: 'google' }
+    ]
+  }
+}
+```
+
+自动下载、子集化、注入 preload + size-adjust 防 CLS。详见通用章 [字体优化](/performance/fonts)。
+
+### 8. payload 拆分（路由级）
+
+```ts
+// nuxt.config.ts
+export default {
+  experimental: {
+    payloadExtraction: true                     // 把 payload 拆为独立 JSON
+  }
+}
+```
+
+效果：HTML 不内联 payload，浏览器并行下载 HTML 与 payload JSON。可减小 HTML 体积。
+
+## SEO 与社交分享
+
+```vue
+<script setup>
+useHead({
+  title: 'Page Title',
+  meta: [
+    { name: 'description', content: 'Page description' },
+    { property: 'og:image', content: '/og-image.jpg' }
+  ],
+  link: [
+    { rel: 'canonical', href: 'https://example.com/page' }
+  ]
+})
+</script>
+```
+
+或用更声明式的 `useSeoMeta`：
+
+```ts
+useSeoMeta({
+  title: 'Page Title',
+  description: 'Page description',
+  ogImage: '/og-image.jpg',
+  twitterCard: 'summary_large_image'
+})
+```
+
+## 数据获取的最佳实践
+
+### useFetch 缓存
+
+```ts
+const { data } = await useFetch('/api/users', {
+  key: 'users-list',
+  // 默认 SSR 缓存到 payload
+  // 同 key 重复调用直接返回缓存（不重新请求）
+})
+```
+
+### useAsyncData 自定义获取
+
+```ts
+const { data } = await useAsyncData('posts', async () => {
+  const [posts, comments] = await Promise.all([
+    $fetch('/api/posts'),
+    $fetch('/api/comments')
+  ])
+  return { posts, comments }
+})
+```
+
+适合需要多个数据源协同的场景。
+
+### 客户端 fetch 与缓存
+
+```ts
+// 不需要 SSR 时用 $fetch
+async function loadMore() {
+  const newPosts = await $fetch('/api/posts', {
+    query: { cursor: lastId.value }
+  })
+  posts.value.push(...newPosts)
+}
+```
+
+或用 `@tanstack/vue-query` 在客户端 SPA 模式下管理缓存。
+
+## 路由切换性能
+
+```vue
+<!-- 整个 layout 用 KeepAlive 保留状态 -->
+<NuxtLayout>
+  <NuxtPage :keepalive="true" />
+</NuxtLayout>
+```
+
+或路由元信息控制：
+
+```ts
+const routes = [
+  { path: '/list', meta: { keepAlive: true } }
+]
+```
+
+详见 [KeepAlive 缓存](/performance/vue/keep-alive)。
+
+### 页面过渡
+
+```vue
+<NuxtPage :transition="{ name: 'page', mode: 'out-in' }" />
+```
+
+```css
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.2s;
+}
+.page-enter-from,
+.page-leave-to {
+  opacity: 0;
+}
+```
+
+## 监控
+
+### Nuxt DevTools
+
+```bash
+npx nuxi devtools enable
+```
+
+DevTools 显示：
+
+- 组件树
+- 路由
+- 模块状态
+- 依赖与 bundle 分析
+- payload 检查
+- 性能 timeline
+
+### web-vitals 集成
+
+```ts
+// plugins/web-vitals.client.ts
+import { onLCP, onINP, onCLS } from 'web-vitals'
+
+export default defineNuxtPlugin(() => {
+  onLCP(metric => sendBeacon('/track', { lcp: metric.value }))
+  onINP(metric => sendBeacon('/track', { inp: metric.value }))
+  onCLS(metric => sendBeacon('/track', { cls: metric.value }))
+})
+```
+
+详见通用章 [性能指标与预算](/performance/metrics)。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 所有路由 SSR | 服务器成本 + 不必要 | 路由级 routeRules |
+| useFetch 不 pick | payload 膨胀 | pick 仅需要的字段 |
+| 客户端 API 在 setup 顶层 | SSR 报错 | onMounted / import.meta.client |
+| 大对象用 ref 进 payload | 序列化慢 + 体积大 | markRaw / useState client init |
+| 用 cookie 存大数据 | 每个请求附带 | 用 useState 或 IndexedDB |
+| 重 client 组件无 lazy | bundle 巨大 | LazyXXX + hydrate-on-visible |
+| ClientOnly 包整页 | 失去 SSR 价值 | 仅包真需浏览器的部分 |
+| useFetch key 不稳定 | 客户端重新请求 | 显式 key |
+| 跨组件状态用全局变量 | SSR 间状态污染 | useState |
+
+## 部署目标
+
+```text
+SSG（构建期生成）：
+  ├─ Netlify / Vercel / Cloudflare Pages（静态托管）
+  └─ TTFB 最低
+
+SSR（运行时生成）：
+  ├─ Node.js（传统部署）
+  ├─ Vercel / Netlify（Lambda）
+  └─ Cloudflare Pages / Workers（边缘）
+
+Edge：
+  ├─ TTFB 极低
+  ├─ 限制：无 Node API、有 CPU 配额
+  └─ 适合：SSR 性能敏感的应用
+```
+
+```ts
+// 切换部署目标
+export default {
+  nitro: {
+    preset: 'node-server' |        // 默认
+            'cloudflare-pages' |
+            'vercel-edge' |
+            'netlify-edge' |
+            'static'                  // SSG
+  }
+}
+```
+
+## 小结
+
+- Nuxt 3 的 routeRules 是路由级 hybrid 渲染的标准方式——不同路由独立选择 SSG / ISR / SSR / SPA；
+- SSR 减少 LCP 等待但带来"水合幽灵期"，水合时间是 SSR 项目的关键瓶颈；
+- payload 优化（pick / markRaw / 仅客户端初始化）是减小 HTML 体积的核心手段；
+- Nuxt 3.10+ 的 Lazy Hydration 让组件按需水合（visible / idle / interaction / mediaQuery）；
+- 服务端组件（.server.vue）实现"零客户端 JS"——岛屿架构的 Vue 答卷；
+- useState 让 SSR 与客户端共享状态，自动跨组件，避免全局变量污染；
+- 边缘部署（Cloudflare / Vercel Edge）让 SSR 的 TTFB 接近 SSG，是 Nuxt 性能的下一代基线；
+- @nuxt/image / @nuxt/fonts 等模块自动应用通用章节中的最佳实践，开箱即用。

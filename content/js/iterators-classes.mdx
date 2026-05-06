@@ -1,0 +1,465 @@
+---
+title: 迭代器、类与 API
+description: 迭代协议、生成器、Class 语法与 Web 网络 API
+---
+
+# 迭代器、类与 API
+
+本章覆盖三个独立但常被同时使用的主题：**迭代协议 / 生成器**、**`class` 语法**、**与 API 交互**。
+
+## 迭代器与生成器
+
+### 迭代协议回顾
+
+JavaScript 通过两个协议把"可遍历"标准化（详见 [循环与迭代](/js/loops)）：
+
+- **可迭代协议**：实现 `[Symbol.iterator]()`，返回迭代器
+- **迭代器协议**：对象拥有 `next()` 方法，返回 `{ value, done }`
+
+任何实现迭代协议的对象，都能用于 `for...of`、`...spread`、`Array.from`、解构等。
+
+### 内置可迭代对象
+
+| 对象 | 迭代什么 |
+| ---- | -------- |
+| `Array` / `TypedArray` | 元素 |
+| `String` | 码点（不是码元） |
+| `Map` | `[key, value]` 对 |
+| `Set` | 元素 |
+| `arguments` / DOM `NodeList` | 元素 |
+| 生成器函数返回值 | yield 出的值 |
+
+```js
+const m = new Map([['a', 1], ['b', 2]])
+for (const [k, v] of m) console.log(k, v)
+;[...new Set([1, 1, 2])]                       // → [1, 2]
+```
+
+### 手写迭代器
+
+```js
+function makeIterator(arr) {
+  let i = 0
+  return {
+    next: () => i < arr.length
+      ? { value: arr[i++], done: false }
+      : { value: undefined, done: true },
+    [Symbol.iterator]() { return this }       // 让迭代器自身可迭代
+  }
+}
+
+const it = makeIterator(['a', 'b'])
+for (const v of it) console.log(v)             // → a, b
+```
+
+### 生成器（Generator）
+
+`function*` 声明的函数返回一个生成器对象，每次 `next()` 推进到下一个 `yield`。
+
+```js
+function* range(start, end, step = 1) {
+  for (let i = start; i < end; i += step) {
+    yield i
+  }
+}
+
+const g = range(0, 5)
+g.next()                                       // → { value: 0, done: false }
+g.next()                                       // → { value: 1, done: false }
+;[...range(0, 5)]                              // → [0, 1, 2, 3, 4]
+for (const n of range(0, 10, 2)) console.log(n)
+```
+
+### 双向通信：`yield` 接收值
+
+```js
+function* dialog() {
+  const a = yield 'q1?'                       // a 是外部 next 传入的值
+  const b = yield `got ${a}, q2?`
+  return `${a} ${b}`
+}
+
+const g = dialog()
+console.log(g.next().value)                    // → 'q1?'
+console.log(g.next('A1').value)                // → 'got A1, q2?'
+console.log(g.next('A2').value)                // → 'A1 A2'  done: true
+```
+
+### 委托：`yield*`
+
+把另一个可迭代对象的输出"嵌入"当前生成器：
+
+```js
+function* inner() {
+  yield 'b'
+  yield 'c'
+}
+
+function* outer() {
+  yield 'a'
+  yield* inner()                                // 委托
+  yield 'd'
+}
+
+console.log([...outer()])                      // → ['a', 'b', 'c', 'd']
+```
+
+### 异步迭代
+
+ES2018 引入异步迭代器协议（`Symbol.asyncIterator`）和 `for await...of`：
+
+```js
+async function* fetchPages(urls) {
+  for (const url of urls) {
+    const res = await fetch(url)
+    yield await res.json()
+  }
+}
+
+for await (const page of fetchPages(urls)) {
+  process(page)
+}
+```
+
+异步迭代用于流式处理数据（HTTP chunk、文件按行、消息队列），避免一次性载入全部内容。
+
+### 用生成器实现常见模式
+
+#### 无限序列
+
+```js
+function* fibonacci() {
+  let [a, b] = [0, 1]
+  while (true) {
+    yield a
+    ;[a, b] = [b, a + b]
+  }
+}
+
+const fib = fibonacci()
+fib.next().value                               // → 0
+fib.next().value                               // → 1
+fib.next().value                               // → 1
+fib.next().value                               // → 2
+```
+
+#### 惰性求值
+
+```js
+function* take(iter, n) {
+  let i = 0
+  for (const v of iter) {
+    if (i++ >= n) return
+    yield v
+  }
+}
+
+;[...take(fibonacci(), 10)]                    // → [0,1,1,2,3,5,8,13,21,34]
+```
+
+## 类（Class）
+
+ES6 引入 `class` 关键字。它是基于原型继承的语法糖，但在以下方面有规范层面的额外语义：
+
+- 类体内默认严格模式
+- 类声明不会被提升
+- 直接调用类（不加 `new`）抛 `TypeError`
+
+### 基础语法
+
+```js
+class User {
+  // 实例字段（ES2022）
+  name = ''
+  age = 0
+
+  // 静态字段
+  static count = 0
+
+  // 私有字段（ES2022）
+  #password
+
+  // 构造函数
+  constructor(name, age, password) {
+    this.name = name
+    this.age = age
+    this.#password = password
+    User.count++
+  }
+
+  // 实例方法
+  greet() {
+    return `Hello, ${this.name}`
+  }
+
+  // 静态方法
+  static fromJson(json) {
+    return new User(json.name, json.age, json.password)
+  }
+
+  // 访问器
+  get info() { return `${this.name}, ${this.age}` }
+  set info(v) {
+    [this.name, this.age] = v.split(',')
+  }
+
+  // 私有方法
+  #encrypt(text) { return /* ... */ text }
+}
+```
+
+### 字段与构造函数
+
+字段在 ES2022 之前必须在 `constructor` 中初始化：
+
+```js
+// 旧写法
+class C {
+  constructor() {
+    this.x = 0
+    this.y = 0
+  }
+}
+
+// 新写法（ES2022）
+class C {
+  x = 0
+  y = 0
+}
+```
+
+### 私有成员
+
+`#` 前缀字段从语言层面保证封装，外部访问抛 SyntaxError（不是 undefined）：
+
+```js
+class Counter {
+  #value = 0
+  inc() { return ++this.#value }
+}
+
+const c = new Counter()
+c.inc()                                        // → 1
+c.#value                                       // ✗ SyntaxError: Private field must be declared in an enclosing class
+```
+
+旧约定 `_value` 是仅约定层面的"私有"，外部仍可访问。`#` 是真正的强制封装。
+
+### 继承
+
+```js
+class Animal {
+  constructor(name) { this.name = name }
+  eat() { console.log(`${this.name} is eating`) }
+}
+
+class Dog extends Animal {
+  constructor(name, breed) {
+    super(name)                               // 必须在 this 之前调用
+    this.breed = breed
+  }
+  bark() { console.log(`${this.name}: woof!`) }
+}
+
+const d = new Dog('Rex', 'Husky')
+d.eat()                                        // 继承自 Animal
+d.bark()                                       // Dog 自己的方法
+```
+
+`super` 在子类中：
+
+- `super(...)`：调用父类构造函数
+- `super.method()`：调用父类原型方法（绑定到当前 `this`）
+
+### 静态方法与私有
+
+```js
+class Math2 {
+  static #precision = 4
+  static round(n) {
+    return Number(n.toFixed(Math2.#precision))
+  }
+}
+
+Math2.round(3.14159)                          // → 3.1416
+```
+
+### 类是表达式
+
+```js
+const Logger = class {
+  log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`) }
+}
+
+new Logger().log('hello')
+```
+
+#### 工厂模式：根据条件创建子类
+
+```js
+function makeShape(kind) {
+  return class extends BaseShape {
+    type = kind
+  }
+}
+
+const Circle = makeShape('circle')
+new Circle()
+```
+
+### `instanceof` 与原型
+
+```js
+class A {}
+class B extends A {}
+
+const b = new B()
+b instanceof B                                 // → true
+b instanceof A                                 // → true
+Object.getPrototypeOf(b) === B.prototype       // → true
+Object.getPrototypeOf(B.prototype) === A.prototype // → true
+```
+
+### `class` vs 原型函数
+
+```js
+// 原型函数风格
+function User(name) { this.name = name }
+User.prototype.greet = function () { return `hi, ${this.name}` }
+
+// class 风格
+class User {
+  constructor(name) { this.name = name }
+  greet() { return `hi, ${this.name}` }
+}
+```
+
+二者在原型链层面**完全等价**。`class` 提供更清晰的组织、私有字段、严格的 `new` 检查与现代字段语法。新代码统一使用 `class`。
+
+## 与 API 交互
+
+### Fetch
+
+```js
+async function getUser(id) {
+  const res = await fetch(`/api/users/${id}`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+```
+
+详见 [异步](/js/async#网络请求-api)。
+
+### URL 构造
+
+```js
+const url = new URL('/api/search', 'https://example.com')
+url.searchParams.set('q', 'javascript')
+url.searchParams.set('page', 2)
+console.log(url.toString())                   // → 'https://example.com/api/search?q=javascript&page=2'
+
+// 解析
+const u = new URL('https://example.com/path?a=1&b=2#section')
+u.protocol                                     // → 'https:'
+u.hostname                                     // → 'example.com'
+u.pathname                                     // → '/path'
+u.search                                       // → '?a=1&b=2'
+u.hash                                         // → '#section'
+
+;[...u.searchParams.entries()]                 // → [['a', '1'], ['b', '2']]
+```
+
+### Headers / Request / Response
+
+```js
+const headers = new Headers({
+  'Content-Type': 'application/json',
+  'X-Custom': 'value'
+})
+headers.append('X-Custom', 'another')
+;[...headers.entries()]                        // → [['content-type', '...'], ['x-custom', 'value, another']]
+
+const req = new Request('/api', {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ a: 1 })
+})
+
+// Response 可以构造
+const res = new Response('hello', { status: 200, headers: { 'Content-Type': 'text/plain' } })
+```
+
+### FormData
+
+```js
+const data = new FormData()
+data.append('username', 'js')
+data.append('avatar', fileInput.files[0])
+
+await fetch('/upload', { method: 'POST', body: data })
+// Content-Type 自动设置为 multipart/form-data; boundary=...
+```
+
+### Blob / File / FileReader
+
+```js
+const blob = new Blob(['hello world'], { type: 'text/plain' })
+const text = await blob.text()                 // → 'hello world'
+const buf = await blob.arrayBuffer()
+
+// 创建可下载链接
+const url = URL.createObjectURL(blob)
+const a = document.createElement('a')
+a.href = url
+a.download = 'hello.txt'
+a.click()
+URL.revokeObjectURL(url)
+```
+
+### IndexedDB / LocalStorage / SessionStorage
+
+```js
+// LocalStorage（同步、字符串、5MB 上限）
+localStorage.setItem('user', JSON.stringify({ id: 1 }))
+const u = JSON.parse(localStorage.getItem('user') || '{}')
+localStorage.removeItem('user')
+
+// SessionStorage：标签页范围
+sessionStorage.setItem('token', '...')
+
+// IndexedDB：异步、结构化、容量大、支持索引
+const req = indexedDB.open('mydb', 1)
+req.onupgradeneeded = e => {
+  const db = e.target.result
+  db.createObjectStore('users', { keyPath: 'id' })
+}
+req.onsuccess = e => {
+  const db = e.target.result
+  const tx = db.transaction('users', 'readwrite')
+  tx.objectStore('users').add({ id: 1, name: 'js' })
+}
+```
+
+### Web Worker
+
+```js
+// main.js
+const worker = new Worker('worker.js')
+worker.postMessage({ task: 'compute', n: 1e9 })
+worker.onmessage = e => console.log(e.data)
+
+// worker.js
+self.onmessage = e => {
+  const result = heavyCompute(e.data.n)
+  self.postMessage(result)
+}
+```
+
+适用于 CPU 密集型任务。Worker 与主线程不共享内存（除 `SharedArrayBuffer`），通信通过结构化克隆传递。
+
+## 小结
+
+- 迭代协议是 `for...of` / `...` / `Array.from` / 解构等的统一基础；
+- 生成器是创建迭代器最便捷的方式，也支持双向通信与异步迭代；
+- `class` 是原型继承的语法糖，但提供 `#` 私有、严格 `new` 等语言级保障；
+- Web 平台 API（Fetch、URL、Storage、Worker、Blob）是现代浏览器开发的事实标准库。

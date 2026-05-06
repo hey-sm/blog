@@ -1,0 +1,262 @@
+---
+title: 部署
+description: Vercel 部署、Node.js 自托管、Docker 多阶段构建、standalone output 与环境变量策略
+---
+
+# 部署
+
+Next.js 支持三种部署模型，分别对应不同的运维需求。
+
+## 部署模型对比
+
+| 方案 | 适用场景 | 优势 | 限制 |
+| ---- | -------- | ---- | ---- |
+| **Vercel** | 全栈 Serverless | 零运维、全球 Edge、自动 ISR/PPR | 受限运行时（Edge 30s、Serverless 60s） |
+| **Node.js Server** | 自有服务器 / VPS | 完全控制、长连接、WebSocket | 运维成本高 |
+| **Docker + standalone** | K8s / ECS / 自建容器 | 一致的环境、跨平台 | 对综合运维能力有要求 |
+
+## Vercel 部署
+
+```bash
+# 安装 Vercel CLI
+pnpm add -g vercel
+
+# 部署到生产
+vercel --prod
+```
+
+Vercel 自动：
+- 识别 Next.js 项目
+- 生成 Edge/Serverless 配置
+- 静态路由部署到 Edge CDN
+- ISR / PPR 缓存自动管理
+- 生成预览部署（每个 PR）
+
+### 环境变量
+
+在 Vercel Dashboard → Settings → Environment Variables 中添加。支持分支级变量：
+
+```text
+NEXT_PUBLIC_API_URL    # 生产
+NEXT_PUBLIC_API_URL    # 预览（不同分支不同值）
+```
+
+或在 `vercel.json` 中配置构建环境变量。
+
+## Node.js 自托管
+
+```bash
+pnpm build
+pnpm start           # node .next/standalone/server.js
+```
+
+默认情况下 `next start` 监听 `localhost:3000`。
+
+### 进程管理 (PM2)
+
+```bash
+npm install -g pm2
+pm2 start node --name "nextjs" -- .next/standalone/server.js
+pm2 save
+pm2 startup
+```
+
+### Nginx 反向代理
+
+```nginx
+server {
+    listen 80;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+## Docker 部署
+
+### `standalone` 输出模式
+
+```ts filename="next.config.ts"
+const nextConfig: NextConfig = {
+  output: 'standalone',
+}
+```
+
+生成 `.next/standalone/`——一个可以脱离源码运行的 Node.js 服务器包。
+
+### 多阶段 Dockerfile
+
+```dockerfile filename="Dockerfile"
+FROM node:22-alpine AS base
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm build
+
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+
+EXPOSE 3000
+ENV PORT=3000
+
+CMD ["node", "server.js"]
+```
+
+构建与运行：
+
+```bash
+docker build -t my-nextjs-app .
+docker run -p 3000:3000 my-nextjs-app
+```
+
+### `docker-compose.yml`
+
+```yaml filename="docker-compose.yml"
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://db:5432/mydb
+    depends_on:
+      - db
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
+```
+
+## 环境变量策略
+
+### 构建时 vs 运行时
+
+| 变量类型 | 示例 | 生效时机 |
+| -------- | ---- | -------- |
+| `NEXT_PUBLIC_*` | `NEXT_PUBLIC_API_URL` | 构建时内联到客户端 bundle |
+| 私有变量 | `DATABASE_URL` | 运行时由服务端读取 |
+| `process.env` | 无前缀 | 运行时（服务端）或构建时（客户端） |
+
+关键：要想 Docker 容器中切换 `NEXT_PUBLIC_*`，必须在 `docker run -e` 前**重新构建**——这些值不能通过运行时环境变量覆盖。
+
+### 构建参数 (Docker ARG)
+
+```dockerfile
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+```
+
+```bash
+docker build --build-arg NEXT_PUBLIC_API_URL=https://api.example.com -t my-app .
+```
+
+## 健康检查
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
+```
+
+```ts filename="app/api/health/route.ts"
+export async function GET() {
+  // 可选：检查 DB 连接状态
+  return NextResponse.json({ status: 'ok' })
+}
+```
+
+## `after()` —— 响应后回调 (Next.js 16)
+
+```tsx filename="app/page.tsx"
+import { after } from 'next/server'
+
+export default function Page() {
+  after(async () => {
+    // HTTP 响应已发送——可以执行日志、分析等
+    await logPageView()
+  })
+
+  return <MainContent />
+}
+```
+
+`after()` 是 Next.js 16 的新 API。它允许你在响应已发送后运行非阻塞的后台任务——类似中间件的 `waitUntil` 但在 Route Handler / Server Component 中可用。
+
+## 陷阱
+
+### standalone 输出不包含 `public/` 和 `.next/static`
+
+```dockerfile
+# 必须手动复制这些目录
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/static ./.next/static
+```
+
+### `next.config.ts` 中的 `experimental.serverActions`
+
+Server Actions 在 Next.js 16 中默认启用，不需要 experimental flag。但如果你迁移旧项目，确保 `serverActions: true` 不在配置中（已弃用）。
+
+### `next start` 抓取环境变量是通过 `.env.production`
+
+`next start` 读取 `.env.production` 文件。docker 镜像中如果没把这个文件复制过去，需要用 `docker run -e` 指定环境变量。
+
+### Vercel 部署中的 Serverless 函数大小限制
+
+Vercel 的 Serverless 函数最大 250 MB（压缩后）。Prisma engine + sharp 等二进制文件可能导致函数超限。如在 Vercel 构建时有大小警告，检查：
+
+```bash
+du -sh .next/standalone/node_modules
+```
+
+利用 `serverExternalPackages` 将大包分离。
+
+### 删除 `node_modules` 的 `.cache` 和 dev-only 依赖
+
+standalone 输出的 `server.js` 会打包依赖——但未使用的 devDependencies 和 cache 文件可能也被复制进来。使用 `.dockerignore`：
+
+```dockerignore filename=".dockerignore"
+node_modules
+.git
+.env
+.env.local
+.next/cache
+```
+
+## 小结
+
+- Vercel: 零配置，自动 Edge/Serverless，ISR/PPR；
+- Node.js: `next start` 或 PM2 托管，Nginx 反向代理；
+- Docker: `output: 'standalone'` + 多阶段构建 + `.dockerignore`；
+- `NEXT_PUBLIC_*` 构建时固化，Docker 中需通过 ARG 指定；
+- Next.js 16 的 `after()` 提供响应后的非阻塞回调。

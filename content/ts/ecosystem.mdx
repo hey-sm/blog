@@ -1,0 +1,343 @@
+---
+title: 生态系统工具
+description: TypeScript 生态系统工具链：ESLint、Prettier、tsx/ts-node、类型检查工具、持续集成中的 TS 配置
+---
+
+# 生态系统工具
+
+TypeScript 的强大不仅来自语言本身，更来自围绕它的工具生态系统。
+
+## ESLint + typescript-eslint
+
+### 安装
+
+```bash
+pnpm add -D eslint @eslint/js typescript-eslint
+```
+
+### 配置（Flat Config, ESLint 9+）
+
+```ts filename="eslint.config.mts"
+import tseslint from 'typescript-eslint'
+import js from '@eslint/js'
+
+export default tseslint.config(
+  js.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
+  {
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname
+      }
+    }
+  },
+  {
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
+      '@typescript-eslint/array-type': ['error', { default: 'array' }]
+    }
+  }
+)
+```
+
+### 为 ESLint 配置 tsconfig 检查范围
+
+```json filename="tsconfig.eslint.json"
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "eslint.config.mts", "vite.config.ts"]
+}
+```
+
+### React 项目的 ESLint 规则
+
+```ts
+rules: {
+  '@typescript-eslint/consistent-type-imports': 'error',
+  '@typescript-eslint/no-misused-promises': ['error', {
+    checksVoidReturn: { attributes: false }
+  }],
+  '@typescript-eslint/no-unnecessary-condition': 'error',
+  '@typescript-eslint/strict-boolean-expressions': 'error'
+}
+```
+
+## Prettier
+
+```json filename=".prettierrc"
+{
+  "semi": false,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "printWidth": 100,
+  "tabWidth": 2
+}
+```
+
+```bash
+pnpm add -D prettier eslint-config-prettier
+```
+
+```ts filename="eslint.config.mts"
+import prettier from 'eslint-config-prettier'
+
+export default tseslint.config(
+  // ... 其他配置
+  prettier  // 放在最后，覆盖之前的格式化规则
+)
+```
+
+```json filename="package.json"
+{
+  "scripts": {
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  }
+}
+```
+
+## 运行 TypeScript
+
+### tsx（推荐——ESM + 即时执行）
+
+```bash
+pnpm add -D tsx
+
+# 运行
+pnpm tsx src/server.ts
+
+# Watch 模式
+pnpm tsx --watch src/server.ts
+```
+
+### ts-node
+
+```bash
+pnpm add -D ts-node
+
+pnpm ts-node src/script.ts
+```
+
+## 类型检查命令
+
+```json filename="package.json"
+{
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "typecheck:watch": "tsc --noEmit --watch",
+    "build": "tsc && vite build"
+  }
+}
+```
+
+### 项目引用 + 增量编译
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo"
+  },
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/ui" }
+  ]
+}
+```
+
+## CI/CD 中的 TypeScript
+
+### GitHub Actions
+
+```yaml filename=".github/workflows/ci.yml"
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+```
+
+## DefinitelyTyped 和 @types
+
+```bash
+# 安装社区维护的类型定义
+pnpm add -D @types/react @types/react-dom @types/node
+
+# 查看已安装的类型包
+ls node_modules/@types/
+```
+
+### 验证 @types 版本
+
+```bash
+pnpm add -D @types/react@latest @types/react-dom@latest
+```
+
+## 构建与发布
+
+### tsup / unbuild（打包 TypeScript 库）
+
+```bash
+pnpm add -D tsup
+```
+
+```ts filename="tsup.config.ts"
+import { defineConfig } from 'tsup'
+
+export default defineConfig({
+  entry: ['src/index.ts'],
+  format: ['esm', 'cjs'],
+  dts: true,     // 生成 .d.ts
+  clean: true,
+  sourcemap: true
+})
+```
+
+### package.json exports
+
+```json
+{
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs"
+}
+```
+
+## Source Map 调试
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true
+  }
+}
+```
+
+- `sourceMap`: 运行时调试可映射回 `.ts` 源码
+- `declarationMap`: 在 IDE 中跳转定义时直达 `.ts` 源文件而非 `.d.ts`
+
+## 类型覆盖率分析
+
+```bash
+# type-coverage 工具
+npx type-coverage --detail
+
+# 输出：
+# 1487 / 1500 99.13%
+# 未覆盖的文件...
+```
+
+```bash
+pnpm add -D type-coverage
+```
+
+```json filename="package.json"
+{
+  "scripts": {
+    "type-coverage": "type-coverage --detail --ignore-files '**/*.test.ts'"
+  }
+}
+```
+
+## 常用工具速查
+
+| 工具 | 用途 | 替代品 |
+|------|------|--------|
+| `typescript-eslint` | 类型感知的 ESLint 规则 | - |
+| `prettier` | 代码格式化 | `dprint` |
+| `tsx` | 直接执行 .ts 文件 | `ts-node`, `tsimp` |
+| `tsup` | 打包 TS 库 | `unbuild`, `rollup` |
+| `tsc --noEmit` | 仅类型检查 | - |
+| `type-coverage` | 类型覆盖率 | - |
+| `knip` | 未使用依赖检测 | `depcheck` |
+| `cspell` | 拼写检查 | - |
+
+## 常见项目配置模板
+
+```json filename="package.json scripts"
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix .",
+    "format": "prettier --write 'src/**/*.{ts,tsx,json}'",
+    "format:check": "prettier --check 'src/**/*.{ts,tsx,json}'",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "prepare": "husky"
+  }
+}
+```
+
+## 陷阱
+
+### 1. 跳过 skipLibCheck 会隐藏真实的类型错误
+
+```json
+// ❌ 尽量不要依赖此选项
+{ "compilerOptions": { "skipLibCheck": true } }
+
+// ✅ 如果确实因为第三方类型导致构建失败，
+// 升级 @types 版本而非跳过检查
+```
+
+### 2. @types 版本与库版本不一致
+
+```bash
+# ❌ 危险：@types/react 版本过旧导致缺新类型
+pnpm list @types/react
+# 检查是否与 react 主版本一致
+```
+
+### 3. ts-node vs tsx 的 ESM/CJS 差异
+
+```bash
+# ts-node 默认 CJS，配置 ESM 复杂
+# tsx 原生支持 ESM，推荐用于新项目
+```
+
+## 最佳实践
+
+### ✅ CI 中运行 typecheck + lint 双检查
+
+```yaml
+- run: pnpm typecheck && pnpm lint
+```
+
+### ✅ 使用 tsc --noEmit 进行快速类型检查
+
+```bash
+pnpm exec tsc --noEmit  # 最快（跳过增量信息写入）
+```
+
+### ✅ 库项目生成 declaration + declarationMap
+
+```json
+{ "compilerOptions": { "declaration": true, "declarationMap": true } }
+```
+
+下一章 [最佳实践](/ts/best-practices) 介绍 TypeScript 项目中的代码组织与设计原则。

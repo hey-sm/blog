@@ -1,0 +1,332 @@
+---
+title: 最佳实践
+description: TypeScript 项目最佳实践：类型设计原则、any 治理、性能优化、常见陷阱与逃生舱、代码组织策略
+---
+
+# 最佳实践
+
+汇总 TypeScript 项目中经过验证的设计决策、常见陷阱和推荐实践。
+
+## 类型设计原则
+
+### 1. 优先使用类型推断，而非显式标注
+
+```ts
+// ❌ 过度标注
+const count: number = 0
+const name: string = 'Alice'
+const items: string[] = []
+
+// ✅ 让 TypeScript 推断
+const count = 0
+const name = 'Alice'
+const items: string[] = []  // 空数组需要标注
+```
+
+**原则**：标注信息量（参数、返回值）> 推断能力（变量初始化）。
+
+### 2. 使用 interface 描述对象形状
+
+```ts
+// ✅ 默认使用 interface
+interface User {
+  id: number
+  name: string
+  email: string
+}
+
+// ✅ 需要联合/映射/工具类型时用 type
+type UserStatus = 'active' | 'inactive' | 'banned'
+type UserUpdate = Partial<Pick<User, 'name' | 'email'>>
+```
+
+### 3. 单数据源原则
+
+```ts
+// ❌ 重复定义
+interface User {
+  id: number
+  name: string
+  email: string
+}
+type CreateUserInput = {
+  name: string
+  email: string
+  password: string
+}
+
+// 如果 User 的 name 改为 fullname，CreateUserInput 不会自动更新
+
+// ✅ 从原始类型派生
+type CreateUserInput = Pick<User, 'name' | 'email'> & { password: string }
+```
+
+### 4. 不要过早优化类型
+
+```ts
+// ❌ 过度抽象
+type AbstractRepository<T extends Record<string, unknown>, ID extends string | number, Q extends Record<string, unknown>> = {
+  findById(id: ID): Promise<T | null>
+  query(q: Q): Promise<T[]>
+  save(entity: T): Promise<T>
+}
+
+// ✅ 先按需定义
+interface UserRepository {
+  findById(id: number): Promise<User | null>
+  list(): Promise<User[]>
+  save(user: User): Promise<User>
+}
+
+// 当出现 3 个类似的 Repository 时再考虑抽象
+```
+
+## any 治理
+
+### any 的替代方案
+
+```ts
+// ❌ any
+function process(data: any) {
+  return data.value
+}
+
+// ✅ unknown + 类型守卫
+function process(data: unknown) {
+  if (typeof data === 'object' && data !== null && 'value' in data) {
+    return (data as { value: unknown }).value
+  }
+  return undefined
+}
+
+// ✅ 泛型
+function process<T extends { value: unknown }>(data: T) {
+  return data.value
+}
+
+// ✅ 具体类型
+function process(data: Record<string, unknown>) {
+  return data.value
+}
+```
+
+### any 逃逸场景
+
+```ts
+// 场景 1：第三方无类型库
+declare module 'untyped-lib' {
+  // ✅ 至少声明必要的类型
+  export function doWork(input: string): number
+  export const VERSION: string
+}
+
+// 场景 2：渐进迁移
+// ✅ 用 @ts-expect-error 明确标记而非 any
+// @ts-expect-error - deprecated API, remove after migration to v2
+oldApiCall()
+
+// 场景 3：JSON 解析
+const data = JSON.parse(raw) as unknown  // 必须是 unknown而非 any
+if (isUser(data)) { /* ... */ }
+```
+
+### eslint 禁止 any
+
+```ts
+// @typescript-eslint/no-explicit-any: 'warn'
+// 对必须使用的 any 处加 eslint-disable 注释
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+```
+
+## strict 模式
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "strict": true  // 开启全部严格检查
+  }
+}
+```
+
+`strict: true` 等价于开启：
+
+| 标志 | 作用 | 缺失风险 |
+|------|------|---------|
+| `strictNullChecks` | null/undefined 不赋值给其他类型 | 运行时 TypeError |
+| `strictFunctionTypes` | 严格函数参数逆变检查 | 回调类型不匹配 |
+| `strictBindCallApply` | bind/call/apply 严格检查 | 参数数量/类型错误 |
+| `strictPropertyInitialization` | 类属性必须初始化 | undefined 属性访问 |
+| `noImplicitAny` | 禁止隐式 any | 失去类型安全性 |
+| `noImplicitThis` | 禁止隐式 this | this 类型错误 |
+| `useUnknownInCatchVariables` | catch 变量为 unknown | any 类型 catch |
+| `alwaysStrict` | 输出 "use strict" | 兼容性问题 |
+
+## 文件组织
+
+### 推荐结构
+
+```
+src/
+├── components/          # React 组件
+│   └── Button/
+│       ├── Button.tsx
+│       ├── Button.test.tsx
+│       └── index.ts     # barrel export
+├── hooks/               # 自定义 Hooks
+├── services/            # 业务逻辑
+├── types/               # 共享类型定义
+│   ├── api.ts           # API 相关类型
+│   ├── domain.ts        # 领域对象类型
+│   └── util.d.ts        # 全局增强/模块声明
+├── utils/               # 工具函数
+└── App.tsx
+```
+
+### 类型文件原则
+
+```ts
+// ✅ 按领域组织类型，而非按技术
+// types/domain.ts    → User, Product, Order
+// types/api.ts       → ApiResponse<T>, Paginated<T>
+// types/component.ts → ButtonProps, ModalProps
+
+// ❌ 单个 types.ts 文件堆积所有类型
+```
+
+## 常用模式
+
+### 品牌类型避免混淆
+
+```ts
+type UserId = Brand<number, 'UserId'>
+type PostId = Brand<number, 'PostId'>
+
+function getUser(id: UserId): Promise<User> { /* ... */ }
+function getPost(id: PostId): Promise<Post> { /* ... */ }
+
+const userId = 1 as UserId
+const postId = 1 as PostId
+
+getUser(userId)   // ✅
+// getUser(postId)  // ❌ 错误
+```
+
+### 穷尽性检查
+
+```ts
+type Action = 'create' | 'read' | 'update' | 'delete'
+
+function mapAction(action: Action): string {
+  switch (action) {
+    case 'create': return 'POST'
+    case 'read': return 'GET'
+    case 'update': return 'PUT'
+    case 'delete': return 'DELETE'
+    default:
+      // ✅ 如果遗漏任何一个 case，这里编译失败
+      const _: never = action
+      return _
+  }
+}
+```
+
+### 类型安全的事件处理器
+
+```tsx
+// ❌ 丢失类型信息
+const handleChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
+  console.log(e.target.value)
+}
+
+// ✅ 使用具体元素类型
+const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  console.log(e.target.value)
+}
+```
+
+## 性能优化
+
+### 1. 使用 interface 而非 type（略微更快的类型检查）
+
+```ts
+// ✅ interface 在类型缓存方面有优势
+interface Props {
+  name: string
+}
+```
+
+### 2. 避免过大的联合类型
+
+```ts
+// ❌ 100+ 成员的联合类型影响编辑体验
+type Colors = 'red' | /* ... 100 more */ | 'blue'
+
+// ✅ 使用模板字面量替代枚举大量常量
+// 或接受 string 类型 + 运行时验证
+```
+
+### 3. project references 加速大型 monorepo
+
+```json filename="tsconfig.json"
+{
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/web" }
+  ]
+}
+```
+
+## 常见陷阱
+
+### 1. 不正确的 as 断言
+
+```ts
+// ❌ 掩盖了缺失的属性
+const user = { name: 'Alice' } as User
+
+// ✅ 满足完整的类型要求
+const user: User = { id: 1, name: 'Alice', email: 'alice@example.com' }
+```
+
+### 2. 枚举的运行时开销
+
+```ts
+// ❌ 枚举产生额外 JS 代码
+enum Status { Active, Inactive }
+
+// ✅ 字符串字面量——零运行时开销
+type Status = 'active' | 'inactive'
+const STATUS = ['active', 'inactive'] as const
+```
+
+### 3. Object、object、{} 的迷惑
+
+```ts
+// ❌ Object：几乎没用——任何非原始类型
+let a: Object = 42  // 甚至 number 也满足（自动装箱）
+
+// ⚠️ object：任何非原始类型——不能访问任何属性
+let b: object = { name: 'Alice' }
+// b.name  // ❌ 错误
+
+// ✅ {}：除了 null/undefined 之外的所有值（TS 4.8+）
+let c: {} = 42  // ✅
+c.toString()    // ✅
+
+// ✅ 实际要描述"任意对象"时用 Record
+let d: Record<string, unknown> = { name: 'Alice' }
+```
+
+## 终极建议
+
+| # | 建议 |
+|---|------|
+| 1 | `strict: true` 是新项目的底线 |
+| 2 | 用 `unknown` 而不是 `any`，加上类型守卫 |
+| 3 | 优先类型推断，只在边界处显式标注 |
+| 4 | 工具类型 + 派生优于手动重复定义 |
+| 5 | 让编译器帮你检查穷尽性 |
+| 6 | 不做未来需求的类型设计——等出现 3 个相似场景再抽象 |
+| 7 | `// @ts-expect-error` 优于 `as any` |
+
+下一章 [实战案例](/ts/real-world) 展示一个完整的 TypeScript + React CRUD 项目示例。

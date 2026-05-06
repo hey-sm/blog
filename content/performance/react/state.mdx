@@ -1,0 +1,633 @@
+---
+title: 状态拆分与 Context
+description: State Colocation、Context 拆分与替代方案、状态管理库的性能特征
+---
+
+# 状态拆分与 Context
+
+> "状态放在哪里"是 React 性能优化中最被低估的决策。
+
+很多 React 性能问题的根源不是渲染逻辑，而是**状态位置不当**：把全局只用一处的状态放到顶层，把频繁变化的输入状态放到 Context——都会让大片组件树被无效重渲染。本章讲三件事：状态如何下沉、Context 如何拆分、何时需要外部状态管理库。
+
+## State Colocation：状态放在最低必要层级
+
+> **核心原则：state 应该放在"使用它的最低公共祖先"。**
+
+```jsx
+// ❌ search 状态在顶层 → 整个 App 都重渲染
+function App() {
+  const [search, setSearch] = useState('')
+
+  return (
+    <Layout>
+      <Sidebar />
+      <Main>
+        <SearchBar value={search} onChange={setSearch} />
+        <SearchResults query={search} />
+        <ExpensiveDashboard />   {/* 与 search 无关，但每次输入都重渲染 */}
+      </Main>
+    </Layout>
+  )
+}
+```
+
+修复方法 1：**state 下沉**到只用它的子组件：
+
+```jsx
+// ✅ search 下沉到 SearchSection
+function App() {
+  return (
+    <Layout>
+      <Sidebar />
+      <Main>
+        <SearchSection />        {/* 内部持有 search 状态 */}
+        <ExpensiveDashboard />   {/* 不受影响 */}
+      </Main>
+    </Layout>
+  )
+}
+
+function SearchSection() {
+  const [search, setSearch] = useState('')
+  return (
+    <>
+      <SearchBar value={search} onChange={setSearch} />
+      <SearchResults query={search} />
+    </>
+  )
+}
+```
+
+修复方法 2：**children 模式**（详见 [渲染机制](/performance/react/rendering#children-模式)）：
+
+```jsx
+function App() {
+  return (
+    <Layout>
+      <Sidebar />
+      <Main>
+        <SearchSection>
+          <ExpensiveDashboard />   {/* 通过 children 传入，引用稳定 */}
+        </SearchSection>
+      </Main>
+    </Layout>
+  )
+}
+
+function SearchSection({ children }) {
+  const [search, setSearch] = useState('')
+  return (
+    <>
+      <SearchBar value={search} onChange={setSearch} />
+      <SearchResults query={search} />
+      {children}
+    </>
+  )
+}
+```
+
+### 何时需要"上提" state
+
+- 多个兄弟组件都需要这个 state → 提到最低公共祖先
+- 路由切换需要保留 → 提到路由层（或路由库管理）
+- 持久化跨页面 → URL params / localStorage / 状态库
+
+### 实战：搜索表单
+
+```jsx
+// 高频输入 + 远程搜索的经典场景
+function SearchPage() {
+  const [query, setQuery] = useState('')             // 高频变化
+  const [filters, setFilters] = useState({})         // 中频变化
+  const [results, setResults] = useState([])         // 异步更新
+
+  // ❌ 这样写，输入一个字符全页面重渲染 3 次
+  return (
+    <>
+      <Filters value={filters} onChange={setFilters} />
+      <SearchInput value={query} onChange={setQuery} />
+      <Results data={results} />
+    </>
+  )
+}
+```
+
+```jsx
+// ✅ 拆开
+function SearchPage() {
+  return (
+    <>
+      <FiltersSection />     {/* 自管 filters */}
+      <SearchSection />       {/* 自管 query */}
+      <ResultsSection />      {/* 订阅查询参数（如通过 zustand / URL） */}
+    </>
+  )
+}
+```
+
+跨组件通信用 URL params 或外部 store——不要把"通信状态"塞进顶层组件。
+
+## Context 的真实成本
+
+Context 是"跨层级传递数据"的官方方案，但有重要的性能特征：
+
+> **Context 值变化时，所有消费此 Context 的组件都会重渲染——无论它们是否使用了变化的字段。**
+
+```jsx
+const AppCtx = createContext(null)
+
+function Provider({ children }) {
+  const [user, setUser] = useState(null)
+  const [theme, setTheme] = useState('light')
+  const [count, setCount] = useState(0)
+
+  // ❌ 一个对象包所有：count 变化也让 user / theme 消费者重渲染
+  const value = { user, theme, count, setUser, setTheme, setCount }
+  return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>
+}
+
+function UserCard() {
+  const { user } = useContext(AppCtx)   // 只用 user
+  return <div>{user?.name}</div>
+}
+
+function Counter() {
+  const { count } = useContext(AppCtx)
+  // 即使 user 变化与 Counter 无关，Counter 也会重渲染
+}
+```
+
+### Context 重渲染的两个因素
+
+```text
+组件重渲染 = (Context value 引用变化) × (组件订阅了此 Context)
+```
+
+要避免：
+
+1. **Context value 不必要地新引用**（每次 Provider 渲染都新对象）
+2. **过宽的 Context**（一个 Context 承担太多职责）
+
+## Context 拆分
+
+### 按职责拆 Provider
+
+```jsx
+// ✅ 拆成多个 Provider
+const UserCtx = createContext(null)
+const ThemeCtx = createContext('light')
+const CounterCtx = createContext(0)
+
+function Providers({ children }) {
+  const [user, setUser] = useState(null)
+  const [theme, setTheme] = useState('light')
+  const [count, setCount] = useState(0)
+
+  return (
+    <UserCtx.Provider value={{ user, setUser }}>
+      <ThemeCtx.Provider value={{ theme, setTheme }}>
+        <CounterCtx.Provider value={{ count, setCount }}>
+          {children}
+        </CounterCtx.Provider>
+      </ThemeCtx.Provider>
+    </UserCtx.Provider>
+  )
+}
+```
+
+效果：`count` 变化只让 `CounterCtx` 的消费者重渲染。
+
+### 把"值"与"setter"拆开
+
+```jsx
+// 思路：状态变化频繁 → 频繁触发 value Context
+//       但 setter 通常引用稳定 → 单独 Context 永不变
+const StateCtx = createContext(null)
+const DispatchCtx = createContext(null)
+
+function Provider({ children }) {
+  const [state, dispatch] = useReducer(reducer, initial)
+
+  return (
+    <DispatchCtx.Provider value={dispatch}>     {/* dispatch 永远稳定 */}
+      <StateCtx.Provider value={state}>
+        {children}
+      </StateCtx.Provider>
+    </DispatchCtx.Provider>
+  )
+}
+
+// 只用 dispatch 的组件不会因 state 变化重渲染
+function ResetButton() {
+  const dispatch = useContext(DispatchCtx)
+  return <button onClick={() => dispatch({ type: 'reset' })}>Reset</button>
+}
+```
+
+### useMemo 稳定 Context value
+
+```jsx
+// ❌ 每次 Provider 渲染都新对象 → 所有消费者重渲染（即使 user 没变）
+function Provider({ children, user, setUser }) {
+  return (
+    <UserCtx.Provider value={{ user, setUser }}>
+      {children}
+    </UserCtx.Provider>
+  )
+}
+
+// ✅ value 引用稳定（user 没变时）
+function Provider({ children, user, setUser }) {
+  const value = useMemo(() => ({ user, setUser }), [user, setUser])
+  return <UserCtx.Provider value={value}>{children}</UserCtx.Provider>
+}
+```
+
+## use-context-selector
+
+社区库 [`use-context-selector`](https://github.com/dai-shi/use-context-selector) 提供"按字段订阅"能力：
+
+```jsx
+import { createContext, useContextSelector } from 'use-context-selector'
+
+const Ctx = createContext({ user: null, theme: 'light', count: 0 })
+
+// 只在 user 变化时重渲染
+function UserCard() {
+  const user = useContextSelector(Ctx, s => s.user)
+  return <div>{user?.name}</div>
+}
+```
+
+底层基于订阅模式 + 浅比较——选中的字段不变就不渲染。
+
+### 何时考虑
+
+- Context 已经很大且不易拆分
+- 多组件订阅不同字段
+- 不想引入完整的状态库
+
+不是所有项目都需要——能拆 Context 就先拆。
+
+## React 19 的 `use(Context)`
+
+React 19 引入 `use()` Hook，可以在条件中读取 Context（普通 `useContext` 必须在顶层）：
+
+```jsx
+import { use } from 'react'
+
+function Card({ id }) {
+  if (!id) return null
+  const ctx = use(SomeCtx)   // 条件中可调用
+  return <div>{ctx.name}</div>
+}
+```
+
+性能上与 `useContext` 等价——但提供了更灵活的代码组织方式。
+
+## 状态管理库的性能特征
+
+当应用复杂到 Context 不够用时，外部状态库登场。各库的性能特征不同：
+
+### Redux Toolkit + React-Redux
+
+```jsx
+import { createSlice, configureStore } from '@reduxjs/toolkit'
+import { useSelector, useDispatch } from 'react-redux'
+
+const userSlice = createSlice({
+  name: 'user',
+  initialState: { name: '', age: 0 },
+  reducers: {
+    setName: (state, action) => { state.name = action.payload }
+  }
+})
+
+// 使用：按字段订阅
+function UserName() {
+  const name = useSelector(s => s.user.name)
+  return <div>{name}</div>
+}
+```
+
+性能特征：
+
+- `useSelector` 默认 `===` 比较，引用变化触发重渲染
+- 可指定 `shallowEqual` 或 `deepEqual` 比较
+- 每次 dispatch 通知所有订阅者，订阅者各自比较是否变化
+
+```jsx
+// 多字段选择 + shallowEqual
+import { shallowEqual } from 'react-redux'
+
+const { name, age } = useSelector(s => ({
+  name: s.user.name,
+  age: s.user.age
+}), shallowEqual)
+```
+
+### Zustand
+
+```jsx
+import { create } from 'zustand'
+
+const useStore = create((set) => ({
+  count: 0,
+  user: null,
+  setCount: (n) => set({ count: n }),
+  setUser: (u) => set({ user: u })
+}))
+
+// 使用：自动按 selector 订阅
+function Counter() {
+  const count = useStore(s => s.count)   // 仅 count 变化时重渲染
+  return <div>{count}</div>
+}
+
+// 选 setter（引用稳定）
+function Increment() {
+  const setCount = useStore(s => s.setCount)
+  return <button onClick={() => setCount(prev => prev + 1)}>+</button>
+}
+```
+
+性能特征：
+
+- 极轻量（~ 1 KB）
+- 默认 `===` 比较 selector 输出
+- 多字段订阅用 `shallow`：
+
+```jsx
+import { useShallow } from 'zustand/react/shallow'
+
+const { name, age } = useStore(useShallow(s => ({
+  name: s.user.name,
+  age: s.user.age
+})))
+```
+
+### Jotai
+
+```jsx
+import { atom, useAtom } from 'jotai'
+
+const countAtom = atom(0)
+const userAtom = atom(null)
+
+function Counter() {
+  const [count, setCount] = useAtom(countAtom)
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>
+}
+```
+
+性能特征：
+
+- 原子化——每个 atom 独立追踪订阅
+- 派生 atom 自动追踪依赖
+- 类似 Recoil 但更轻
+
+```jsx
+// 派生 atom（类似 computed）
+const doubleCountAtom = atom(get => get(countAtom) * 2)
+
+function DoubleCount() {
+  const [doubled] = useAtom(doubleCountAtom)
+  return <div>{doubled}</div>
+}
+```
+
+### Valtio
+
+```jsx
+import { proxy, useSnapshot } from 'valtio'
+
+const state = proxy({ count: 0, user: null })
+
+function Counter() {
+  const snap = useSnapshot(state)
+  return (
+    <button onClick={() => state.count++}>{snap.count}</button>
+    //                       ↑ 直接修改 proxy
+  )
+}
+```
+
+性能特征：
+
+- 类似 Vue 的细粒度响应式
+- `useSnapshot` 自动追踪当前组件**实际访问**的字段
+- 只有访问字段变化才重渲染
+
+### TanStack Query / SWR
+
+服务器状态独立管理：
+
+```jsx
+import { useQuery } from '@tanstack/react-query'
+
+function UserCard({ id }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['user', id],
+    queryFn: () => fetch(`/api/users/${id}`).then(r => r.json())
+  })
+  // 自动处理：缓存、去重、重试、轮询、失效
+}
+```
+
+性能特征：
+
+- 全局缓存：跨组件共享
+- 自动去重：1 秒内多个相同请求只发一次
+- Stale-while-revalidate：立即返回旧数据 + 后台刷新
+- 选择器：按字段订阅，避免无关字段变化引起重渲染
+
+```jsx
+// 只在 data.name 变化时重渲染
+const name = useQuery({
+  queryKey: ['user', id],
+  queryFn: fetchUser,
+  select: data => data.name
+})
+```
+
+## 性能对比
+
+```text
+场景：1000 个组件，分别订阅 store 的不同字段
+某字段变化时，多少组件重渲染？
+
+useState（顶层）              ── 1000 个全部重渲染（父变子变）
+Context（一个大对象）          ── 1000 个全部重渲染
+拆 Context                   ── 仅订阅该字段的组件
+use-context-selector          ── 仅访问该字段的组件
+Redux + useSelector(field)    ── 仅订阅该字段的组件
+Zustand selector             ── 仅订阅该字段的组件
+Jotai atom                    ── 仅订阅该 atom 的组件
+Valtio                        ── 仅访问该字段的组件
+```
+
+**性能从粗到细**：原生 useState/Context（粗） → 拆 Context（中） → 状态库（细）。
+
+但**复杂度**也成正比上升——不要过度选型。
+
+## 选型决策树
+
+```text
+应用规模？
+│
+├─ 小（< 30 组件）
+│   └─ useState + props drilling 即可
+│
+├─ 中（< 200 组件）
+│   ├─ 主要服务器状态 ──► TanStack Query
+│   └─ 客户端状态 ──► Context 拆分 + useReducer
+│
+└─ 大（200+ 组件）
+    ├─ 服务器状态 ──► TanStack Query / RTK Query
+    └─ 客户端状态：
+        ├─ 倾向函数式 / 全栈 ──► Redux Toolkit
+        ├─ 倾向轻量 / 自由 ──► Zustand
+        ├─ 倾向原子化 / 派生 ──► Jotai
+        └─ 倾向 mutable / Vue 习惯 ──► Valtio
+```
+
+> 服务器状态与客户端状态分开管理是最重要的架构决策——把 API 数据塞 Redux 是过去 10 年最常见的错误。
+
+## URL 是被低估的状态容器
+
+很多状态适合放在 URL 而非内存：
+
+```text
+search query   ──► /search?q=xxx
+filter         ──► /products?category=shoes&sort=price-desc
+分页           ──► /list?page=2
+模态框         ──► /products?modal=details&id=123
+```
+
+收益：
+
+- 可分享 / 可收藏
+- 浏览器前进 / 后退自然支持
+- 跨刷新保持
+
+```jsx
+// 用 useSearchParams（React Router / Next.js）
+import { useSearchParams } from 'react-router-dom'
+
+function SearchPage() {
+  const [params, setParams] = useSearchParams()
+  const query = params.get('q') ?? ''
+
+  return (
+    <input
+      value={query}
+      onChange={e => setParams({ q: e.target.value })}
+    />
+  )
+}
+```
+
+## 表单状态的特殊处理
+
+表单是**高频变化 + 临时 + 只在表单内部用**——不应放全局状态：
+
+```jsx
+// ❌ 用全局状态管理表单
+const useFormStore = create((set) => ({ formData: {}, ... }))
+
+// ✅ 用 react-hook-form / TanStack Form
+import { useForm } from 'react-hook-form'
+
+function MyForm() {
+  const { register, handleSubmit } = useForm()
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      <input {...register('name')} />
+    </form>
+  )
+}
+```
+
+`react-hook-form` 默认是**非受控**——输入不触发任何 React 渲染（直接读 DOM）。这是表单性能的最优解。详见 [动画与表单](/performance/react/animations-forms)。
+
+## Context + useReducer 的轻量"状态库"
+
+不引入第三方库，自己造一个：
+
+```jsx
+const StateCtx = createContext(null)
+const DispatchCtx = createContext(null)
+
+function reducer(state, action) {
+  switch (action.type) {
+    case 'increment': return { ...state, count: state.count + 1 }
+    case 'setUser': return { ...state, user: action.payload }
+    default: return state
+  }
+}
+
+export function Provider({ children }) {
+  const [state, dispatch] = useReducer(reducer, { count: 0, user: null })
+  return (
+    <DispatchCtx.Provider value={dispatch}>
+      <StateCtx.Provider value={state}>
+        {children}
+      </StateCtx.Provider>
+    </DispatchCtx.Provider>
+  )
+}
+
+// 自定义 selector hook
+export function useAppState(selector) {
+  return selector(useContext(StateCtx))
+}
+
+export function useAppDispatch() {
+  return useContext(DispatchCtx)
+}
+
+// 使用
+const count = useAppState(s => s.count)
+const dispatch = useAppDispatch()
+```
+
+⚠️ 注意：原生 `useContext` 是"全订阅"——`useAppState` 这种写法**仍会**在 state 任何字段变化时重渲染。要真正按字段，仍需 `use-context-selector`。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 顶层 useState 装表单输入 | 每个字符全树重渲染 | state colocation |
+| 一个 Context 装所有状态 | 任何变化全部重渲染 | 拆 Context |
+| Context value 不 useMemo | 每次 Provider 重渲染都新引用 | useMemo 包 value |
+| 把服务器数据塞 Redux | 复杂的同步、缓存、去重逻辑 | TanStack Query |
+| 受控表单 + 顶层状态 | 输入卡顿 | react-hook-form |
+| 全局状态做"页面间通信" | 跨路由难以维护 | URL params |
+| 滥用 useReducer | 简单状态过度复杂 | useState 即可 |
+| 状态库选型多次切换 | 重写成本高 | 早期决策慎重，统一团队风格 |
+
+## 实战诊断
+
+```text
+1. Profiler 录制操作（输入 / 点击）
+   └─ 观察哪些组件被渲染
+
+2. 看渲染原因：
+   ├─ 父变 ──► state 是否在过高层级？state colocation
+   ├─ Context 变 ──► 拆 Context 或换状态库
+   ├─ 多个无关字段一起变 ──► useMemo / 选择器
+   └─ 单字段订阅没生效 ──► 检查 selector 或浅比较
+
+3. 重构后验证：再次录制，确认渲染数量下降
+```
+
+## 小结
+
+- "state 放哪里"是性能优化最被低估的决策——状态下沉是治本之策；
+- Context 不是状态管理库——它的"全订阅"特性让它在频繁变化的场景下劣势明显；
+- Context 拆分（按职责）+ 拆"值/setter"+ useMemo 稳定 value 是 Context 优化三件套；
+- 服务器状态用 TanStack Query / SWR 独立管理，与客户端状态分开是关键架构决策；
+- Zustand / Jotai / Valtio 提供更细粒度的订阅，但选型应保守——能用拆 Context 就先用；
+- URL 是被低估的状态容器，能放 URL 的就别放内存；
+- 表单状态用 react-hook-form 非受控——是表单性能的最佳实践；
+- use-context-selector 是 Context 优化的"重武器"，无需切换状态库就能获得字段级订阅。

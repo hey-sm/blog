@@ -1,0 +1,835 @@
+---
+title: JavaScript 优化
+description: async/defer、代码分割、Tree Shaking、长任务、Web Worker 与 Bundle 分析
+---
+
+# JavaScript 优化
+
+JavaScript 是现代 Web 应用最大的**主线程占用者**——每一字节 JS 都需要被下载、解析、编译、执行。同样大小的资源，1 MB JS 比 1 MB 图片对性能的影响要严重得多：图片是异步且可懒加载的，JS 经常阻塞解析或主线程。本章覆盖加载策略、代码分割、Tree Shaking、长任务拆分、Web Worker 与监控。
+
+## JavaScript 的成本结构
+
+```text
+1 MB JS（gzipped 250 KB）的真实成本：
+┌─ 网络下载    ────► 250 KB / 1 Mbps = 2 s
+├─ 解析（Parse） ───► ~ 100 ms（中端手机）
+├─ 编译（Compile）─► ~ 200 ms
+├─ 执行（Execute）─► 取决于代码逻辑，常 100–500 ms
+└─ 累计阻塞主线程 ─► 中端手机可能 1 s+
+```
+
+V8 解析与编译的成本约是图片解码的 5-10 倍。这就是为什么"JS 是性能第一杀手"。
+
+> 1 KB JS 的成本 ≈ 1 KB 图片成本的 5-10 倍。
+
+## 加载策略：`async` vs `defer`
+
+```html
+<!-- 同步（默认） -->
+<script src="a.js"></script>
+
+<!-- async：下载完立即执行，不保证顺序 -->
+<script src="a.js" async></script>
+
+<!-- defer：DOMContentLoaded 前执行，按顺序 -->
+<script src="a.js" defer></script>
+
+<!-- ES Module：默认 defer 行为 -->
+<script type="module" src="a.js"></script>
+
+<!-- ES Module + async -->
+<script type="module" src="a.js" async></script>
+```
+
+### 行为对比
+
+```text
+解析 HTML ──┬──► 发现 <script>
+            │
+            ├─► 同步：阻塞解析 ──► 下载 ──► 执行 ──► 继续解析
+            │                                    （高优先级，CSS 后）
+            │
+            ├─► async：并行下载 ──► 下载完立即停下解析执行 ──► 继续解析
+            │                      （任意顺序）
+            │
+            └─► defer：并行下载 ──► 等 HTML 解析完 ──► 按文档顺序执行
+                                   （DOMContentLoaded 之前）
+```
+
+### 何时用什么
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 应用主代码 | `defer` 或 `type="module"` |
+| 第三方分析 / 埋点 | `async` |
+| 第三方广告 | `async`（无依赖时） |
+| 必须先于 DOM 操作的库（jQuery → ...） | 重构为 defer + 事件监听 |
+| Polyfill | 同步 + 放最前 |
+
+### 实战示例
+
+```html
+<head>
+  <!-- 必须先于一切：polyfill -->
+  <script src="/polyfills.js"></script>
+
+  <!-- 应用代码 -->
+  <script src="/main.js" defer></script>
+  <script src="/feature.js" defer></script>
+
+  <!-- 第三方独立脚本 -->
+  <script src="https://example.com/analytics.js" async></script>
+  <script src="https://example.com/ads.js" async></script>
+</head>
+```
+
+### 内联脚本的陷阱
+
+```html
+<!-- ❌ 阻塞解析 -->
+<script>
+  const config = { theme: 'dark' }
+</script>
+<script src="/main.js" defer></script>
+
+<!-- 上面的 inline script 不能加 defer/async（HTML 规范规定） -->
+```
+
+正确做法：把内联代码放到 HTML 末尾，或通过全局变量传递：
+
+```html
+<head>
+  <script>window.__CONFIG__ = { theme: 'dark' }</script>
+  <script src="/main.js" defer></script>
+</head>
+```
+
+## 避免多个独立内联 `<script>`
+
+> "Avoid multiple inline JavaScript snippets"（roadmap 条目）
+
+每个内联 `<script>` 都创建一个独立的解析上下文：
+
+```html
+<!-- ❌ 6 个独立的解析上下文 -->
+<script>const a = 1</script>
+<script>const b = 2</script>
+<script>console.log(a + b)</script>
+...
+```
+
+虽然现代引擎对小段内联代码优化得很好，但散落的内联代码：
+
+1. **难以缓存**——任何一段变化整个 HTML 必须重传
+2. **CSP 障碍**——`script-src 'self'` 会拒绝内联（除非显式 `'unsafe-inline'` 或 nonce）
+3. **难以分析**——监控工具无法精确定位
+
+最佳实践：**单一引导**模式
+
+```html
+<head>
+  <!-- 一个内联块，传递服务端数据 -->
+  <script>
+    window.__APP_DATA__ = ${JSON.stringify(serverData)}
+  </script>
+  <script src="/main.js" defer></script>
+</head>
+```
+
+## 代码分割
+
+### 为什么需要分割
+
+单 bundle = 用户访问首页时下载所有路由 / 所有功能的代码。这违背了"按需加载"原则。
+
+```text
+单 bundle：
+首页 ──► 下载 1.5 MB ──► 解析 ──► 执行 ──► 可交互
+                                              首页只用了 200 KB
+
+分割后：
+首页 ──► 下载 200 KB ──► 解析 ──► 执行 ──► 可交互
+                                          访问 /profile 才下载 profile chunk
+```
+
+### 路由级分割
+
+#### React Router
+
+```jsx
+import { lazy, Suspense } from 'react'
+
+const Home = lazy(() => import('./Home'))
+const Profile = lazy(() => import('./Profile'))
+
+<Routes>
+  <Route path="/" element={
+    <Suspense fallback={<Loading />}>
+      <Home />
+    </Suspense>
+  } />
+  <Route path="/profile" element={
+    <Suspense fallback={<Loading />}>
+      <Profile />
+    </Suspense>
+  } />
+</Routes>
+```
+
+#### Next.js App Router
+
+每个 `app/路由/page.tsx` 自动是一个分割点，无需手动 `lazy`。
+
+#### Vue Router
+
+```js
+const routes = [
+  { path: '/', component: () => import('./Home.vue') },
+  { path: '/profile', component: () => import('./Profile.vue') }
+]
+```
+
+### 组件级分割
+
+```jsx
+// 模态框：用户点击才加载
+const HeavyModal = lazy(() => import('./HeavyModal'))
+
+function App() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button onClick={() => setOpen(true)}>Open</button>
+      {open && <Suspense fallback={null}><HeavyModal /></Suspense>}
+    </>
+  )
+}
+```
+
+### 第三方库分割
+
+把大型第三方库（如 `chart.js`、`monaco-editor`）分割到独立 chunk：
+
+```jsx
+// 仅在需要时加载图表库
+async function showChart() {
+  const { Chart } = await import('chart.js/auto')
+  new Chart(canvas, config)
+}
+```
+
+### 配置 chunk 策略
+
+#### Vite
+
+```js
+// vite.config.js
+export default {
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'ui-vendor': ['@radix-ui/react-dialog', '@radix-ui/react-popover'],
+          'data-vendor': ['axios', 'swr']
+        }
+      }
+    }
+  }
+}
+```
+
+#### webpack
+
+```js
+// webpack.config.js
+module.exports = {
+  optimization: {
+    splitChunks: {
+      chunks: 'all',
+      cacheGroups: {
+        vendor: {
+          test: /[\\/]node_modules[\\/]/,
+          name: 'vendor',
+          priority: 10
+        },
+        common: {
+          minChunks: 2,
+          name: 'common',
+          priority: 5
+        }
+      }
+    }
+  }
+}
+```
+
+### 分割的反模式
+
+| 反模式 | 后果 |
+| ------ | ---- |
+| 拆得太细（每页 50 chunks） | 多次 RTT 反而慢 |
+| 公共代码反复打包 | 总下载量增加 |
+| 关键路径上的代码也懒加载 | LCP 推迟 |
+| 同步 import 后 dynamic import 同模块 | 模块出现两次 |
+
+经验值：单 bundle < 200 KB（gzipped），单页面总 JS < 500 KB。
+
+## Tree Shaking
+
+> Tree Shaking = 静态分析后**删除未使用的导出**。
+
+### 工作原理
+
+依赖 ES Module 的静态结构（`import` / `export` 必须在顶层，不能动态拼接）：
+
+```js
+// utils.js
+export function used() {}
+export function unused() {}
+
+// main.js
+import { used } from './utils'
+used()
+
+// 构建后 unused 被删除
+```
+
+### 让 Tree Shaking 生效
+
+#### 1. 使用 ESM，不要用 CommonJS
+
+```js
+// ❌ CommonJS（无法分析）
+module.exports = { a, b, c }
+
+// ✅ ESM
+export const a = ...
+export const b = ...
+```
+
+#### 2. `package.json` 的 `sideEffects`
+
+告诉打包器哪些文件**没有副作用**（可以安全删除）：
+
+```json
+{
+  "name": "my-lib",
+  "sideEffects": false
+}
+```
+
+或针对特定文件：
+
+```json
+{
+  "sideEffects": [
+    "*.css",
+    "./src/polyfills.js"
+  ]
+}
+```
+
+CSS / polyfill 等有副作用的文件不能被摇掉。
+
+#### 3. 不要 default export 整包
+
+```js
+// ❌ 整包导出（难以摇）
+export default { a, b, c }
+import utils from './utils'
+utils.a()  // 打包器不知道 b、c 没用
+
+// ✅ 命名导出
+export const a = ...
+import { a } from './utils'
+```
+
+### 第三方库的 Tree Shaking
+
+#### Lodash
+
+```js
+// ❌ 引入整个 lodash（70 KB）
+import _ from 'lodash'
+_.debounce(fn, 100)
+
+// ✅ 按需导入（500 B）
+import debounce from 'lodash/debounce'
+debounce(fn, 100)
+
+// ✅ 用 lodash-es（ESM 原生）
+import { debounce } from 'lodash-es'
+```
+
+#### Moment.js → date-fns / day.js
+
+```js
+// ❌ Moment.js 整包 + 所有 locale ≈ 230 KB
+import moment from 'moment'
+
+// ✅ date-fns 按需导入 ≈ 几 KB
+import { format } from 'date-fns'
+import { zhCN } from 'date-fns/locale'
+
+// ✅ Day.js + 插件 ≈ 7 KB
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
+```
+
+#### React Icons / Heroicons
+
+```js
+// ❌ 引入整个图标库
+import { FiHome } from 'react-icons/fi'   // bundle 体积大
+
+// ✅ 按文件导入（建议工具自动转换）
+import FiHome from 'react-icons/fi/FiHome'
+```
+
+工具：[`babel-plugin-transform-imports`](https://www.npmjs.com/package/babel-plugin-transform-imports) 或 [`unplugin-auto-import`](https://github.com/unplugin/unplugin-auto-import)。
+
+### 副作用陷阱
+
+```js
+// ❌ 副作用导致整文件被保留
+import './polyfills'             // 注册全局
+import 'normalize.css'           // 注入样式
+console.log('module loaded')     // 顶层副作用
+```
+
+构建期会保留这些文件——这是设计正确的，但要意识到代价。
+
+## Minify 与压缩
+
+### Minify 工具对比
+
+| 工具 | 速度 | 压缩率 | 备注 |
+| ---- | ---- | ------ | ---- |
+| Terser | 慢（基线） | 高 | webpack 默认 |
+| esbuild | 极快（10-100x） | 略低（~3%） | Vite 默认 |
+| SWC | 快（5-50x） | 接近 Terser | Next.js / Turbopack |
+| LightningCSS | 快 | 高（含 CSS） | 适合现代项目 |
+
+### 实测对比（某 React 项目）
+
+| 工具 | 时间 | 体积 |
+| ---- | ---- | ---- |
+| 原始 | — | 1.2 MB |
+| Terser | 4.2 s | 380 KB |
+| esbuild | 0.3 s | 391 KB |
+| SWC | 0.6 s | 384 KB |
+
+**实践建议**：开发期用 esbuild（快），生产期可选 Terser（最小）或 SWC（平衡）。差异在 3% 以内时不值得为速度妥协。
+
+### Source Map 策略
+
+| 方案 | 体积 | 调试体验 | 安全性 |
+| ---- | ---- | -------- | ------ |
+| 不生成 | — | 差 | 最安全 |
+| inline-source-map | 大 | 好 | 暴露源码 |
+| source-map（独立 .map） | 中 | 好 | 不暴露（不上传 CDN） |
+| hidden-source-map | 中 | 错误监控可用 | 不暴露 |
+
+生产推荐 `hidden-source-map`：
+
+```js
+// vite.config.js
+export default {
+  build: {
+    sourcemap: 'hidden'  // 生成但 .js 中不引用
+  }
+}
+```
+
+构建后把 `.map` 文件上传到错误监控平台（Sentry / Bugsnag），CDN 上不放。
+
+## 长任务（Long Tasks）
+
+> 长任务 = 主线程上单次执行 > 50 ms 的 JS 任务。
+
+```text
+浏览器主线程时间片：
+├── 16.67 ms（60 FPS 一帧的预算）
+├── 50 ms 阈值（不影响输入响应）
+└── 100 ms 阈值（用户感觉"卡顿"）
+```
+
+长任务直接影响 INP / TBT 指标，是交互卡顿的元凶。
+
+### 监控长任务
+
+```js
+new PerformanceObserver(list => {
+  for (const entry of list.getEntries()) {
+    if (entry.duration > 100) {
+      console.warn('Long task:', entry.name, entry.duration, 'ms')
+      // 上报到监控
+      report({
+        name: 'long-task',
+        duration: entry.duration,
+        startTime: entry.startTime,
+        attribution: entry.attribution
+      })
+    }
+  }
+}).observe({ type: 'longtask', buffered: true })
+```
+
+### 拆分长任务的策略
+
+#### 1. `setTimeout(fn, 0)` 拆分循环
+
+```js
+// ❌ 一次性处理 10000 项，主线程阻塞 1+ 秒
+items.forEach(processItem)
+
+// ✅ 分块，每帧处理一批
+function processInChunks(items, chunkSize = 100) {
+  let i = 0
+  function next() {
+    const end = Math.min(i + chunkSize, items.length)
+    while (i < end) processItem(items[i++])
+    if (i < items.length) setTimeout(next, 0)
+  }
+  next()
+}
+```
+
+#### 2. `scheduler.yield()`（新 API）
+
+[Scheduler API](https://developer.mozilla.org/en-US/docs/Web/API/Scheduler) 提供更原生的 yield：
+
+```js
+async function processItems(items) {
+  for (const item of items) {
+    processItem(item)
+    if (navigator.scheduling?.isInputPending() ?? false) {
+      await scheduler.yield?.()
+    }
+  }
+}
+```
+
+#### 3. `requestIdleCallback`
+
+把非紧急任务放到浏览器空闲时间：
+
+```js
+requestIdleCallback(deadline => {
+  while (deadline.timeRemaining() > 0 && tasks.length) {
+    runOne(tasks.shift())
+  }
+}, { timeout: 1000 })
+```
+
+#### 4. React 18 `startTransition`
+
+```jsx
+import { startTransition } from 'react'
+
+function handleSearch(query) {
+  setQuery(query)                          // 紧急：输入框
+  startTransition(() => {
+    setResults(filterLargeList(query))     // 非紧急：搜索结果
+  })
+}
+```
+
+详见 [React 并发与代码分割](/performance/react-concurrent)。
+
+## Web Worker
+
+> 把 CPU 密集任务搬到**另一个线程**，主线程保持响应。
+
+### 适用场景
+
+- 解析大 JSON / CSV
+- 图片处理 / Canvas 计算
+- 加密 / hash
+- 复杂的算法（路径规划、AI 推理）
+- 大列表筛选 / 排序
+
+### 不适用
+
+- DOM 操作（Worker 无 DOM 访问权）
+- 极频繁的小数据交换（postMessage 序列化开销大）
+
+### 基础用法
+
+```js
+// worker.js
+self.addEventListener('message', (e) => {
+  const result = heavyCompute(e.data)
+  self.postMessage(result)
+})
+
+// main.js
+const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })
+worker.postMessage(data)
+worker.addEventListener('message', (e) => {
+  console.log('Result:', e.data)
+})
+```
+
+### Vite / webpack 集成
+
+```js
+// Vite
+import MyWorker from './worker?worker'
+const worker = new MyWorker()
+
+// 内联（小 worker）
+import MyWorker from './worker?worker&inline'
+```
+
+### Comlink：用 Promise 包裹 postMessage
+
+```js
+// worker.js
+import { expose } from 'comlink'
+expose({
+  add: (a, b) => a + b,
+  heavyCompute: (data) => /* ... */
+})
+
+// main.js
+import { wrap } from 'comlink'
+import MyWorker from './worker?worker'
+const api = wrap(new MyWorker())
+
+const result = await api.add(1, 2)
+const data = await api.heavyCompute(input)
+```
+
+### Transferable Objects
+
+避免大数据的序列化复制：
+
+```js
+const buffer = new ArrayBuffer(1024 * 1024 * 10)  // 10 MB
+worker.postMessage(buffer, [buffer])
+// 第二个参数：转移所有权 → 零拷贝
+// 注意：转移后 buffer 在主线程不可用
+```
+
+## 第三方脚本性能
+
+第三方脚本（埋点、A/B、广告、客服、社交分享）是性能损失的主要来源。
+
+### 影响
+
+- 占用 JS 解析 / 执行时间
+- 阻塞主线程
+- 触发额外的网络请求
+- 注入额外的 DOM
+- 带来不可预测的版本升级
+
+### 优化策略
+
+#### 1. 加载策略
+
+```html
+<!-- 必须最早执行（如错误监控） -->
+<script src="https://example.com/sentry.js"></script>
+
+<!-- 异步执行（埋点） -->
+<script src="https://example.com/analytics.js" async></script>
+
+<!-- 用户交互后才加载（客服 widget） -->
+<button onclick="loadChat()">Chat</button>
+<script>
+  function loadChat() {
+    const s = document.createElement('script')
+    s.src = 'https://example.com/chat.js'
+    document.head.appendChild(s)
+  }
+</script>
+```
+
+#### 2. Partytown：把第三方脚本搬到 Web Worker
+
+[Partytown](https://partytown.builder.io/) 是 Builder.io 出的工具，让第三方脚本在 Worker 中运行：
+
+```html
+<script src="/partytown/partytown.js"></script>
+<script type="text/partytown" src="https://www.googletagmanager.com/gtag/js?id=GA_ID"></script>
+```
+
+主线程零负担，但 DOM API 通过 proxy 转发——有少量延迟。
+
+#### 3. Resource Hints
+
+```html
+<link rel="preconnect" href="https://www.google-analytics.com">
+<link rel="dns-prefetch" href="https://example-cdn.com">
+```
+
+详见 [资源预加载](/performance/preload)。
+
+#### 4. 监控第三方影响
+
+```js
+// 用 PerformanceObserver 看第三方资源耗时
+new PerformanceObserver(list => {
+  for (const entry of list.getEntriesByType('resource')) {
+    const url = new URL(entry.name)
+    if (url.host !== location.host) {
+      console.log('3rd party:', url.host, entry.duration, 'ms')
+    }
+  }
+}).observe({ type: 'resource', buffered: true })
+```
+
+## Polyfill 的现代策略
+
+### 不要发整包 polyfill 给现代浏览器
+
+```html
+<!-- ❌ 所有用户都下载 polyfill -->
+<script src="/polyfills.js"></script>
+<script src="/main.js" defer></script>
+
+<!-- ✅ 仅老浏览器下载 -->
+<script type="module" src="/main.js"></script>
+<script nomodule src="/main.legacy.js"></script>
+```
+
+`type="module"` 与 `nomodule` 配合：现代浏览器只跑 module 版本，老浏览器只跑 nomodule 版本（带 polyfill）。
+
+### Vite 的 legacy 插件
+
+```js
+import legacy from '@vitejs/plugin-legacy'
+
+export default {
+  plugins: [
+    legacy({
+      targets: ['defaults', 'not IE 11'],
+      additionalLegacyPolyfills: ['regenerator-runtime/runtime']
+    })
+  ]
+}
+```
+
+自动生成现代 + 传统两套 bundle。
+
+### 按需 polyfill 服务
+
+[polyfill.io](https://polyfill.io)（注：2024 年因供应链事件需谨慎，建议自托管）根据 User-Agent 返回最小的 polyfill 集：
+
+```html
+<script src="https://cdn.polyfill.io/v3/polyfill.min.js?features=es2017"></script>
+```
+
+更安全的替代：[`@cfcs/polyfills`](https://github.com/cloudflare/polyfill-library) 自托管。
+
+## 长期保持依赖更新
+
+> "Keep your dependencies up to date"（roadmap 条目）
+
+依赖滞后的隐性成本：
+
+- **bundle 体积**：旧版库经常带 polyfill / 工具方法的冗余
+- **性能优化**：库作者持续优化（如 React 18.3 → 19，性能持续提升）
+- **安全漏洞**：被攻击表面
+- **TypeScript 类型**：新版本支持新 API
+
+工具：
+
+- [`npm-check-updates`](https://github.com/raineorshine/npm-check-updates) — 升级 dependencies
+- [`renovate`](https://docs.renovatebot.com/) / Dependabot — 自动 PR
+- [`patch-package`](https://github.com/ds300/patch-package) — 临时打补丁不阻塞升级
+
+## 监控与审计
+
+### Bundle 分析
+
+#### `rollup-plugin-visualizer`（Vite）
+
+```js
+import { visualizer } from 'rollup-plugin-visualizer'
+
+export default {
+  plugins: [
+    visualizer({ open: true, gzipSize: true, brotliSize: true })
+  ]
+}
+```
+
+#### `webpack-bundle-analyzer`
+
+```bash
+npm install --save-dev webpack-bundle-analyzer
+ANALYZE=true npm run build
+```
+
+输出可视化的 chunk 构成图，能快速看到"哪个库占了 40% 的体积"。
+
+#### `source-map-explorer`
+
+```bash
+npx source-map-explorer 'dist/**/*.js'
+```
+
+任何已构建产物都能分析（不依赖打包器配置）。
+
+### Lighthouse 审计
+
+| 项 | 含义 |
+| -- | ---- |
+| Reduce unused JavaScript | 未使用的 JS 体积 |
+| Avoid enormous network payloads | 总下载体积 |
+| Minimize main-thread work | 主线程时间 |
+| Reduce JavaScript execution time | JS 执行时间 |
+| Avoid long main-thread tasks | 长任务列表 |
+
+### Web Vitals INP
+
+INP 与 JS 强相关——长任务、内存分配、GC 都影响交互延迟。详见 [性能指标与预算 § INP](/performance/metrics#inp--interaction-to-next-paint)。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 单 bundle 1 MB+ | 首屏极慢 | 路由级分割 + lazy |
+| Lodash / Moment 整包导入 | 几十 KB 浪费 | 按需导入或替换轻量库 |
+| `for...in` 遍历大数组 | 慢 | 用 `for (let i = 0; ...)` |
+| 不必要的 polyfill 给现代浏览器 | 现代用户多下 50 KB | `type="module"` + `nomodule` |
+| 内联 100+ 行业务逻辑 | 不可缓存 | 抽到外部 + defer |
+| 同步 fetch 重要数据 | 阻塞解析 | 并行 fetch + Suspense |
+| `eval` / `new Function()` | 解析慢 + CSP 障碍 | 静态化 |
+| 未启用 Tree Shaking 配置 | 死代码进 bundle | ESM + sideEffects: false |
+
+## 框架特定建议
+
+### React
+
+详见专章 [React 渲染优化](/performance/react-memoization) / [React 并发与代码分割](/performance/react-concurrent)。
+
+### Vue 3
+
+详见专章 [Vue 编译时优化](/performance/vue-compilation) / [Vue 运行时优化](/performance/vue-rendering)。
+
+### Next.js
+
+```jsx
+// 自动分割 + dynamic import
+import dynamic from 'next/dynamic'
+
+const Chart = dynamic(() => import('./Chart'), {
+  ssr: false,            // 跳过 SSR
+  loading: () => <Skeleton />
+})
+```
+
+## 小结
+
+- JS 是性能成本最高的资源类型，每 KB 的影响是图片的 5-10 倍；
+- `defer` 是应用脚本的默认选择，`async` 给独立第三方脚本；
+- 代码分割 + 按需加载是控制首屏 bundle 的核心手段，路由级分割是基本盘；
+- Tree Shaking 依赖 ESM + 正确的 sideEffects 配置，按需导入第三方库是日常优化项；
+- 长任务是 INP / TBT 的元凶，通过分块 / yield / Worker 拆分；
+- Web Worker 把 CPU 密集任务搬出主线程，配合 Comlink 与 Transferable 几乎零成本；
+- 第三方脚本是性能黑洞，能延后就延后，能 worker 化就 worker 化；
+- bundle 分析工具是 JS 优化的"听诊器"，定期审计胜过盲目优化。

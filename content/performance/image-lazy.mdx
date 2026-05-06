@@ -1,0 +1,619 @@
+---
+title: 图片懒加载
+description: loading="lazy"、IntersectionObserver、视频懒加载、骨架屏与 LCP 防误伤
+---
+
+# 图片懒加载
+
+> "Offscreen images are loaded lazily"（roadmap 条目）
+
+页面常见 30+ 张图，但首屏可见的只有 3-5 张。如果一次加载全部，浏览器并发槽被低优先资源挤占，关键资源（CSS / JS / LCP 图）反而变慢。懒加载让浏览器**只在用户即将看到时**才加载图片，把带宽与并发让给真正需要的资源。本章覆盖原生 `loading="lazy"`、`IntersectionObserver` 自定义方案、视频懒加载、SSR 与 LCP 防误伤陷阱。
+
+## 懒加载的收益结构
+
+```text
+不懒加载（30 张图，平均 200 KB）：
+T+0    HTML 到达
+T+100  解析中，发现 30 个 <img> ──► 全部进入下载队列
+       │
+       ├─► CSS / 关键 JS 与图片争抢并发槽
+       └─► LCP 图被排在第 5 位才下载
+T+3s   首屏可见的 LCP 图终于到达
+T+8s   全部 30 张图下载完
+
+懒加载（仅前 5 张）：
+T+0    HTML 到达
+T+100  解析，仅前 5 张进入下载队列
+T+1s   LCP 图到达（提前 2 s）
+T+2s   首屏完整渲染
+T+...  滚动时再按需加载剩余
+```
+
+懒加载对**首屏 LCP 与总下载量**都有显著收益。
+
+## 原生 `loading="lazy"`
+
+2020 年 Chrome 76+ 起，浏览器原生支持懒加载属性：
+
+```html
+<img src="/photo.jpg" loading="lazy" alt="photo" width="800" height="600">
+```
+
+`loading` 取值：
+
+| 值 | 行为 |
+| -- | ---- |
+| `lazy` | 视口外延迟加载，浏览器决定确切距离 |
+| `eager`（默认） | 立即加载 |
+| `auto` | 浏览器决定（实际等同 `eager`） |
+
+### 浏览器支持
+
+| 浏览器 | 支持版本 |
+| ------ | -------- |
+| Chrome | 76+ (2019) |
+| Firefox | 75+ (2020) |
+| Safari | 15.4+ (2022) |
+| Edge | 79+ (2020) |
+
+2024 年起几乎全平台支持，**无需 polyfill**。
+
+### 触发距离
+
+浏览器不会等到图片"刚进入视口"才加载——会在距视口一定距离时**提前**触发：
+
+| 浏览器 | 4G 距离 | 慢网距离 |
+| ------ | ------- | -------- |
+| Chrome | ~1250 px 下方 | ~2500 px 下方 |
+| Firefox | ~0 px（更激进） | 同 |
+| Safari | 类似 Chrome | 同 |
+
+> 这个距离不可配置——是浏览器为了体感不卡顿做的妥协。
+
+### width/height 是必备
+
+懒加载图片**必须**指定 `width` 和 `height`：
+
+```html
+<!-- ❌ 没指定尺寸 → 加载时 CLS 抖动 -->
+<img src="/photo.jpg" loading="lazy">
+
+<!-- ✅ 显式尺寸 → 浏览器预留空间 -->
+<img src="/photo.jpg" loading="lazy" width="800" height="600">
+```
+
+详见 [响应式图片 § 防治 CLS](/performance/image-responsive#防治-cls)。
+
+### 配合 `decoding="async"`
+
+```html
+<img src="/photo.jpg" loading="lazy" decoding="async"
+     width="800" height="600" alt="...">
+```
+
+懒加载 + 异步解码 = 完全不阻塞主线程。
+
+## LCP 元素绝不能 lazy
+
+> 这是懒加载最常见的陷阱。
+
+```html
+<!-- ❌ LCP 图懒加载 → LCP 时间增加 200-1000 ms -->
+<img src="/hero.jpg" loading="lazy" fetchpriority="high">
+
+<!-- ✅ LCP 图立即加载 + 高优先级 -->
+<img src="/hero.jpg" loading="eager" fetchpriority="high"
+     width="1200" height="600">
+```
+
+### 为什么会出错
+
+`loading="lazy"` 让浏览器把图标记为低优先级，可能等到"页面 load 事件"附近才下载。这与 LCP 元素需要尽早出现的目标完全冲突。
+
+### Lighthouse 的报错
+
+> "Largest Contentful Paint image was lazily loaded"
+
+这条审计专门检测此问题。出现就修。
+
+### 自动判断的边界
+
+很多人无脑给所有图加 `loading="lazy"`——错误。规则：
+
+```text
+图片在首屏视口内？
+├─ 是 ──► loading="eager" + fetchpriority="high"（如果是 LCP）
+└─ 否 ──► loading="lazy" + decoding="async"
+```
+
+判断是否首屏：
+
+- 已知布局（如 hero）：肉眼判断
+- 不确定：用 IntersectionObserver 实测，或交给框架（Next.js Image `priority` 属性）
+
+## IntersectionObserver 自定义方案
+
+原生 `loading="lazy"` 之外，IntersectionObserver 提供更细粒度的控制：
+
+### 基础用法
+
+```js
+const io = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) {
+      const img = entry.target
+      img.src = img.dataset.src      // 替换真实 src
+      img.srcset = img.dataset.srcset
+      io.unobserve(img)               // 加载后停止观察
+    }
+  }
+}, {
+  rootMargin: '200px 0px',           // 视口外 200 px 提前触发
+  threshold: 0.01
+})
+
+document.querySelectorAll('img[data-src]').forEach(img => io.observe(img))
+```
+
+```html
+<img
+  data-src="/photo.jpg"
+  data-srcset="/photo-400.jpg 400w, /photo-800.jpg 800w"
+  src="/placeholder.svg"           <!-- 占位符 -->
+  alt="photo"
+  width="800" height="600">
+```
+
+### 何时用 IntersectionObserver 而非 `loading="lazy"`
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 普通图片 | 原生 `loading="lazy"` |
+| 自定义触发距离 | IntersectionObserver |
+| 需要在加载前后做动画 | IntersectionObserver |
+| 视频 / iframe / 复杂资源 | IntersectionObserver |
+| CSS 背景图 | IntersectionObserver |
+| 不只懒加载（如懒挂载组件） | IntersectionObserver |
+
+### `rootMargin` 调优
+
+```js
+new IntersectionObserver(callback, {
+  rootMargin: '100px 0px'    // 上下各 100 px 提前触发
+  // 也可以用百分比：'10% 0%'
+  // 也可以四向：'top right bottom left'
+})
+```
+
+| rootMargin | 适用 |
+| ---------- | ---- |
+| `0px` | 严格（仅进入视口才加载） |
+| `100-300px` | 一般（用户即将看到） |
+| `1000px+` | 激进（与不懒加载差不多） |
+
+弱网用户可以 `rootMargin` 大一点（提前下载，避免滚动到才加载延迟显示）。
+
+## CSS 背景图懒加载
+
+原生 `loading="lazy"` 不支持 CSS 背景图。用 IntersectionObserver 切换 class：
+
+```html
+<div class="hero" data-bg="/hero.jpg"></div>
+```
+
+```css
+.hero {
+  background-color: #eee;          /* 占位 */
+  height: 400px;
+}
+.hero.loaded {
+  background-image: var(--bg);
+  background-size: cover;
+}
+```
+
+```js
+new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) {
+      const el = entry.target
+      el.style.setProperty('--bg', `url(${el.dataset.bg})`)
+      el.classList.add('loaded')
+    }
+  }
+}).observe(document.querySelector('.hero'))
+```
+
+> 优先考虑能否改用 `<img>` —— 它有更好的 SEO 与可访问性。
+
+## 视频懒加载
+
+### `<video>` 的 preload 属性
+
+```html
+<video src="/clip.mp4"
+       preload="none"             <!-- 不预加载，仅在用户点击播放时才下载 -->
+       poster="/poster.jpg"
+       controls>
+</video>
+```
+
+| `preload` | 行为 |
+| --------- | ---- |
+| `none` | 完全不预加载（最省） |
+| `metadata` | 预加载首帧 + 时长（默认推荐） |
+| `auto` | 浏览器决定，可能下载整段 |
+
+### Facade 模式
+
+对自动播放的装饰性视频或第三方嵌入（YouTube、Vimeo），先放缩略图 + 播放按钮，点击后再加载真视频：
+
+```html
+<div class="video-facade" data-src="/clip.mp4">
+  <img src="/poster.jpg" alt="">
+  <button>▶ 播放</button>
+</div>
+```
+
+```js
+document.querySelector('.video-facade').addEventListener('click', (e) => {
+  const div = e.currentTarget
+  div.outerHTML = `
+    <video src="${div.dataset.src}" controls autoplay>
+    </video>`
+})
+```
+
+社区方案：[lite-youtube-embed](https://github.com/paulirish/lite-youtube-embed)、[lite-vimeo](https://github.com/luwes/lite-vimeo-embed)。能把 YouTube 嵌入的成本从 1-2 MB 降到 ~30 KB。
+
+### iframe 懒加载
+
+```html
+<iframe src="..." loading="lazy" width="560" height="315"></iframe>
+```
+
+详见 [HTML 优化 § iframes](/performance/html#iframes-与嵌入资源)。
+
+## 懒挂载组件
+
+把"懒"的概念扩展到 React / Vue 组件——视口可见才挂载：
+
+### React 自定义 Hook
+
+```jsx
+import { useEffect, useRef, useState } from 'react'
+
+function useInView(options) {
+  const ref = useRef(null)
+  const [inView, setInView] = useState(false)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const io = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setInView(true)
+        io.disconnect()
+      }
+    }, options)
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
+  return [ref, inView]
+}
+
+// 用法
+function HeavyChart() {
+  const [ref, inView] = useInView({ rootMargin: '200px' })
+  return (
+    <div ref={ref} style={{ minHeight: 400 }}>
+      {inView && <ExpensiveChart />}
+    </div>
+  )
+}
+```
+
+### `react-intersection-observer`
+
+```jsx
+import { useInView } from 'react-intersection-observer'
+
+function LazySection() {
+  const { ref, inView } = useInView({ triggerOnce: true, rootMargin: '200px' })
+  return (
+    <section ref={ref}>
+      {inView && <ExpensiveContent />}
+    </section>
+  )
+}
+```
+
+### Vue 3 Composable
+
+```ts
+// composables/useInView.ts
+import { ref, onMounted, onUnmounted } from 'vue'
+
+export function useInView(options) {
+  const target = ref(null)
+  const inView = ref(false)
+  let io
+
+  onMounted(() => {
+    io = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        inView.value = true
+        io.disconnect()
+      }
+    }, options)
+    if (target.value) io.observe(target.value)
+  })
+
+  onUnmounted(() => io?.disconnect())
+  return { target, inView }
+}
+```
+
+```vue
+<script setup>
+import { useInView } from './composables/useInView'
+const { target, inView } = useInView({ rootMargin: '200px' })
+</script>
+<template>
+  <div ref="target" style="min-height: 400px">
+    <ExpensiveChart v-if="inView" />
+  </div>
+</template>
+```
+
+VueUse 库已内置：
+
+```ts
+import { useIntersectionObserver } from '@vueuse/core'
+```
+
+## 占位符策略
+
+### 纯色占位
+
+```css
+img[loading="lazy"] {
+  background-color: #f0f0f0;
+}
+```
+
+最简单，但加载完会"瞬切"，体感生硬。
+
+### 模糊预览（LQIP）
+
+加载小尺寸模糊版，加载完替换：
+
+```html
+<img
+  src="/photo-tiny.jpg"           <!-- 20×15, ~ 200 B -->
+  data-src="/photo-1200.jpg"
+  style="filter: blur(8px); transition: filter 0.3s"
+  onload="this.classList.add('loaded')"
+>
+```
+
+```css
+img.loaded { filter: none; }
+```
+
+### BlurHash / ThumbHash
+
+把图片编码为 ~30 字符的 hash，客户端解码出模糊预览：
+
+```jsx
+import { Blurhash } from 'react-blurhash'
+
+<div style={{ position: 'relative' }}>
+  <Blurhash hash="LEHV6nWB2yk8pyo0adR*.7kCMdnj"
+            width={1200} height={600}
+            style={{ position: 'absolute', inset: 0 }} />
+  <img
+    src="/photo.jpg"
+    loading="lazy"
+    onLoad={(e) => e.currentTarget.style.opacity = 1}
+    style={{ position: 'relative', opacity: 0, transition: 'opacity 0.3s' }}
+  />
+</div>
+```
+
+收益：占位符**几乎零字节**，不需要额外请求。
+
+[ThumbHash](https://github.com/evanw/thumbhash) 是更紧凑的替代，~25 字符即可。
+
+### 主色占位（Dominant Color）
+
+服务端预计算图片主色调，HTML 中直接给容器一个背景色：
+
+```html
+<img src="/photo.jpg" loading="lazy"
+     style="background: #3a5f7d"
+     width="800" height="600">
+```
+
+零字节、零 JS。Pinterest 等图片密集网站常用。
+
+```js
+// sharp 预计算主色
+import sharp from 'sharp'
+const { data } = await sharp('photo.jpg').resize(1, 1).raw().toBuffer({ resolveWithObject: true })
+const [r, g, b] = data
+const color = `rgb(${r},${g},${b})`
+```
+
+### 骨架屏
+
+不是占位单张图，而是占位整个布局结构：
+
+```jsx
+function ArticleSkeleton() {
+  return (
+    <div className="article">
+      <div className="skeleton skeleton-image" />
+      <div className="skeleton skeleton-title" />
+      <div className="skeleton skeleton-text" />
+      <div className="skeleton skeleton-text" />
+    </div>
+  )
+}
+```
+
+```css
+@keyframes pulse {
+  50% { opacity: 0.5; }
+}
+.skeleton {
+  background: #e5e5e5;
+  border-radius: 4px;
+  animation: pulse 1.5s infinite;
+}
+.skeleton-image { aspect-ratio: 16/9; }
+.skeleton-title { height: 32px; margin: 12px 0; }
+.skeleton-text  { height: 16px; margin: 8px 0; }
+```
+
+## SSR 中的懒加载
+
+### Next.js Image
+
+```jsx
+// 普通图：自动懒加载
+<Image src="/photo.jpg" width={800} height={600} alt="..." />
+
+// LCP 图：priority
+<Image src="/hero.jpg" width={1200} height={600} alt="..." priority />
+
+// 自定义占位
+<Image src="/photo.jpg" width={800} height={600}
+       placeholder="blur" blurDataURL="data:image/...,..." alt="..." />
+```
+
+`priority` 等价于 `loading="eager"` + `fetchpriority="high"` + `preload`。
+
+### Nuxt Image
+
+```vue
+<NuxtImg
+  src="/photo.jpg" width="800" height="600"
+  loading="lazy"
+  placeholder
+/>
+
+<!-- LCP 图 -->
+<NuxtImg src="/hero.jpg" width="1200" height="600" preload />
+```
+
+## 滚动表现
+
+懒加载本身不会让滚动卡顿，但配合不当会：
+
+### 防止滚动跳变
+
+视口下方图片"突然变大"是常见 CLS 来源。`width`/`height` 提前预留就能消除。
+
+### content-visibility 加速渲染
+
+把"明显在视口外"的内容标记为可跳过渲染：
+
+```css
+.section {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 600px;  /* 占位高度 */
+}
+```
+
+详见 [CSS 优化 § content-visibility](/performance/css#content-visibility-auto)。
+
+### 滚动锁定的危害
+
+```js
+// ❌ 这样的滚动监听会卡顿
+window.addEventListener('scroll', () => {
+  document.querySelectorAll('img').forEach(img => {
+    if (isInViewport(img)) loadImage(img)
+  })
+})
+```
+
+每次滚动事件 5-15 ms × 60 帧 = 主线程被吃光。**用 IntersectionObserver 替代**——浏览器本身已经做了优化。
+
+## 框架与 SEO 的协调
+
+爬虫不会执行 IntersectionObserver，可能看不到懒加载的图。解决：
+
+### 原生 `loading="lazy"` 是 SEO 安全的
+
+Google 公开声明懒加载图（`loading="lazy"` 与 IntersectionObserver）都会被索引——只要 `<img src>` 是真实可解析的 URL。
+
+### 反例：`data-src` 占位
+
+```html
+<!-- ❌ 爬虫看到的 src 是占位图 -->
+<img data-src="/photo.jpg" src="data:image/svg..." />
+```
+
+如果一定要用 `data-src`，配合 `<noscript>` 兜底：
+
+```html
+<img data-src="/photo.jpg" src="placeholder.svg" />
+<noscript>
+  <img src="/photo.jpg" />
+</noscript>
+```
+
+但更简单的是直接用原生 `loading="lazy"`。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| LCP 图加 `loading="lazy"` | LCP 时间增加 | 改 `eager` + `fetchpriority="high"` |
+| 全站统一 `loading="lazy"` | 首屏图也被推迟 | 仅视口外图片懒加载 |
+| 懒加载图没 width/height | CLS 抖动 | 显式声明尺寸 |
+| 自己写 scroll 监听 | 滚动卡顿 | IntersectionObserver |
+| `data-src` 没 noscript 兜底 | 爬虫拿不到 | 用原生 lazy 或加 noscript |
+| 视频 `preload="auto"` | 首屏多下载几 MB | `preload="metadata"` 或 `none` |
+| 第三方嵌入 iframe 直接放 | 首屏多下载几 MB | facade 模式 |
+| 占位图加载用 `data:image/png;base64,...` 大块 | HTML 变大 | 用 BlurHash 或主色 |
+
+## 监控
+
+### Lighthouse
+
+| 项 | 含义 |
+| -- | ---- |
+| Defer offscreen images | 视口外图是否懒加载 |
+| Largest Contentful Paint image was lazily loaded | LCP 图被懒加载（错误） |
+
+### `PerformanceObserver` 检测懒加载是否生效
+
+```js
+new PerformanceObserver(list => {
+  for (const entry of list.getEntriesByType('resource')) {
+    if (entry.initiatorType === 'img') {
+      console.log({
+        url: entry.name,
+        startTime: entry.startTime,        // 何时开始下载
+        loadTime: entry.responseEnd
+      })
+    }
+  }
+}).observe({ type: 'resource', buffered: true })
+```
+
+视口外图的 `startTime` 应该明显晚于 LCP 时间（说明懒加载生效）。
+
+## 小结
+
+- 懒加载首选原生 `loading="lazy"`——零代码、跨浏览器、SEO 友好；
+- LCP 元素**绝不可懒加载**，反过来要 `eager` + `fetchpriority="high"`；
+- IntersectionObserver 适合"懒加载图片之外"的场景：视频、CSS 背景图、组件挂载、第三方嵌入；
+- 视频用 `preload="metadata"`，第三方嵌入用 facade 模式，能省几 MB；
+- 占位符策略从纯色 → BlurHash → 主色 → 骨架屏，按精致度递增；
+- 永远显式声明 `width`/`height`，否则懒加载会引起 CLS；
+- 爬虫对原生懒加载是友好的，避免 `data-src` 这类需要 JS 才能解析的写法。

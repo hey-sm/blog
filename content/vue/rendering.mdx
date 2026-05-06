@@ -1,0 +1,333 @@
+---
+title: 渲染机制
+description: 虚拟 DOM、条件渲染、列表渲染、Key 优化与性能调优
+---
+
+# 渲染机制
+
+Vue 使用虚拟 DOM 和高效的 diff 算法实现声明式渲染。
+
+## 虚拟 DOM
+
+### 渲染流程
+
+```text
+响应式数据变化
+     ↓
+触发组件重新渲染
+     ↓
+生成新的虚拟 DOM 树
+     ↓
+Diff 算法对比新旧树
+     ↓
+计算最小更新补丁
+     ↓
+应用到真实 DOM
+```
+
+### 编译优化
+
+Vue 3 编译器会标记静态内容：
+
+```vue
+<template>
+  <div>
+    <h1>Static Title</h1>  <!-- 静态提升 -->
+    <p>{{ dynamicText }}</p>  <!-- 动态内容 -->
+  </div>
+</template>
+```
+
+编译后：
+
+```js
+const _hoisted_1 = h('h1', 'Static Title')  // 只创建一次
+
+function render() {
+  return h('div', [
+    _hoisted_1,  // 复用
+    h('p', ctx.dynamicText)
+  ])
+}
+```
+
+## Key 的作用
+
+### 为什么需要 Key
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const items = ref([
+  { id: 1, text: 'A' },
+  { id: 2, text: 'B' },
+  { id: 3, text: 'C' }
+])
+
+// 删除第一项
+function removeFirst() {
+  items.value.shift()
+}
+</script>
+
+<template>
+  <!-- ❌ 没有 key：DOM 复用错误 -->
+  <div v-for="item in items">
+    <input :value="item.text">
+  </div>
+  
+  <!-- ✅ 有 key：正确追踪节点 -->
+  <div v-for="item in items" :key="item.id">
+    <input :value="item.text">
+  </div>
+</template>
+```
+
+### Key 的选择
+
+```vue
+<!-- ✅ 使用唯一 ID -->
+<div v-for="item in items" :key="item.id">
+
+<!-- ❌ 使用索引（列表会重排时） -->
+<div v-for="(item, index) in items" :key="index">
+
+<!-- ✅ 索引可用场景：静态列表 -->
+<div v-for="(item, index) in staticItems" :key="index">
+```
+
+## 条件渲染优化
+
+### v-if vs v-show 性能
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const showModal = ref(false)
+const isAdmin = ref(false)
+</script>
+
+<template>
+  <!-- ✅ 频繁切换：v-show -->
+  <Modal v-show="showModal" />
+  
+  <!-- ✅ 条件很少改变：v-if -->
+  <AdminPanel v-if="isAdmin" />
+</template>
+```
+
+### 条件分组
+
+```vue
+<template>
+  <!-- ✅ 使用 <template> 避免额外 DOM -->
+  <template v-if="isLoggedIn">
+    <h1>Welcome</h1>
+    <p>Dashboard</p>
+    <button>Logout</button>
+  </template>
+</template>
+```
+
+## 列表渲染优化
+
+### 计算属性过滤
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const items = ref([...])
+const filter = ref('')
+
+// ✅ 使用计算属性
+const filteredItems = computed(() => 
+  items.value.filter(item => item.name.includes(filter.value))
+)
+</script>
+
+<template>
+  <div v-for="item in filteredItems" :key="item.id">
+    {{ item.name }}
+  </div>
+</template>
+```
+
+### 虚拟滚动
+
+对于大列表，使用虚拟滚动库：
+
+```bash
+npm i vue-virtual-scroller
+```
+
+```vue
+<script setup lang="ts">
+import { RecycleScroller } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
+
+const items = ref(Array.from({ length: 10000 }, (_, i) => ({ id: i, text: `Item ${i}` })))
+</script>
+
+<template>
+  <RecycleScroller
+    :items="items"
+    :item-size="50"
+    key-field="id"
+  >
+    <template #default="{ item }">
+      <div class="item">{{ item.text }}</div>
+    </template>
+  </RecycleScroller>
+</template>
+```
+
+## 性能优化技巧
+
+### 1. 使用 v-once
+
+```vue
+<template>
+  <!-- 静态内容只渲染一次 -->
+  <div v-once>
+    <h1>{{ expensiveComputation() }}</h1>
+  </div>
+</template>
+```
+
+### 2. 使用 v-memo（Vue 3.2+）
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const items = ref([...])
+const selectedId = ref(1)
+</script>
+
+<template>
+  <!-- 只在 item.id === selectedId 变化时更新 -->
+  <div v-for="item in items" :key="item.id" v-memo="[item.id === selectedId]">
+    <p>{{ item.name }}</p>
+    <p>{{ item.description }}</p>
+  </div>
+</template>
+```
+
+### 3. 异步组件
+
+```vue
+<script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
+
+const HeavyComponent = defineAsyncComponent(() =>
+  import('./components/HeavyComponent.vue')
+)
+</script>
+
+<template>
+  <Suspense>
+    <HeavyComponent />
+    <template #fallback>
+      <div>Loading...</div>
+    </template>
+  </Suspense>
+</template>
+```
+
+### 4. KeepAlive 缓存
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import TabA from './TabA.vue'
+import TabB from './TabB.vue'
+
+const current = ref('TabA')
+</script>
+
+<template>
+  <KeepAlive>
+    <component :is="current === 'TabA' ? TabA : TabB" />
+  </KeepAlive>
+</template>
+```
+
+## 调试渲染
+
+### Vue Devtools
+
+安装 [Vue Devtools](https://devtools.vuejs.org/)：
+
+- 查看组件树
+- 检查 props/state
+- 追踪事件
+- 性能分析
+
+### 渲染追踪
+
+```vue
+<script setup lang="ts">
+import { onUpdated } from 'vue'
+
+onUpdated(() => {
+  console.log('Component re-rendered')
+})
+</script>
+```
+
+### 性能标记
+
+```vue
+<script setup lang="ts">
+import { onMounted, onUpdated } from 'vue'
+
+onMounted(() => {
+  performance.mark('component-mounted')
+})
+
+onUpdated(() => {
+  performance.mark('component-updated')
+  performance.measure('update-time', 'component-mounted', 'component-updated')
+})
+</script>
+```
+
+## 最佳实践
+
+### ✅ 合理使用 Key
+
+```vue
+<!-- ✅ 列表项有唯一 ID -->
+<div v-for="item in items" :key="item.id">
+
+<!-- ✅ 强制替换元素 -->
+<transition>
+  <span :key="text">{{ text }}</span>
+</transition>
+```
+
+### ✅ 避免在 v-for 中使用 v-if
+
+```vue
+<!-- ❌ 错误 -->
+<li v-for="user in users" v-if="user.active" :key="user.id">
+
+<!-- ✅ 正确 -->
+<li v-for="user in activeUsers" :key="user.id">
+```
+
+### ✅ 大列表优化
+
+```vue
+<script setup lang="ts">
+import { shallowRef } from 'vue'
+
+// ✅ 大数组使用 shallowRef
+const items = shallowRef([...])
+</script>
+```
+
+下一章 [计算属性与侦听器](/vue/computed-watchers) 详解响应式计算。

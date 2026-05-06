@@ -1,0 +1,728 @@
+---
+title: computed / watch 调优
+description: computed 缓存、watch / watchEffect 选择、flush 时机、副作用控制与依赖追踪陷阱
+---
+
+# computed / watch 调优
+
+`computed` 与 `watch` 是 Vue 派生数据与副作用的两大支柱。用对了，代码清晰且性能极好；用错了，会引发雪崩式的级联更新与不必要的计算。本章覆盖三者的选择、缓存机制、flush 时机、依赖追踪陷阱，以及常见反模式。
+
+## 三者定位
+
+```text
+        派生数据（同步、有返回值、缓存）       副作用（DOM、网络、日志）
+
+computed   ✅ 首选                              ❌ 不要在 computed 中做副作用
+
+watch      可以但繁琐                            ✅ 监听特定来源
+                                                需指定来源（性能更可控）
+
+watchEffect ❌ 没缓存，性能差                    ✅ 自动追踪，使用便利
+                                                适合简单副作用
+```
+
+简记：
+
+- 派生 → `computed`
+- 副作用 + 明确来源 → `watch`
+- 副作用 + 自动追踪 → `watchEffect`
+
+## computed：派生数据的标准答案
+
+```ts
+import { ref, computed } from 'vue'
+
+const first = ref('John')
+const last = ref('Doe')
+
+const fullName = computed(() => `${first.value} ${last.value}`)
+
+console.log(fullName.value)               // 'John Doe'
+first.value = 'Jane'
+console.log(fullName.value)               // 'Jane Doe'
+```
+
+### 缓存机制
+
+`computed` 自动缓存——依赖未变时，多次访问只计算一次：
+
+```ts
+const expensive = computed(() => {
+  console.log('computing...')
+  return heavyCalc(state.list)
+})
+
+console.log(expensive.value)              // 'computing...' + 结果
+console.log(expensive.value)              // 直接返回缓存（无打印）
+console.log(expensive.value)              // 仍是缓存
+state.list.push(1)
+console.log(expensive.value)              // 'computing...' + 新结果
+```
+
+### 与 method 的区别
+
+```vue
+<template>
+  <div>{{ expensive() }}</div>           <!-- ❌ 每次渲染重新计算 -->
+  <div>{{ expensiveComputed }}</div>     <!-- ✅ 缓存 -->
+</template>
+```
+
+```ts
+function expensive() { return heavyCalc(state.list) }
+const expensiveComputed = computed(() => heavyCalc(state.list))
+```
+
+模板中频繁出现的"派生值"应是 computed，不是 method。
+
+### 可写 computed
+
+```ts
+const fullName = computed({
+  get() {
+    return `${first.value} ${last.value}`
+  },
+  set(value) {
+    [first.value, last.value] = value.split(' ')
+  }
+})
+
+fullName.value = 'Jane Smith'             // 触发 set
+```
+
+### computed 链
+
+```ts
+const a = ref(1)
+const b = computed(() => a.value * 2)
+const c = computed(() => b.value + 10)
+const d = computed(() => c.value * 100)
+
+a.value = 2
+// b 标记为 dirty（仅标记，未计算）
+// c 标记为 dirty
+// d 标记为 dirty
+
+console.log(d.value)                      // 触发 d → 触发 c → 触发 b
+                                           // 顺序计算：b=4, c=14, d=1400
+```
+
+`computed` 是**lazy** 的——标记 dirty 但不立即重算，直到下次被访问。
+
+## watchEffect：自动追踪副作用
+
+```ts
+import { ref, watchEffect } from 'vue'
+
+const count = ref(0)
+const factor = ref(2)
+
+watchEffect(() => {
+  console.log('count × factor =', count.value * factor.value)
+})
+// 立即执行一次，输出 'count × factor = 0'
+
+count.value = 5                            // 输出 'count × factor = 10'
+factor.value = 3                           // 输出 'count × factor = 15'
+```
+
+特点：
+
+- 立即执行一次（首次）
+- 自动追踪函数中用到的响应式数据
+- 任何依赖变化都重新执行
+
+### 适用场景
+
+```ts
+// 数据持久化
+watchEffect(() => {
+  localStorage.setItem('count', count.value)
+})
+
+// 按 query 拉数据
+watchEffect(async () => {
+  data.value = await fetch(`/api?q=${query.value}`).then(r => r.json())
+})
+
+// 同步 UI 状态
+watchEffect(() => {
+  document.title = `Count: ${count.value}`
+})
+```
+
+### 局限
+
+- **没有 oldValue**：拿不到旧值
+- **不能延迟执行**：默认立即执行
+- **依赖范围广**：函数中所有访问的响应式都被追踪——可能多依赖触发
+
+## watch：精确监听
+
+```ts
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+
+watch(count, (newVal, oldVal) => {
+  console.log(`${oldVal} → ${newVal}`)
+})
+
+count.value = 5                            // 输出 '0 → 5'
+```
+
+### 多源监听
+
+```ts
+watch([count, name], ([newCount, newName], [oldCount, oldName]) => {
+  console.log('Either changed')
+})
+```
+
+### getter 形式
+
+```ts
+watch(
+  () => state.user.name,                  // 监听特定字段
+  (newName) => console.log(newName)
+)
+
+watch(
+  () => [filters.category, filters.sort], // 多个字段
+  ([cat, sort]) => fetchData(cat, sort)
+)
+```
+
+### deep 选项
+
+监听对象内部修改：
+
+```ts
+const user = reactive({ name: 'A', address: { city: 'NYC' } })
+
+watch(user, (val) => {
+  console.log('user changed')
+})
+
+user.address.city = 'LA'                  // ❌ 默认不触发（仅监听顶层）
+
+watch(user, (val) => { ... }, { deep: true })
+
+user.address.city = 'LA'                  // ✅ 触发
+```
+
+⚠️ `deep: true` 性能开销大——会递归追踪整棵对象树。慎用，配合 [shallow API](/performance/vue/shallow-optimization)。
+
+### immediate 选项
+
+```ts
+watch(query, fetchData, { immediate: true })   // 立即执行一次
+```
+
+## flush 时机
+
+`watch` / `watchEffect` 都支持 `flush` 选项：
+
+| flush | 时机 |
+| ----- | ---- |
+| `'pre'`（默认） | 组件更新**前** |
+| `'post'` | 组件更新**后**（DOM 已更新） |
+| `'sync'` | 同步触发（每次响应立即调用） |
+
+### pre：默认行为
+
+```ts
+watch(count, (n) => {
+  console.log('watch:', n)
+  console.log('DOM:', document.querySelector('.count').innerText)  // 旧 DOM
+})
+```
+
+回调在 DOM 更新前执行——读取的 DOM 是旧的。
+
+### post：访问最新 DOM
+
+```ts
+watch(items, async (newItems) => {
+  await nextTick()                         // 或用 flush: 'post'
+  list.value.scrollTop = list.value.scrollHeight   // 滚到底
+}, { flush: 'post' })
+```
+
+或者：
+
+```ts
+watchPostEffect(() => {
+  console.log('DOM updated:', document.querySelector('.list').children.length)
+})
+```
+
+### sync：警告慎用
+
+```ts
+watch(count, (n) => {
+  // 每次 count.value++ 都立即触发
+  // 不参与批处理
+}, { flush: 'sync' })
+```
+
+适合：
+
+- 必须立即响应的场景（如调试日志）
+- 但通常**应避免**——破坏 Vue 的批处理机制
+
+## stop 与 cleanup
+
+### 显式 stop
+
+```ts
+const stop = watch(count, fn)
+
+// 不再需要时
+stop()
+```
+
+### onCleanup：处理副作用
+
+```ts
+import { watch } from 'vue'
+
+watch(query, async (newQuery, _, onCleanup) => {
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())     // query 再次变化时取消上次请求
+
+  const res = await fetch(`/api?q=${newQuery}`, { signal: controller.signal })
+  data.value = await res.json()
+})
+```
+
+`onCleanup` 在**下次回调执行前**或**watch 被 stop 时**调用——是清理资源的标准方式。
+
+### 在组件中自动停止
+
+`watch` / `watchEffect` 在 `setup()` 或 `<script setup>` 中调用，会**自动绑定到组件生命周期**——组件卸载时自动停止。
+
+但**不要在异步回调里**创建 watch：
+
+```ts
+// ❌ 在 setTimeout 里调用，已脱离 setup 同步上下文，不会自动停止
+setTimeout(() => {
+  watchEffect(() => { ... })             // 不会被自动清理
+}, 1000)
+
+// ✅ 用 effectScope
+import { effectScope, watchEffect } from 'vue'
+const scope = effectScope()
+
+setTimeout(() => {
+  scope.run(() => {
+    watchEffect(() => { ... })
+  })
+}, 1000)
+
+onUnmounted(() => scope.stop())
+```
+
+## computed vs watch vs watchEffect 决策
+
+```text
+我要做什么？
+│
+├─ 派生一个值（同步、有返回值）
+│   └─ computed ✅
+│
+├─ 状态变化时执行副作用（DOM / API / 日志）
+│   │
+│   ├─ 副作用依赖明确（仅 1-2 个源）
+│   │   └─ watch ✅（性能好，可控）
+│   │
+│   └─ 副作用依赖多/动态
+│       └─ watchEffect ✅（自动追踪）
+│
+└─ 想用 watch 但其实只是派生
+    └─ ❌ 改用 computed
+```
+
+### 反模式：用 watch 做派生
+
+```ts
+// ❌ 用 watch 维护一个派生值
+const fullName = ref('')
+watch([first, last], ([f, l]) => {
+  fullName.value = `${f} ${l}`
+})
+
+// ✅ computed 一行解决
+const fullName = computed(() => `${first.value} ${last.value}`)
+```
+
+`computed` 自动缓存 + 自动调度 + 没有 race condition——比 watch 简洁且高效。
+
+### 反模式：在 computed 中做副作用
+
+```ts
+// ❌ computed 不应该有副作用
+const userName = computed(() => {
+  fetch('/api/log', {                     // ❌ 副作用
+    method: 'POST',
+    body: JSON.stringify({ access: 'name' })
+  })
+  return user.value.name
+})
+```
+
+后果：
+
+- 每次访问 computed 可能触发副作用（取决于缓存命中）
+- 不可预测的执行次数
+- 难以调试
+
+修复：用 `watchEffect`：
+
+```ts
+const userName = computed(() => user.value.name)
+
+watchEffect(() => {
+  if (userName.value) {
+    fetch('/api/log', { ... })
+  }
+})
+```
+
+## 性能优化
+
+### 1. 避免 deep watch 大对象
+
+```ts
+// ❌ deep watch 几千个用户的对象
+watch(users, fn, { deep: true })
+
+// ✅ watch 特定字段
+watch(() => users.value.length, fn)
+watch(() => users.value.map(u => u.id), fn, { flush: 'sync' })
+```
+
+或重新设计——避免 deep watch。
+
+### 2. computed 中避免遍历整个大集合
+
+```ts
+// ❌ 每次任何一项变化都重新计算（即使无关）
+const total = computed(() => state.items.reduce((s, x) => s + x.price, 0))
+
+// 然而：实际上 computed 缓存能处理大部分情况——只在依赖真变时才重算
+```
+
+实际并非反模式——computed 缓存让无关变化不会触发重算。但要确认依赖追踪正确：
+
+```ts
+const total = computed(() => {
+  let sum = 0
+  for (const item of state.items) {       // 整个数组迭代触发追踪
+    sum += item.price                     // 每个 price 也被追踪
+  }
+  return sum
+})
+
+// 任何 item 的 price 改变，total 都会标记 dirty
+// 任何 items 的增删，total 也标记 dirty
+```
+
+### 3. 拆分大 computed
+
+```ts
+// ❌ 大 computed：任何依赖变化都重算所有
+const stats = computed(() => ({
+  total: items.value.reduce((s, x) => s + x.value, 0),
+  avg: items.value.reduce((s, x) => s + x.value, 0) / items.value.length,
+  max: Math.max(...items.value.map(x => x.value)),
+  min: Math.min(...items.value.map(x => x.value))
+}))
+
+// ✅ 拆分：每个独立缓存
+const total = computed(() => items.value.reduce((s, x) => s + x.value, 0))
+const avg = computed(() => total.value / items.value.length)
+const max = computed(() => Math.max(...items.value.map(x => x.value)))
+const min = computed(() => Math.min(...items.value.map(x => x.value)))
+```
+
+每个 computed 独立缓存——只重算改变的部分。
+
+### 4. watchEffect 的依赖控制
+
+```ts
+// ❌ 函数中所有响应式访问都被追踪——包括"只用一次"的初始值
+watchEffect(() => {
+  if (initialized.value) {                // 只检查一次的标志
+    process(data.value, config.value)
+  }
+})
+```
+
+修复：用 `watch` 显式指定依赖：
+
+```ts
+watch(data, () => {
+  if (initialized.value) {
+    process(data.value, config.value)
+  }
+})
+```
+
+### 5. 异步 watchEffect 与请求竞态
+
+```ts
+let id = 0
+
+watchEffect(async (onCleanup) => {
+  const myId = ++id
+  const data = await fetch(`/api?q=${query.value}`).then(r => r.json())
+  if (myId === id) {
+    results.value = data                  // 仅最新请求的结果生效
+  }
+})
+```
+
+或更标准的 AbortController 方案（前面 onCleanup 示例）。
+
+## 调试
+
+### onTrack / onTrigger
+
+```ts
+const total = computed(() => state.items.reduce((s, x) => s + x.price, 0), {
+  onTrack(e) {
+    debugger                              // 何时被追踪
+  },
+  onTrigger(e) {
+    debugger                              // 何时被触发
+  }
+})
+```
+
+```ts
+watchEffect(
+  () => { ... },
+  {
+    onTrack(e) { console.log('TRACK:', e) },
+    onTrigger(e) { console.log('TRIGGER:', e) }
+  }
+)
+```
+
+注意：仅在开发模式有效。
+
+### Vue DevTools
+
+DevTools → Components → 选组件 → 看右侧的 "Computed" 区——实时查看每个 computed 的当前值。
+
+### 日志辅助
+
+```ts
+const stats = computed(() => {
+  console.log('Recomputing stats...')     // 看何时触发
+  return calculateStats(items.value)
+})
+```
+
+## 复杂场景
+
+### 异步 computed（实验性）
+
+Vue 3.4+ 实验性 `computedAsync`（`@vueuse/core`）：
+
+```ts
+import { computedAsync } from '@vueuse/core'
+
+const userInfo = computedAsync(
+  async () => {
+    return await fetch(`/api/users/${userId.value}`).then(r => r.json())
+  },
+  null  // 默认值（异步加载期间）
+)
+```
+
+或自己用 `watchEffect` 实现：
+
+```ts
+const userInfo = ref(null)
+const loading = ref(false)
+
+watchEffect(async (onCleanup) => {
+  loading.value = true
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+
+  try {
+    userInfo.value = await fetch(
+      `/api/users/${userId.value}`,
+      { signal: controller.signal }
+    ).then(r => r.json())
+  } catch (e) {
+    if (e.name !== 'AbortError') throw e
+  } finally {
+    loading.value = false
+  }
+})
+```
+
+### computed 与 v-model
+
+可写 computed 是 v-model 的关键搭档：
+
+```vue
+<template>
+  <BaseInput v-model="upperName" />
+</template>
+
+<script setup>
+const name = ref('')
+
+const upperName = computed({
+  get: () => name.value,
+  set: (val) => { name.value = val.toUpperCase() }
+})
+</script>
+```
+
+输入自动转大写，存储原值。
+
+### 条件依赖
+
+```ts
+const activeData = computed(() => {
+  if (mode.value === 'A') {
+    return dataA.value                    // 仅追踪 dataA
+  } else {
+    return dataB.value                    // 仅追踪 dataB
+  }
+})
+```
+
+`mode` 切换时，依赖**自动重新收集**——不会同时追踪 dataA 和 dataB。
+
+## watch 链与雪崩
+
+```ts
+// ❌ watch 链
+watch(a, () => { b.value++ })
+watch(b, () => { c.value++ })
+watch(c, () => { d.value++ })
+
+a.value = 1
+// 触发：a → b → c → d，4 次更新
+```
+
+后果：
+
+- 难以追踪依赖关系
+- 容易死循环
+- 性能不可控
+
+修复：用 computed 表达派生关系，避免命令式更新：
+
+```ts
+const b = computed(() => a.value + 1)
+const c = computed(() => b.value + 1)
+const d = computed(() => c.value + 1)
+```
+
+清晰且高效。
+
+## 常用模式
+
+### 派生 + 缓存
+
+```ts
+const sorted = computed(() => [...items.value].sort((a, b) => a.priority - b.priority))
+const visible = computed(() => sorted.value.filter(x => !x.hidden))
+const grouped = computed(() => groupBy(visible.value, 'category'))
+```
+
+层层 computed——每层独立缓存。
+
+### 副作用：日志 / 持久化
+
+```ts
+watchEffect(() => {
+  localStorage.setItem('settings', JSON.stringify(settings))
+})
+```
+
+### 副作用：API 请求
+
+```ts
+watch(
+  [page, pageSize, filters],
+  async ([p, s, f], _, onCleanup) => {
+    const controller = new AbortController()
+    onCleanup(() => controller.abort())
+
+    loading.value = true
+    try {
+      data.value = await api.list({ page: p, size: s, ...f }, { signal: controller.signal })
+    } finally {
+      loading.value = false
+    }
+  },
+  { immediate: true }
+)
+```
+
+### 副作用：DOM 操作
+
+```ts
+watch(modalOpen, (open) => {
+  document.body.style.overflow = open ? 'hidden' : ''
+}, { flush: 'post' })
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 用 watch 写派生 | 复杂、容易遗漏 | computed |
+| 在 computed 中做副作用 | 不可预测 | watchEffect |
+| deep: true 监听大对象 | 性能差 | watch 字段或 shallowRef |
+| watchEffect 包裹太多依赖 | 频繁触发 | watch 显式依赖 |
+| 异步 watchEffect 不处理竞态 | 旧请求覆盖新结果 | onCleanup + AbortController |
+| watch 链 | 雪崩 + 难追踪 | computed 表达派生 |
+| flush: 'sync' 高频更新 | 破坏批处理 | 默认 'pre' |
+| 复杂 computed 不拆分 | 一处变全部重算 | 多个独立 computed |
+
+## 监控
+
+### Vue DevTools Performance Timeline
+
+录制操作过程，看每个 effect / computed 的运行：
+
+```text
+Timeline:
+  ├─ ComputedRefImpl (fullName)     0.2 ms
+  ├─ Watch [query]                   1.5 ms
+  ├─ ComponentUpdate (UserList)     12 ms
+  └─ ...
+```
+
+### 自定义 instrument
+
+```ts
+const expensive = computed(() => {
+  performance.mark('compute-start')
+  const result = heavyCalc()
+  performance.mark('compute-end')
+  performance.measure('compute', 'compute-start', 'compute-end')
+  return result
+})
+```
+
+## 小结
+
+- `computed` 是派生数据的标准答案——自动缓存 + 自动追踪，几乎所有"基于响应式数据计算的值"都应是 computed；
+- `watch` 是精确监听——指定数据源（性能可控），适合需要 oldValue 或对来源敏感的场景；
+- `watchEffect` 是自动追踪的副作用——便利但依赖范围宽，适合简单 / 探索性场景；
+- `flush` 决定回调时机：默认 `pre`（DOM 更新前），需读取最新 DOM 用 `post`，避免 `sync`；
+- `onCleanup` 是清理资源的标准方式，处理 watch 回调中的异步竞态；
+- `deep: true` 性能开销大，配合 shallow API 或重新设计；
+- 派生关系用 computed 链表达——避免命令式 watch 链导致雪崩；
+- computed 拆分到合适粒度——每个独立缓存，让局部变化只重算局部。

@@ -1,0 +1,504 @@
+---
+title: 测试
+description: Vitest / Jest + React Testing Library + Cypress / Playwright 的现代测试栈
+---
+
+# 测试
+
+React 测试主要关心三个层次：
+
+| 层次 | 工具 | 速度 | 真实性 | 适合场景 |
+| ---- | ---- | ---- | ------ | -------- |
+| 单元 / 组件测试 | Vitest / Jest + RTL | 毫秒级 | 中（jsdom） | 业务逻辑、纯组件、Hook |
+| 集成测试 | 同上，但跨多个组件 | 中 | 中 | 表单流程、状态联动 |
+| E2E 测试 | Playwright / Cypress | 秒级 | ✅ 真实浏览器 | 关键用户路径 |
+
+> **测试金字塔**：单元多、集成中、E2E 少。颠倒过来会让 CI 慢到不可用。
+
+本章覆盖现代主流栈：**Vitest + React Testing Library + Playwright**。
+
+## Vitest
+
+由 Vite 团队维护，与 Jest API 兼容、配置简洁、原生支持 ESM 与 TypeScript。
+
+```bash
+pnpm add -D vitest @vitest/ui jsdom @testing-library/react @testing-library/jest-dom @testing-library/user-event
+```
+
+### 配置
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    globals: true,                            // 不必每次 import { describe, it, expect }
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    css: true                                 // 处理 import './x.css'
+  }
+})
+```
+
+```ts filename="src/test/setup.ts"
+import '@testing-library/jest-dom/vitest'
+import { afterEach } from 'vitest'
+import { cleanup } from '@testing-library/react'
+
+afterEach(() => {
+  cleanup()                                   // 自动卸载组件
+})
+```
+
+```ts filename="tsconfig.app.json"
+{
+  "compilerOptions": {
+    "types": ["vitest/globals", "@testing-library/jest-dom"]
+  }
+}
+```
+
+```json filename="package.json"
+{
+  "scripts": {
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  }
+}
+```
+
+### 第一个测试
+
+```ts filename="utils/math.test.ts"
+import { describe, it, expect } from 'vitest'
+
+function add(a: number, b: number) { return a + b }
+
+describe('add', () => {
+  it('sums two numbers', () => {
+    expect(add(1, 2)).toBe(3)
+  })
+})
+```
+
+```bash
+pnpm test
+```
+
+### 常用断言
+
+```ts
+expect(value).toBe(3)                         // ===
+expect(obj).toEqual({ a: 1 })                 // 深度相等
+expect(arr).toContain(2)
+expect(fn).toHaveBeenCalled()
+expect(fn).toHaveBeenCalledWith(arg1, arg2)
+expect(promise).rejects.toThrow('msg')
+expect(value).toMatchSnapshot()
+```
+
+### Mock
+
+```ts
+import { vi } from 'vitest'
+
+// 模拟函数
+const fn = vi.fn(() => 42)
+fn(1, 2)
+expect(fn).toHaveBeenCalledWith(1, 2)
+
+// 模拟模块
+vi.mock('@/api/user', () => ({
+  fetchUser: vi.fn(() => Promise.resolve({ id: 1, name: 'js' }))
+}))
+
+// 模拟时间
+vi.useFakeTimers()
+vi.advanceTimersByTime(1000)
+vi.useRealTimers()
+```
+
+### 覆盖率
+
+```bash
+pnpm add -D @vitest/coverage-v8
+pnpm test:coverage
+```
+
+```ts filename="vite.config.ts"
+test: {
+  coverage: {
+    provider: 'v8',
+    reporter: ['text', 'html', 'lcov'],
+    exclude: ['node_modules/', 'src/test/']
+  }
+}
+```
+
+## React Testing Library (RTL)
+
+测试哲学：**"测试用户能看到 / 操作的，而非组件内部实现"**。
+
+```text
+🚫 不要测：
+  - 内部 state 的当前值
+  - 调用了哪个内部方法
+  - 渲染了哪个具体的子组件
+
+✅ 应该测：
+  - 用户能看到什么文本？
+  - 用户点击按钮后界面变成什么样？
+  - 表单提交后调用了哪个 API？
+```
+
+### 渲染与查询
+
+```tsx filename="Counter.test.tsx"
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { Counter } from './Counter'
+
+describe('Counter', () => {
+  it('starts at 0 and increments on click', async () => {
+    const user = userEvent.setup()
+    render(<Counter />)
+
+    expect(screen.getByText('0')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /increment/i }))
+    expect(screen.getByText('1')).toBeInTheDocument()
+  })
+})
+```
+
+### 查询方法
+
+按可访问性优先级排序（推荐前面的）：
+
+| 优先级 | API | 找什么 |
+| ------ | --- | ------ |
+| 1 | `getByRole` | ARIA 角色（按钮、对话框、文本框等） |
+| 2 | `getByLabelText` | 表单控件的 label |
+| 3 | `getByPlaceholderText` | 输入框 placeholder |
+| 4 | `getByText` | 文本内容 |
+| 5 | `getByDisplayValue` | 输入控件当前值 |
+| 6 | `getByAltText` | 图片 alt |
+| 7 | `getByTitle` | title 属性 |
+| 8 | `getByTestId` | data-testid（兜底，不推荐首选） |
+
+每个方法有三个变体：
+
+| 变体 | 找不到时 | 多个匹配时 | 异步等待 |
+| ---- | -------- | ---------- | -------- |
+| `getBy...` | 抛错 | 抛错 | 否 |
+| `queryBy...` | 返回 null | 抛错 | 否 |
+| `findBy...` | 抛错 | 抛错 | ✅（默认 1s） |
+
+异步出现的元素用 `findBy`：
+
+```tsx
+const heading = await screen.findByRole('heading', { name: /loaded/i })
+```
+
+判断不存在用 `queryBy`：
+
+```tsx
+expect(screen.queryByText('Error')).not.toBeInTheDocument()
+```
+
+### 用户交互
+
+`@testing-library/user-event` 模拟真实交互（含 focus、键盘、点击触发的事件链）：
+
+```tsx
+const user = userEvent.setup()
+
+await user.click(button)
+await user.dblClick(button)
+await user.type(input, 'hello')
+await user.clear(input)
+await user.selectOptions(select, 'option-value')
+await user.upload(input, file)
+await user.tab()                              // 焦点切换
+await user.keyboard('{Enter}')
+```
+
+不要用旧的 `fireEvent.click(...)`——`user-event` 触发的事件链更接近真实浏览器。
+
+### 测试 Hook
+
+```bash
+pnpm add -D @testing-library/react
+```
+
+`renderHook` 用于隔离测试 Hook：
+
+```tsx filename="useCounter.test.tsx"
+import { renderHook, act } from '@testing-library/react'
+import { useCounter } from './useCounter'
+
+it('increments', () => {
+  const { result } = renderHook(() => useCounter(0))
+
+  act(() => result.current.inc())
+
+  expect(result.current.count).toBe(1)
+})
+```
+
+`act` 包装会触发 React 状态更新的代码，确保断言时 UI 已稳定。
+
+### 测试异步 / 副作用
+
+```tsx
+it('shows user after fetch', async () => {
+  vi.spyOn(api, 'fetchUser').mockResolvedValue({ name: 'js' })
+
+  render(<UserProfile id="1" />)
+
+  expect(screen.getByText(/loading/i)).toBeInTheDocument()
+  expect(await screen.findByText('js')).toBeInTheDocument()
+})
+```
+
+### 测试 React Router
+
+```tsx
+import { MemoryRouter, Routes, Route } from 'react-router'
+
+render(
+  <MemoryRouter initialEntries={['/users/1']}>
+    <Routes>
+      <Route path="/users/:id" element={<UserDetail />} />
+    </Routes>
+  </MemoryRouter>
+)
+```
+
+### 测试受 Provider 包裹的组件
+
+把 Providers 抽成可复用的 wrapper：
+
+```tsx filename="src/test/utils.tsx"
+import { ReactNode } from 'react'
+import { render, RenderOptions } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router'
+
+function AllProviders({ children }: { children: ReactNode }) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } }
+  })
+  return (
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
+    </MemoryRouter>
+  )
+}
+
+export function renderWithProviders(
+  ui: React.ReactElement,
+  options?: Omit<RenderOptions, 'wrapper'>
+) {
+  return render(ui, { wrapper: AllProviders, ...options })
+}
+```
+
+```tsx
+import { renderWithProviders } from '@/test/utils'
+
+renderWithProviders(<UserPage />)
+```
+
+### Mock API：MSW
+
+[Mock Service Worker](https://mswjs.io) 在网络层拦截请求，让组件测试看到的 API 行为与真实环境一致：
+
+```bash
+pnpm add -D msw
+```
+
+```ts filename="src/test/server.ts"
+import { setupServer } from 'msw/node'
+import { http, HttpResponse } from 'msw'
+
+export const server = setupServer(
+  http.get('/api/users/:id', ({ params }) => {
+    return HttpResponse.json({ id: params.id, name: 'mocked' })
+  })
+)
+```
+
+```ts filename="src/test/setup.ts"
+import { server } from './server'
+import { beforeAll, afterEach, afterAll } from 'vitest'
+
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
+```
+
+测试中按需覆盖：
+
+```ts
+import { server } from '@/test/server'
+import { http, HttpResponse } from 'msw'
+
+it('shows error when API fails', async () => {
+  server.use(
+    http.get('/api/users/:id', () => HttpResponse.error())
+  )
+  // ...
+})
+```
+
+MSW 的好处：单元测试与 E2E 可共享同一份 mock 定义；开发期也可挂在浏览器 service worker 上。
+
+## E2E 测试
+
+### Playwright vs Cypress
+
+| 维度 | Playwright | Cypress |
+| ---- | ---------- | ------- |
+| 浏览器 | Chromium / Firefox / WebKit | Chrome / Edge / Firefox |
+| 运行模型 | 进程外，跨浏览器 | 进程内（与被测页面同源） |
+| 多 tab / iframe | ✅ | ⚠️ 受限 |
+| 移动端模拟 | ✅ | ⚠️ 视口模拟 |
+| API 拦截 | ✅ | ✅ |
+| 录制工具 | Codegen | Studio |
+| 网络速度 | 快 | 中 |
+| 包大小 | 大（含浏览器） | 中 |
+
+新项目推荐 **Playwright**——跨浏览器、性能更好、对 React 19 支持更新更快。
+
+### Playwright 快速上手
+
+```bash
+pnpm create playwright
+```
+
+```ts filename="e2e/login.spec.ts"
+import { test, expect } from '@playwright/test'
+
+test('user can sign in', async ({ page }) => {
+  await page.goto('/login')
+
+  await page.getByLabel(/email/i).fill('user@example.com')
+  await page.getByLabel(/password/i).fill('secret123')
+  await page.getByRole('button', { name: /sign in/i }).click()
+
+  await expect(page).toHaveURL('/dashboard')
+  await expect(page.getByRole('heading', { name: /welcome/i })).toBeVisible()
+})
+```
+
+### 选择器优先级（同 RTL）
+
+Playwright 的 [`getByRole`](https://playwright.dev/docs/locators#locate-by-role) / `getByLabel` / `getByText` API 与 RTL 一致——一份选择器约定贯穿单元测试与 E2E。
+
+### 网络拦截
+
+```ts
+test('handles API error', async ({ page }) => {
+  await page.route('/api/users/*', route => {
+    route.fulfill({ status: 500, body: 'Server Error' })
+  })
+
+  await page.goto('/users/1')
+  await expect(page.getByText(/something went wrong/i)).toBeVisible()
+})
+```
+
+### 截图对比
+
+```ts
+await expect(page).toHaveScreenshot('home.png')
+```
+
+第一次运行生成基线，后续运行自动 diff。视觉回归测试的轻量方案；专业方案见 [Chromatic](https://www.chromatic.com) / [Percy](https://percy.io)。
+
+### 配置 CI
+
+```yaml filename=".github/workflows/test.yml"
+- run: pnpm install
+- run: pnpm exec playwright install --with-deps
+- run: pnpm test:run
+- run: pnpm exec playwright test
+- if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: playwright-report
+    path: playwright-report/
+```
+
+## 测试策略
+
+### 写什么测试
+
+| 代码 | 测试 |
+| ---- | ---- |
+| 纯函数 / 工具 | ✅ 必测，单元测试 |
+| 自定义 Hook | ✅ 必测，`renderHook` |
+| 复杂逻辑组件（表单、向导、计算面板） | ✅ 集成测试 |
+| 简单展示组件 | ⚠️ 视情况——没有逻辑就别测 |
+| 关键用户路径 | ✅ 1-2 个 E2E 覆盖 |
+| 第三方库的行为 | ❌ 不测 |
+| TypeScript 类型 | ❌ 编译期已经验证 |
+
+### 测试覆盖率不是目的
+
+90% 覆盖率不代表代码质量好——可能只是大量"调用了一次"的浅薄测试。聚焦：
+
+- **业务关键路径**必有测试
+- **修过的 Bug** 加回归测试
+- **复杂逻辑** 的多分支覆盖
+
+### 测试 = 文档
+
+好的测试名字告诉读者组件做什么：
+
+```tsx
+describe('UserProfile', () => {
+  it('shows user name when data is loaded', ...)
+  it('shows error message when fetch fails', ...)
+  it('refetches when user id changes', ...)
+})
+```
+
+这本身就是组件契约的最佳文档。
+
+### 反模式
+
+- 测试实现细节（"调用了 useState 多少次"）
+- 频繁使用 `data-testid`（说明无障碍标记不足）
+- 在测试里直接 `useStore.setState`（应该模拟用户交互触发）
+- 写出"永远通过的测试"（断言根本不会失败的条件）
+
+## 视觉回归与组件目录
+
+[Storybook](https://storybook.js.org) 用于隔离开发组件，配合 [`@storybook/test-runner`](https://github.com/storybookjs/test-runner) 可把所有 stories 作为冒烟测试运行：
+
+```ts filename="Button.stories.tsx"
+import { Button } from './Button'
+
+export default { component: Button }
+export const Primary = { args: { variant: 'primary', children: 'Click' } }
+export const Disabled = { args: { disabled: true, children: 'Click' } }
+```
+
+视觉回归用 [Chromatic](https://www.chromatic.com)（Storybook 原生集成）或 [Lost Pixel](https://lost-pixel.com)。
+
+## 小结
+
+- **测试金字塔**：多数单元 + 少量集成 + 关键路径 E2E；
+- Vitest 是 Jest 在 Vite 时代的更优替代；
+- React Testing Library 的核心思想是"测用户体验，不测内部实现"；
+- MSW 在 mock 层统一开发 / 测试 / E2E 的网络行为；
+- Playwright 是当前最强的 E2E 工具，跨浏览器、API 优雅、CI 友好；
+- 测试覆盖率不是目的，关键路径与高复杂度逻辑必测才是。

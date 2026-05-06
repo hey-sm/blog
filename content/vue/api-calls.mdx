@@ -1,0 +1,586 @@
+---
+title: 数据请求
+description: Axios、fetch、TanStack Query、Apollo Client 与请求最佳实践
+---
+
+# 数据请求
+
+Vue 应用中常用的数据请求方案，从基础 fetch 到高级查询管理。
+
+## 原生 Fetch API
+
+### 基础用法
+
+```vue filename="components/UserList.vue"
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+interface User {
+  id: number
+  name: string
+  email: string
+}
+
+const users = ref<User[]>([])
+const loading = ref(false)
+const error = ref<string | null>(null)
+
+async function fetchUsers() {
+  loading.value = true
+  error.value = null
+  
+  try {
+    const response = await fetch('/api/users')
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+    
+    users.value = await response.json()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
+  fetchUsers()
+})
+</script>
+
+<template>
+  <div v-if="loading" class="loading">Loading...</div>
+  <div v-else-if="error" class="error">Error: {{ error }}</div>
+  <ul v-else>
+    <li v-for="user in users" :key="user.id">
+      {{ user.name }} - {{ user.email }}
+    </li>
+  </ul>
+</template>
+```
+
+### POST 请求
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const formData = ref({
+  name: '',
+  email: ''
+})
+
+const submitting = ref(false)
+
+async function handleSubmit() {
+  submitting.value = true
+  
+  try {
+    const response = await fetch('/api/users', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(formData.value)
+    })
+    
+    if (!response.ok) {
+      throw new Error('Failed to create user')
+    }
+    
+    const result = await response.json()
+    console.log('User created:', result)
+  } catch (e) {
+    console.error(e)
+  } finally {
+    submitting.value = false
+  }
+}
+</script>
+```
+
+## Axios
+
+### 安装与配置
+
+```bash
+npm install axios
+```
+
+```ts filename="api/client.ts"
+import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios'
+
+// 创建实例
+const apiClient = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+})
+
+// 请求拦截器
+apiClient.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    // 添加认证 token
+    const token = localStorage.getItem('token')
+    if (token && config.headers) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    
+    // 添加请求时间戳
+    config.metadata = { startTime: Date.now() }
+    
+    return config
+  },
+  (error: AxiosError) => {
+    return Promise.reject(error)
+  }
+)
+
+// 响应拦截器
+apiClient.interceptors.response.use(
+  (response) => {
+    // 计算请求耗时
+    const duration = Date.now() - response.config.metadata.startTime
+    console.log(`Request to ${response.config.url} took ${duration}ms`)
+    
+    return response
+  },
+  (error: AxiosError) => {
+    // 统一错误处理
+    if (error.response) {
+      switch (error.response.status) {
+        case 401:
+          // 未授权，跳转登录
+          localStorage.removeItem('token')
+          window.location.href = '/login'
+          break
+        case 403:
+          console.error('Forbidden')
+          break
+        case 404:
+          console.error('Not found')
+          break
+        case 500:
+          console.error('Server error')
+          break
+      }
+    } else if (error.request) {
+      console.error('Network error')
+    }
+    
+    return Promise.reject(error)
+  }
+)
+
+export default apiClient
+```
+
+### API 封装
+
+```ts filename="api/users.ts"
+import apiClient from './client'
+
+export interface User {
+  id: number
+  name: string
+  email: string
+}
+
+export interface CreateUserDto {
+  name: string
+  email: string
+  password: string
+}
+
+export const userApi = {
+  // 获取用户列表
+  getUsers: () => apiClient.get<User[]>('/users'),
+  
+  // 获取单个用户
+  getUser: (id: number) => apiClient.get<User>(`/users/${id}`),
+  
+  // 创建用户
+  createUser: (data: CreateUserDto) => apiClient.post<User>('/users', data),
+  
+  // 更新用户
+  updateUser: (id: number, data: Partial<User>) => 
+    apiClient.put<User>(`/users/${id}`, data),
+  
+  // 删除用户
+  deleteUser: (id: number) => apiClient.delete(`/users/${id}`)
+}
+```
+
+### 使用封装的 API
+
+```vue filename="views/Users.vue"
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { userApi, type User } from '@/api/users'
+
+const users = ref<User[]>([])
+const loading = ref(false)
+const error = ref<string | null>(null)
+
+async function fetchUsers() {
+  loading.value = true
+  error.value = null
+  
+  try {
+    const response = await userApi.getUsers()
+    users.value = response.data
+  } catch (e) {
+    error.value = 'Failed to fetch users'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function deleteUser(id: number) {
+  try {
+    await userApi.deleteUser(id)
+    users.value = users.value.filter(u => u.id !== id)
+  } catch (e) {
+    console.error('Failed to delete user')
+  }
+}
+
+onMounted(() => {
+  fetchUsers()
+})
+</script>
+
+<template>
+  <div>
+    <h1>Users</h1>
+    
+    <div v-if="loading">Loading...</div>
+    <div v-else-if="error">{{ error }}</div>
+    <ul v-else>
+      <li v-for="user in users" :key="user.id">
+        {{ user.name }} - {{ user.email }}
+        <button @click="deleteUser(user.id)">Delete</button>
+      </li>
+    </ul>
+  </div>
+</template>
+```
+
+## TanStack Query (Vue Query)
+
+### 安装与配置
+
+```bash
+npm install @tanstack/vue-query
+```
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import { VueQueryPlugin } from '@tanstack/vue-query'
+import App from './App.vue'
+
+const app = createApp(App)
+
+app.use(VueQueryPlugin, {
+  queryClientConfig: {
+    defaultOptions: {
+      queries: {
+        staleTime: 1000 * 60 * 5,  // 5 分钟
+        cacheTime: 1000 * 60 * 10,  // 10 分钟
+        refetchOnWindowFocus: false
+      }
+    }
+  }
+})
+
+app.mount('#app')
+```
+
+### 查询数据
+
+```vue filename="components/UserList.vue"
+<script setup lang="ts">
+import { useQuery } from '@tanstack/vue-query'
+import { userApi } from '@/api/users'
+
+const { data, isLoading, error, refetch } = useQuery({
+  queryKey: ['users'],
+  queryFn: () => userApi.getUsers().then(res => res.data)
+})
+</script>
+
+<template>
+  <div>
+    <button @click="refetch()">Refresh</button>
+    
+    <div v-if="isLoading">Loading...</div>
+    <div v-else-if="error">Error: {{ error.message }}</div>
+    <ul v-else>
+      <li v-for="user in data" :key="user.id">
+        {{ user.name }}
+      </li>
+    </ul>
+  </div>
+</template>
+```
+
+### 变更数据
+
+```vue filename="components/CreateUser.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+import { useMutation, useQueryClient } from '@tanstack/vue-query'
+import { userApi, type CreateUserDto } from '@/api/users'
+
+const queryClient = useQueryClient()
+
+const formData = ref<CreateUserDto>({
+  name: '',
+  email: '',
+  password: ''
+})
+
+const { mutate, isPending, isSuccess, error } = useMutation({
+  mutationFn: (data: CreateUserDto) => userApi.createUser(data),
+  onSuccess: () => {
+    // 使查询失效，触发重新获取
+    queryClient.invalidateQueries({ queryKey: ['users'] })
+    
+    // 重置表单
+    formData.value = { name: '', email: '', password: '' }
+  }
+})
+
+function handleSubmit() {
+  mutate(formData.value)
+}
+</script>
+
+<template>
+  <form @submit.prevent="handleSubmit">
+    <input v-model="formData.name" placeholder="Name" required>
+    <input v-model="formData.email" type="email" placeholder="Email" required>
+    <input v-model="formData.password" type="password" placeholder="Password" required>
+    
+    <button type="submit" :disabled="isPending">
+      {{ isPending ? 'Creating...' : 'Create User' }}
+    </button>
+    
+    <p v-if="isSuccess" class="success">User created successfully!</p>
+    <p v-if="error" class="error">{{ error.message }}</p>
+  </form>
+</template>
+```
+
+### 分页查询
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import { useQuery } from '@tanstack/vue-query'
+import { userApi } from '@/api/users'
+
+const page = ref(1)
+const pageSize = ref(10)
+
+const { data, isLoading, isPreviousData } = useQuery({
+  queryKey: ['users', page, pageSize],
+  queryFn: () => userApi.getUsers({ page: page.value, pageSize: pageSize.value }),
+  keepPreviousData: true
+})
+
+function nextPage() {
+  if (!isPreviousData.value && data.value?.hasMore) {
+    page.value++
+  }
+}
+
+function prevPage() {
+  page.value = Math.max(1, page.value - 1)
+}
+</script>
+
+<template>
+  <div>
+    <ul v-if="!isLoading">
+      <li v-for="user in data?.users" :key="user.id">
+        {{ user.name }}
+      </li>
+    </ul>
+    
+    <div class="pagination">
+      <button @click="prevPage()" :disabled="page === 1">Previous</button>
+      <span>Page {{ page }}</span>
+      <button @click="nextPage()" :disabled="isPreviousData || !data?.hasMore">
+        Next
+      </button>
+    </div>
+  </div>
+</template>
+```
+
+## 组合式函数封装
+
+### 通用 useFetch
+
+```ts filename="composables/useFetch.ts"
+import { ref, unref, watchEffect, type Ref } from 'vue'
+
+interface UseFetchOptions {
+  immediate?: boolean
+  refetch?: Ref<boolean>
+}
+
+export function useFetch<T>(
+  url: string | Ref<string>,
+  options: UseFetchOptions = {}
+) {
+  const { immediate = true } = options
+  
+  const data = ref<T | null>(null)
+  const loading = ref(false)
+  const error = ref<Error | null>(null)
+  
+  async function execute() {
+    loading.value = true
+    error.value = null
+    
+    try {
+      const response = await fetch(unref(url))
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      
+      data.value = await response.json()
+    } catch (e) {
+      error.value = e as Error
+    } finally {
+      loading.value = false
+    }
+  }
+  
+  if (immediate) {
+    execute()
+  }
+  
+  // 监听 URL 变化
+  watchEffect(() => {
+    if (immediate) {
+      execute()
+    }
+  })
+  
+  return {
+    data,
+    loading,
+    error,
+    execute,
+    refetch: execute
+  }
+}
+```
+
+### 使用
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import { useFetch } from '@/composables/useFetch'
+
+const userId = ref(1)
+const url = computed(() => `/api/users/${userId.value}`)
+
+const { data: user, loading, error, refetch } = useFetch(url)
+</script>
+
+<template>
+  <div>
+    <input v-model.number="userId" type="number">
+    <button @click="refetch()">Refresh</button>
+    
+    <div v-if="loading">Loading...</div>
+    <div v-else-if="error">{{ error.message }}</div>
+    <div v-else-if="user">
+      <h2>{{ user.name }}</h2>
+      <p>{{ user.email }}</p>
+    </div>
+  </div>
+</template>
+```
+
+## 最佳实践
+
+### ✅ 统一错误处理
+
+```ts filename="utils/error-handler.ts"
+import { ElMessage } from 'element-plus'
+
+export function handleApiError(error: any) {
+  let message = 'An error occurred'
+  
+  if (error.response) {
+    message = error.response.data?.message || `Error: ${error.response.status}`
+  } else if (error.request) {
+    message = 'Network error. Please check your connection.'
+  } else {
+    message = error.message
+  }
+  
+  ElMessage.error(message)
+}
+```
+
+### ✅ 请求取消
+
+```vue
+<script setup lang="ts">
+import { ref, onUnmounted } from 'vue'
+import axios from 'axios'
+
+const data = ref(null)
+const controller = new AbortController()
+
+async function fetchData() {
+  try {
+    const response = await axios.get('/api/data', {
+      signal: controller.signal
+    })
+    data.value = response.data
+  } catch (e) {
+    if (axios.isCancel(e)) {
+      console.log('Request canceled')
+    }
+  }
+}
+
+onUnmounted(() => {
+  controller.abort()
+})
+</script>
+```
+
+### ✅ 请求重试
+
+```ts filename="utils/retry.ts"
+export async function retryRequest<T>(
+  fn: () => Promise<T>,
+  maxRetries = 3,
+  delay = 1000
+): Promise<T> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn()
+    } catch (error) {
+      if (i === maxRetries - 1) throw error
+      await new Promise(resolve => setTimeout(resolve, delay * (i + 1)))
+    }
+  }
+  throw new Error('Max retries reached')
+}
+```
+
+下一章 [表单库与校验](/vue/forms-validation) 介绍表单解决方案。

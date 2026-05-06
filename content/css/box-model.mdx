@@ -1,0 +1,454 @@
+---
+title: 盒模型
+description: box-sizing、padding / margin / border / outline、margin 折叠与 box-shadow
+---
+
+# 盒模型
+
+每个 HTML 元素都被渲染为一个**矩形盒子**，由内到外构成：
+
+```text
+┌─────────────────────────────────────────┐
+│              margin                     │   外边距（透明、参与布局）
+│   ┌──────────────────────────────┐      │
+│   │          border              │      │   边框（可见、占空间）
+│   │   ┌──────────────────────┐   │      │
+│   │   │      padding         │   │      │   内边距（透明、属于元素）
+│   │   │   ┌──────────────┐   │   │      │
+│   │   │   │   content    │   │   │      │   内容区（width × height）
+│   │   │   └──────────────┘   │   │      │
+│   │   └──────────────────────┘   │      │
+│   └──────────────────────────────┘      │
+└─────────────────────────────────────────┘
+```
+
+## `box-sizing`
+
+决定 `width` / `height` 包含哪些部分：
+
+| 值 | width 含义 |
+| -- | ---------- |
+| `content-box`（默认）| 仅 content 区 |
+| `border-box`（推荐）| content + padding + border |
+
+```css
+.x {
+  width: 200px;
+  padding: 20px;
+  border: 2px solid;
+}
+
+/* content-box 下，盒子总宽度 = 200 + 20*2 + 2*2 = 244 */
+/* border-box 下，盒子总宽度 = 200，content 实际宽度 = 156 */
+```
+
+`border-box` 让"宽度即所见"，避免计算时陷入加减法地狱。**所有现代项目都应全局开启**：
+
+```css
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+```
+
+Tailwind 默认在 preflight 中开启此规则——零配置生效。
+
+## Padding（内边距）
+
+```css
+.x {
+  padding: 16px;                              /* 四边 */
+  padding: 16px 24px;                         /* 上下 / 左右 */
+  padding: 8px 16px 12px;                     /* 上 / 左右 / 下 */
+  padding: 8px 16px 12px 20px;                /* 上 右 下 左（顺时针） */
+}
+
+.x {
+  padding-top: 16px;
+  padding-inline: 24px;                       /* 逻辑：左右（LTR）/ 右左（RTL） */
+  padding-block: 16px;                        /* 逻辑：上下 */
+}
+```
+
+#### 逻辑属性 vs 物理属性
+
+| 物理 | 逻辑 |
+| ---- | ---- |
+| `padding-left` / `right` | `padding-inline-start` / `end` |
+| `padding-top` / `bottom` | `padding-block-start` / `end` |
+| `padding-left + right` 同设 | `padding-inline` |
+| `padding-top + bottom` 同设 | `padding-block` |
+
+逻辑属性自动适配文字方向（LTR / RTL）与书写模式（横排 / 竖排）。新代码优先使用逻辑属性。
+
+#### Tailwind
+
+```html
+<div class="p-4">四边 1rem</div>
+<div class="px-6 py-4">逻辑左右 / 上下</div>
+<div class="ps-4 pe-6">逻辑起 / 终（多语言友好）</div>
+<div class="pt-2 pr-4 pb-2 pl-4">分别设置</div>
+```
+
+| Tailwind | 含义 |
+| -------- | ---- |
+| `p-*` | padding |
+| `px-*` / `py-*` | 物理 x / y |
+| `ps-*` / `pe-*` | 逻辑 inline-start / end |
+| `pt-*` / `pr-*` / `pb-*` / `pl-*` | 上 / 右 / 下 / 左 |
+
+间距单位默认遵循 4px 基础（`p-1` = 4px、`p-4` = 16px、`p-8` = 32px）。
+
+## Margin（外边距）
+
+```css
+.x {
+  margin: 16px;
+  margin: 0 auto;                             /* 上下 0、左右自动（块元素居中） */
+  margin: 16px 24px 0 24px;
+  margin-block: 1rem;
+  margin-inline: auto;
+}
+```
+
+### 负 margin
+
+```css
+.overlap { margin-top: -20px; }                /* 上移 20px */
+```
+
+负 margin 让元素向内挤压、与兄弟重叠。常用于：
+
+- 修正卡片网格中容器与卡片的边距对齐
+- 让 sticky header 与下层内容重叠
+- 实现负空间布局
+
+#### Tailwind 负值
+
+```html
+<div class="-mt-4">向上 16px</div>
+<div class="mx-auto">左右居中</div>
+```
+
+### Margin 折叠（Collapse）
+
+**仅在垂直方向、相邻块元素间发生**——上下两个 `margin` 取较大者，而非相加：
+
+```css
+h2 { margin-bottom: 24px; }
+p  { margin-top: 16px; }
+
+/* h2 与 p 之间的实际间距 = max(24, 16) = 24px，不是 40 */
+```
+
+引发折叠的场景：
+
+1. 同级相邻块元素的 `margin-bottom` 与 `margin-top`
+2. 父元素与第一个 / 最后一个子元素的 `margin-top` / `margin-bottom`（无 padding/border 隔开时）
+3. 空块元素的 `margin-top` 与 `margin-bottom`
+
+阻断折叠的方式：
+
+- 父元素加 `padding` 或 `border`
+- 父元素 `display: flex` / `grid`（两者**不会**折叠）
+- 父元素 `overflow: hidden` 等创建 BFC
+
+实战经验：**用 `gap` 替代 margin** 能彻底回避折叠：
+
+```css
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+```
+
+#### Tailwind 等价
+
+```html
+<div class="flex flex-col gap-4">
+  <h2>...</h2>
+  <p>...</p>
+</div>
+```
+
+或用 [`* + *`](https://every-layout.dev/layouts/stack/)（"猫头鹰"选择器）：
+
+```css
+.stack > * + * { margin-top: 1rem; }           /* 兄弟之间加 margin，无折叠风险 */
+```
+
+```html
+<div class="space-y-4">
+  <h2>...</h2>
+  <p>...</p>
+</div>
+```
+
+## Border
+
+```css
+.x {
+  border: 1px solid red;                      /* 简写：宽度 / 样式 / 颜色 */
+  border-style: solid;                        /* solid / dashed / dotted / double / hidden / none */
+  border-width: 1px;
+  border-color: red;
+  border-radius: 8px;                         /* 圆角 */
+}
+
+/* 单边 */
+.y {
+  border-top: 1px solid;
+  border-block-start: 1px solid;              /* 逻辑 */
+}
+
+/* 不同边框样式 */
+.z {
+  border-top:    1px solid red;
+  border-right:  2px dashed blue;
+  border-bottom: 3px dotted green;
+}
+```
+
+### 圆角
+
+```css
+.x { border-radius: 8px; }                    /* 四角 */
+.x { border-radius: 8px 16px; }                /* 左上右下 / 右上左下 */
+.x { border-radius: 50%; }                     /* 圆 / 椭圆 */
+.x { border-radius: 1rem 0 1rem 0; }           /* 不规则 */
+
+/* 现代逻辑属性 */
+.x { border-start-start-radius: 8px; }
+```
+
+#### Tailwind
+
+```html
+<div class="rounded-md">中等圆角</div>
+<div class="rounded-full">全圆</div>
+<div class="rounded-tl-2xl rounded-br-2xl">仅左上、右下</div>
+<div class="border-2 border-dashed border-blue-500">虚线边框</div>
+```
+
+## Outline
+
+`outline` 与 `border` 视觉相似，但：
+
+| 维度 | border | outline |
+| ---- | ------ | ------- |
+| 占空间 | ✅ | ❌（绘制于边界外） |
+| 受 border-radius 影响 | ✅ | 部分（现代浏览器跟随圆角） |
+| 主要用途 | 装饰 / 分隔 | 焦点指示 |
+
+```css
+button:focus-visible {
+  outline: 2px solid blue;
+  outline-offset: 2px;
+}
+```
+
+`outline-offset` 让轮廓离元素更远——视觉上更明显且不破坏布局。
+
+#### 不要轻易移除 outline
+
+```css
+/* ✗ 破坏键盘可访问性 */
+*:focus { outline: none; }
+```
+
+如确需替换默认样式：
+
+```css
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+```
+
+`:focus-visible` 仅在键盘聚焦时触发，鼠标点击不显示——既保持鼠标体验，又满足无障碍。
+
+#### Tailwind
+
+```html
+<button class="focus-visible:outline-2 focus-visible:outline-blue-500 focus-visible:outline-offset-2">
+  Click
+</button>
+
+<!-- ring 是 Tailwind 推荐的现代 focus 样式（基于 box-shadow） -->
+<button class="focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2">
+  Click
+</button>
+```
+
+`ring` 类基于 `box-shadow` 而非 `outline`，能完美绕开圆角且更易自定义。
+
+## Box Shadow
+
+```css
+.card { box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }
+.card { box-shadow: <x-offset> <y-offset> <blur> <spread> <color>; }
+```
+
+| 参数 | 含义 |
+| ---- | ---- |
+| x-offset | 水平偏移（正值向右） |
+| y-offset | 垂直偏移（正值向下） |
+| blur | 模糊半径（越大越柔） |
+| spread | 扩散半径（正值放大、负值收缩） |
+| color | 阴影颜色（含 alpha） |
+| `inset` 关键字 | 内阴影 |
+
+```css
+/* 多层叠加：更立体 */
+.card {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 4px 12px rgba(0, 0, 0, 0.10);
+}
+
+/* 内阴影：表达"凹陷" */
+.input { box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08); }
+
+/* 焦点环 */
+.input:focus { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); }
+```
+
+#### Tailwind 阴影
+
+```html
+<div class="shadow-sm">轻</div>
+<div class="shadow">默认</div>
+<div class="shadow-md">中</div>
+<div class="shadow-lg">大</div>
+<div class="shadow-xl">特大</div>
+<div class="shadow-2xl">最大</div>
+<div class="shadow-inner">内阴影</div>
+<div class="shadow-none">无</div>
+```
+
+## 宽度与高度
+
+```css
+.x {
+  width: 200px;
+  height: 100vh;
+  min-width: 320px;
+  max-width: 100%;
+  min-height: 0;
+  max-height: 80vh;
+}
+
+/* 现代逻辑属性 */
+.x {
+  inline-size: 200px;                         /* 沿主文字方向（横排时是 width） */
+  block-size: 100px;                          /* 垂直方向 */
+}
+```
+
+### 关键值
+
+| 值 | 含义 |
+| -- | ---- |
+| `auto` | 浏览器决定（默认） |
+| `100%` | 父元素 content 区的 100% |
+| `100vw` / `100vh` | 视口宽 / 高 |
+| `100dvh` | 动态视口高度（含浏览器 UI 状态变化） |
+| `max-content` | 内容自然宽度 |
+| `min-content` | 最长不可分割内容宽度（如最长单词） |
+| `fit-content` | 介于 min/max-content，被父限制 |
+
+```css
+/* 宽度撑满，但不超过内容自然宽度 */
+.tag {
+  width: fit-content;
+  padding: 4px 8px;
+}
+```
+
+### `aspect-ratio`
+
+```css
+.video {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+}
+```
+
+按比例计算另一维度——避免使用 padding-bottom hack。
+
+#### Tailwind
+
+```html
+<div class="w-full h-screen">视口</div>
+<div class="w-fit">仅占内容宽度</div>
+<div class="aspect-video">16:9</div>
+<div class="aspect-square">1:1</div>
+<div class="aspect-[3/2]">任意比例</div>
+```
+
+## 实战陷阱
+
+### 1. 隐藏溢出导致 box-shadow 被裁
+
+```css
+.parent { overflow: hidden; }
+.child  { box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+/* shadow 超出父元素的部分被剪掉 */
+```
+
+修复：把 shadow 移到不溢出的层；或用 `filter: drop-shadow` 替代（drop-shadow 跟随实际形状，但会触发新的合成层）。
+
+### 2. 可滚动容器的 padding 失效
+
+```css
+.scroll {
+  overflow-y: auto;
+  padding-bottom: 16px;
+  /* Chrome：scroll 容器底部 padding 在内容滚到底时不生效 */
+}
+```
+
+修复（CSS Scroll Padding）：
+
+```css
+.scroll {
+  overflow-y: auto;
+  scroll-padding-bottom: 16px;
+}
+```
+
+### 3. 等高列
+
+老问题。Flexbox 与 Grid 默认让兄弟等高，无需 hack：
+
+```css
+.row { display: flex; }
+.col { flex: 1; }
+```
+
+### 4. 圆角与 outline 冲突
+
+```css
+.x {
+  border-radius: 8px;
+  outline: 2px solid blue;
+  /* 老浏览器：outline 不跟随圆角 */
+  /* Chrome 94+ / Firefox 88+：outline 跟随圆角 */
+}
+```
+
+兼容性敏感场景用 `box-shadow: 0 0 0 2px blue;` 或 Tailwind 的 `ring` 类——基于 box-shadow，永远跟随圆角。
+
+## 小结
+
+- `box-sizing: border-box` 是现代项目的默认；
+- `margin` 折叠是块流式布局的历史遗留，用 Flex/Grid + `gap` 彻底回避；
+- `padding` / `margin` 优先使用逻辑属性，多语言场景免改；
+- `outline` 用于 focus 指示，不要 `outline: none` 删掉它，用 `:focus-visible` 替代；
+- `box-shadow` 与 `ring` 比 `outline` 更灵活，能绕开圆角与子元素裁切；
+- `aspect-ratio` 让等比例容器一行搞定，告别 padding-bottom hack；
+- Tailwind 间距系统基于 4px，`p-* / m-* / gap-*` 全部一致。

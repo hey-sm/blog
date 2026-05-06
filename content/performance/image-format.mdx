@@ -1,0 +1,628 @@
+---
+title: 图片格式选择
+description: JPEG/PNG/WebP/AVIF/SVG 决策树、矢量与位图、Base64 反模式与压缩工具链
+---
+
+# 图片格式选择
+
+图片是 Web 上**字节占比最大**的资源类型——HTTP Archive 数据显示，2024 年图片平均占总页面体积的 50% 以上。选错格式可能让一张图比应有大小大 5 倍。本章覆盖现代图片格式的选择决策、矢量与位图的取舍、Base64 反模式，以及完整的压缩工具链。
+
+## 格式速览
+
+| 格式 | 类型 | 透明 | 动画 | 浏览器支持 | 典型用途 |
+| ---- | ---- | ---- | ---- | ---------- | -------- |
+| JPEG | 有损位图 | ❌ | ❌ | 100% | 照片、复杂渐变 |
+| PNG | 无损位图 | ✅ | ❌（APNG 部分） | 100% | UI 元素、截图 |
+| GIF | 有损位图 | ✅ (1 bit) | ✅ | 100% | 老式动图 |
+| SVG | 矢量 | ✅ | ✅（CSS / SMIL） | 100% | 图标、Logo、插图 |
+| WebP | 有损 + 无损 | ✅ | ✅ | 96%+ | 通用替代 JPEG/PNG |
+| AVIF | 有损 + 无损 | ✅ | ✅ | 90%+ | 顶级压缩率 |
+| JPEG XL | 有损 + 无损 | ✅ | ✅ | 实验（仅 Safari 17+） | 未来 |
+
+> 数据来源：[caniuse.com](https://caniuse.com)，2024 年中数据。
+
+## 格式深入
+
+### JPEG
+
+历经 30+ 年依然是照片的标准格式。基于 DCT（离散余弦变换）+ 量化的有损压缩。
+
+**优点**：
+
+- 普遍支持，零兼容性顾虑
+- 对照片类内容压缩率不错
+- 解码极快（硬件加速普及）
+
+**缺点**：
+
+- 无透明通道
+- 高对比文字 / 线条会出现压缩痕迹（"蚊噪"）
+- 重复保存会持续劣化
+
+**实测**：1920×1080 的风景照
+
+| 质量 | 体积 | 视觉差 |
+| ---- | ---- | ------ |
+| 100 | 850 KB | 无 |
+| 90 | 280 KB | 几乎不可见 |
+| 85 | 200 KB | **甜点档**，肉眼难辨 |
+| 75 | 120 KB | 仔细看有差异 |
+| 60 | 80 KB | 可见伪影 |
+
+**最佳实践**：质量 80–85 是绝大多数场景的甜点。配合 `mozjpeg` 编码器再省 5–15%。
+
+```bash
+# 用 mozjpeg 重新压缩
+cjpeg -quality 85 -optimize -progressive input.jpg > output.jpg
+```
+
+### Progressive JPEG
+
+普通 JPEG 是**逐行渲染**——从上到下一行行加载完才能看清。Progressive JPEG 是**逐次清晰**——先模糊全图，再逐次提高分辨率：
+
+```text
+普通 JPEG：
+T+0%   ────────  下载 0%
+T+50%  ████      下载 50%（上半部清晰）
+T+100% ████████  下载 100%（全部清晰）
+
+Progressive JPEG：
+T+0%   ────────  下载 0%
+T+25%  ▓▓▓▓▓▓▓▓  全图模糊预览
+T+50%  ▓▓▓▓▓▓▓▓  全图中清
+T+100% ████████  全图全清
+```
+
+收益：用户更早看到"页面有内容"，体感 LCP 提前。代价：体积略大（5–10%）+ 解码 CPU 略高。
+
+```bash
+cjpeg -progressive -quality 85 input.jpg
+```
+
+### PNG
+
+无损压缩，基于 zlib + 滤波。三种主要变体：
+
+| 变体 | 颜色 | 透明 | 用途 |
+| ---- | ---- | ---- | ---- |
+| PNG-8 | 256 色调色板 | 1 bit alpha | 简单图标 |
+| PNG-24 | 1600 万色 | 无 | 截图 |
+| PNG-32 | 1600 万色 | 8 bit alpha | UI 元素、Logo |
+
+**优点**：
+
+- 真正的无损（保存 N 次不劣化）
+- 8 bit alpha 通道完美处理透明
+- 文字 / 线条 / UI 元素清晰
+
+**缺点**：
+
+- 照片类内容体积是 JPEG 的 3-5 倍
+- 不支持动画（APNG 支持有限）
+
+**何时用 PNG**：
+
+- 需要透明背景
+- 截图（颜色块多，JPEG 会糊）
+- 像素艺术 / 卡通线稿
+- 屏幕截图录制
+
+PNG 优化工具：
+
+```bash
+# pngquant：损失质量换取体积（仍优于 JPEG 的视觉质量）
+pngquant --quality=65-80 --strip input.png
+
+# oxipng：纯无损优化
+oxipng -o 4 --strip safe input.png
+
+# zopflipng：极致无损（慢但小）
+zopflipng -m input.png output.png
+```
+
+实测一个 200 KB 的 UI 截图：
+
+| 工具 | 体积 |
+| ---- | ---- |
+| 原始 | 200 KB |
+| oxipng（无损） | 180 KB |
+| pngquant 80（轻微有损） | 65 KB |
+| 转为 WebP 无损 | 130 KB |
+| 转为 WebP 90% | 32 KB |
+
+对 UI 元素，**WebP 通常完胜 PNG**。
+
+### WebP
+
+Google 2010 年推出，2020 年 Safari 14 加入支持后实现全平台覆盖。
+
+**优点**：
+
+- 同质量下比 JPEG 小 25–35%
+- 支持有损 + 无损 + 透明 + 动画
+- 解码速度接近 JPEG
+
+**缺点**：
+
+- 老 Safari（< 14）不支持
+- 无损模式比 PNG 略快但体积接近
+
+**质量参数**：
+
+```bash
+# 有损（替代 JPEG）
+cwebp -q 80 input.jpg -o output.webp
+
+# 无损（替代 PNG，但比 AVIF 大）
+cwebp -lossless input.png -o output.webp
+
+# 接近无损（视觉上无差，比 lossless 小很多）
+cwebp -near_lossless 60 input.png -o output.webp
+```
+
+**WebP 替代 JPEG 的甜点**：质量 75–80（视觉等同 JPEG 85）
+
+**WebP 替代 PNG 的甜点**：`-near_lossless 60` 或 `-lossless` + `-z 9`
+
+### AVIF
+
+基于 AV1 视频编码的图片格式，2020 年起推广，2024 年全平台支持（Safari 16+）。
+
+**优点**：
+
+- 同质量下比 JPEG 小 50–70%
+- 比 WebP 小 20–30%
+- 支持 12 bit 深度（HDR 友好）
+- 支持 chroma subsampling 4:4:4（高保真）
+
+**缺点**：
+
+- 编码慢（比 WebP 慢 10-50 倍）
+- 解码也比 WebP 略慢
+- 老浏览器（Edge < 121, Safari < 16）不支持
+
+**实测**：同一张风景照在不同格式下达到相同视觉质量
+
+| 格式 | 体积 | 编码时间 |
+| ---- | ---- | -------- |
+| JPEG q90 | 280 KB | 30 ms |
+| WebP q80 | 180 KB | 100 ms |
+| AVIF q60 | 110 KB | 1500 ms |
+
+```bash
+# 用 avifenc
+avifenc -q 60 -s 4 input.jpg output.avif
+# -s：speed (0-10), 4 = 平衡
+
+# 用 sharp（Node.js）
+import sharp from 'sharp'
+await sharp(input).avif({ quality: 60, effort: 4 }).toFile('output.avif')
+```
+
+### SVG
+
+Scalable Vector Graphics——基于 XML 的矢量图形。
+
+**优点**：
+
+- **无限缩放**不失真（适合 Retina / 自适应布局）
+- 体积小（图标常 < 1 KB）
+- 可被 CSS / JS 操作（动画、交互）
+- 原生支持透明
+- 可被压缩（gzip/brotli 后超小）
+
+**缺点**：
+
+- 不适合复杂图（照片转 SVG 体积爆炸）
+- 解析有 CPU 成本
+- 需注意 XSS（如果来自用户输入）
+
+**SVG 优化**：
+
+```bash
+# SVGO：业界标准
+npx svgo input.svg
+
+# 或编程使用
+import { optimize } from 'svgo'
+const result = optimize(svgString, {
+  plugins: ['preset-default', 'removeDimensions']
+})
+```
+
+实测一个 8 KB 的 Logo SVG：
+
+| 步骤 | 体积 |
+| ---- | ---- |
+| 设计师导出 | 8 KB |
+| SVGO 默认 | 2.5 KB |
+| + Brotli | 1 KB |
+
+### JPEG XL
+
+下一代格式，Google 与 Cloudinary 等推动，但浏览器支持仍在争议中。Safari 17+ 已支持，Chrome 暂时拒绝。
+
+目前**不建议**作为主要格式，可作为未来选项关注。
+
+## 决策树
+
+> 选择正确格式是性能优化中收益最大的单点决策。
+
+```text
+图片是什么类型？
+│
+├─ 是图标 / Logo / 简单插图（颜色少，几何为主）
+│       └─► SVG ──► 用 SVGO 优化
+│
+├─ 是照片 / 复杂渐变 / 屏幕截图
+│       │
+│       ├─ 需要透明？
+│       │       ├─ 是 ──► AVIF（< picture > 兜底 WebP / PNG）
+│       │       └─ 否 ──► AVIF（< picture > 兜底 WebP / JPEG）
+│       │
+│       └─ 不需要透明 ──► AVIF / WebP / JPEG 三层 fallback
+│
+├─ 是 UI 截图 / 文档截图（线条 + 文字）
+│       └─► WebP 无损 或 PNG（pngquant 80-90）
+│
+├─ 是动画
+│       │
+│       ├─ 简单（< 10 帧、< 5 秒） ──► AVIF / WebP 动画
+│       └─ 复杂 / 长 ──► MP4 / WebM 视频（更高效）
+│
+└─ 是大图（> 1MB）
+        └─► AVIF + 必要时 srcset 多分辨率（详见下章）
+```
+
+## 矢量 vs 位图
+
+> "Prefer using vector image rather than bitmap images"（roadmap 条目）
+
+### 矢量适用场景
+
+- 图标（Material Icons / Heroicons / Lucide 都是 SVG）
+- Logo
+- 简单插图（如登录页装饰）
+- 数据可视化图表（D3.js 默认 SVG）
+
+### 矢量优势量化
+
+一个常见图标（24×24 px）：
+
+| 格式 | 1x | 2x | 3x |
+| ---- | -- | -- | -- |
+| PNG-32 | 1 KB | 3 KB | 7 KB |
+| WebP | 0.5 KB | 1.5 KB | 3.5 KB |
+| SVG | 800 B | 800 B | 800 B（同一份） |
+
+矢量格式的"零成本多分辨率"特性，对图标库来说是几何级别的体积差异。
+
+### Icon System 推荐
+
+```jsx
+// React + lucide-react
+import { Home, Settings, User } from 'lucide-react'
+
+<Home size={24} />
+<Settings size={24} className="text-gray-500" />
+```
+
+每个图标按需引入（Tree Shaking），无运行时 SVG 解析开销。
+
+```vue
+<!-- Vue + lucide-vue-next -->
+<script setup>
+import { Home } from 'lucide-vue-next'
+</script>
+<template>
+  <Home :size="24" />
+</template>
+```
+
+### Sprite vs 单文件
+
+```html
+<!-- 方法 1：每个图标独立 SVG 文件（HTTP/2 推荐） -->
+<img src="/icons/home.svg" />
+
+<!-- 方法 2：SVG sprite（HTTP/1.1 时代优化） -->
+<svg style="display: none">
+  <symbol id="home" viewBox="0 0 24 24"><path d="..." /></symbol>
+</svg>
+<svg><use href="#home" /></svg>
+
+<!-- 方法 3：内联（关键图标） -->
+<svg width="24" height="24"><path d="..." /></svg>
+```
+
+HTTP/2 时代，方法 1 + 长缓存通常最优。Sprite 仅在图标极多（100+）时仍有体积优势。
+
+### 矢量的"位图化"陷阱
+
+```html
+<!-- ❌ 把 Logo 出成 4K 高清 PNG -->
+<img src="/logo-4k.png" width="200" />  <!-- 8 MB 的图缩到 200px 显示 -->
+
+<!-- ✅ 给设计师要 SVG 源文件 -->
+<img src="/logo.svg" width="200" />  <!-- 2 KB -->
+```
+
+这是产品 / 设计协作中最常见的浪费。建立"Logo / 图标必须为 SVG"的强制规则。
+
+## Base64 反模式
+
+> "Avoid using Base64 images"（roadmap 条目）
+
+把图片用 Base64 编码内联到 CSS / HTML：
+
+```html
+<!-- HTML 中 -->
+<img src="data:image/png;base64,iVBORw0KGg..." />
+
+<!-- CSS 中 -->
+.bg { background: url('data:image/png;base64,iVBORw0KGg...'); }
+```
+
+### 缺点
+
+1. **体积膨胀 33%**：Base64 编码使原始字节增加 33%（每 3 字节变 4 字符）
+2. **不可缓存**：内联在 HTML / CSS 中，每次都重传
+3. **阻塞解析**：嵌在 CSS 中的 Base64 与 CSS 一起阻塞渲染
+4. **GZIP 压缩低效**：随机字符的压缩率远低于二进制
+5. **CSP 障碍**：默认禁止 inline data URI（部分场景）
+
+### 实测对比
+
+一张 5 KB 的 PNG：
+
+| 方式 | 传输体积 | 缓存 | 总成本（重复访问） |
+| ---- | -------- | ---- | ------------------ |
+| 独立文件 + HTTP cache | 5 KB | ✅ | 0 KB |
+| Base64 内联 | 6.7 KB | ❌ | 6.7 KB × N 次访问 |
+
+只有当资源 < 1 KB 且只在单页面使用，且永远不会被复用时，Base64 才有价值（省一次请求）。其它情况一律外链。
+
+### 例外：单像素与极简 SVG
+
+```html
+<!-- 1×1 透明像素（占位用） -->
+<img src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" />
+<!-- 实际只有 80 字节，外部请求开销大于体积 -->
+
+<!-- 极小 SVG（< 200 字节） -->
+<div style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=...></svg>')"></div>
+```
+
+### 替代方案：CSS / SVG / Icon Font
+
+```css
+/* ❌ Base64 背景图标 */
+.icon-arrow {
+  background: url('data:image/png;base64,...');
+}
+
+/* ✅ Mask + 颜色控制（同一图标多色无需多份） */
+.icon-arrow {
+  -webkit-mask: url('/arrow.svg') no-repeat center;
+  background: currentColor;
+  width: 24px; height: 24px;
+}
+```
+
+## 压缩工具链
+
+### 命令行工具
+
+| 工具 | 格式 |
+| ---- | ---- |
+| `mozjpeg` / `jpegoptim` | JPEG |
+| `pngquant` / `oxipng` / `zopflipng` | PNG |
+| `cwebp` | WebP |
+| `avifenc` | AVIF |
+| `svgo` | SVG |
+| `gifsicle` | GIF |
+
+### Node.js 库：sharp
+
+[sharp](https://sharp.pixelplumbing.com/) 是 Node.js 生态中性能最好的图片处理库（基于 libvips）：
+
+```js
+import sharp from 'sharp'
+
+// 一次输出多格式
+const buffer = await sharp('input.jpg').toBuffer()
+
+await Promise.all([
+  sharp(buffer).avif({ quality: 60 }).toFile('out.avif'),
+  sharp(buffer).webp({ quality: 80 }).toFile('out.webp'),
+  sharp(buffer).jpeg({ quality: 85, progressive: true, mozjpeg: true }).toFile('out.jpg')
+])
+
+// 批量调整尺寸
+for (const w of [480, 768, 1280, 1920]) {
+  await sharp('input.jpg')
+    .resize(w)
+    .avif({ quality: 60 })
+    .toFile(`out-${w}.avif`)
+}
+```
+
+### 构建期插件
+
+#### Vite
+
+```js
+import { defineConfig } from 'vite'
+import imagemin from 'unplugin-imagemin/vite'
+
+export default defineConfig({
+  plugins: [
+    imagemin({
+      compress: {
+        jpg: { quality: 85 },
+        png: { quality: [0.65, 0.8] },
+        webp: { quality: 80 },
+        avif: { quality: 60 }
+      }
+    })
+  ]
+})
+```
+
+#### Next.js
+
+`next/image` 内置 sharp，自动多格式 + 多尺寸：
+
+```jsx
+import Image from 'next/image'
+
+<Image
+  src="/hero.jpg"
+  width={1200} height={600}
+  alt="hero"
+  formats={['image/avif', 'image/webp']}  // 默认就是这俩
+/>
+```
+
+#### Nuxt 3
+
+```vue
+<NuxtImg
+  src="/hero.jpg"
+  width="1200" height="600"
+  format="avif"
+  quality="60"
+/>
+
+<NuxtPicture
+  src="/hero.jpg"
+  :img-attrs="{ alt: 'hero' }"
+/>
+```
+
+### 在线工具：Squoosh
+
+[Squoosh.app](https://squoosh.app/) 是 Google 出的网页版图片压缩工具：
+
+- 浏览器内运行（不上传服务器）
+- 实时左右对比
+- 支持所有现代格式
+- 支持调整 quality / 多种编码器
+
+适合一次性压缩图片或试验最佳参数。
+
+### 商业图片 CDN
+
+如果不想自建，[Cloudinary](https://cloudinary.com)、[Imgix](https://imgix.com)、[Cloudflare Images](https://www.cloudflare.com/products/cloudflare-images/) 提供按需变换：
+
+```html
+<!-- Cloudinary 示例：根据 URL 参数即时生成 -->
+<img src="https://res.cloudinary.com/demo/image/upload/w_800,q_auto,f_auto/sample.jpg" />
+<!-- w_800：宽 800 -->
+<!-- q_auto：自动质量 -->
+<!-- f_auto：根据 Accept 头返回 AVIF/WebP -->
+```
+
+### 自建图片服务的关键点
+
+1. **永远不直接服务源图**——一次原图请求 = 多倍流量
+2. **缓存变换结果**——同一组参数只生成一次
+3. **限制变换组合**——避免被恶意请求 1px、2px、3px... 撑爆缓存
+4. **响应式多尺寸**预生成
+
+## 多格式 fallback
+
+`<picture>` 元素让浏览器**选择支持的最优格式**：
+
+```html
+<picture>
+  <source srcset="/hero.avif" type="image/avif">
+  <source srcset="/hero.webp" type="image/webp">
+  <img src="/hero.jpg" alt="hero" width="1200" height="600">
+</picture>
+```
+
+浏览器从上到下挑第一个支持的 `<source>`，否则用兜底的 `<img>`。
+
+详见 [响应式图片](/performance/image-responsive#多格式-fallback)。
+
+## 透明背景的优化
+
+很多图标 / Logo 不需要 alpha 通道：
+
+```bash
+# 用工具检测是否真的有透明像素
+identify -format "%[opaque]" input.png    # ImageMagick
+# 输出 True 表示完全不透明
+```
+
+完全不透明的 PNG 转 JPEG 可省 60-70% 体积。
+
+## 暗色模式与图片
+
+```html
+<picture>
+  <source srcset="/hero-dark.avif"
+          media="(prefers-color-scheme: dark)"
+          type="image/avif">
+  <source srcset="/hero-light.avif"
+          type="image/avif">
+  <img src="/hero-light.jpg" alt="hero">
+</picture>
+```
+
+CSS 方案（背景图）：
+
+```css
+.hero { background-image: url('/hero-light.avif'); }
+@media (prefers-color-scheme: dark) {
+  .hero { background-image: url('/hero-dark.avif'); }
+}
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 用 4K PNG 做 Logo | 几 MB 浪费 | SVG |
+| Base64 嵌入大图标 | 体积 + 不可缓存 | 外链 |
+| 截图也用 JPEG | 文字模糊 | PNG / WebP 无损 |
+| 只提供单格式 | 现代浏览器拿不到最优 | `<picture>` 多格式 |
+| `<img>` 没 width/height | CLS 偏移 | 显式声明（详见下章） |
+| GIF 长动画 | 体积巨大 | 转 MP4/WebM 视频 |
+| 多次保存 JPEG | 质量持续劣化 | 保留无损源（PNG/PSD） |
+| 服务源图（5 MB） | 流量浪费 | CDN + 多尺寸变换 |
+
+## 监控
+
+### 工具
+
+- **Lighthouse**：`Properly size images` / `Serve images in next-gen formats` / `Encode images efficiently`
+- **PageSpeed Insights**：自动给出每张图的优化建议
+- **WebPageTest**：图片瀑布流分析
+- **`sharp` 元数据**：自动审计
+
+```js
+// CI 中检查图片尺寸
+import sharp from 'sharp'
+import { glob } from 'glob'
+
+const files = await glob('public/**/*.{jpg,png,webp,avif}')
+for (const file of files) {
+  const meta = await sharp(file).metadata()
+  const stat = await fs.promises.stat(file)
+  if (stat.size > 500 * 1024) {
+    console.error(`${file} too large: ${stat.size}`)
+  }
+}
+```
+
+## 小结
+
+- AVIF / WebP 是 2024+ 项目的默认选择，配合 `<picture>` 提供 JPEG/PNG 兜底；
+- SVG 是图标 / Logo 的不二之选，省下的不仅是体积，还有多分辨率适配的麻烦；
+- Base64 是性能反模式，仅在 < 1 KB 且不复用的极端场景才合理；
+- JPEG 质量 80–85 是甜点，PNG 用 pngquant 80–90 通常无视觉差；
+- AVIF 编码慢但解码快、体积优势大，适合静态站构建期或 CDN 即时变换；
+- 永远不直接服务源图，构建期 / CDN 必须做尺寸变换与格式转换；
+- 多格式 fallback 不增加用户成本——浏览器只会下载它支持的最优一份。

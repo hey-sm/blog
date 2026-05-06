@@ -1,0 +1,241 @@
+---
+title: 流式渲染与 Suspense
+description: loading.tsx、Suspense 边界、选择性 hydration、RSC payload 流式传输与 Suspense 嵌套
+---
+
+# 流式渲染与 Suspense
+
+流式渲染（Streaming）是打破 SSR 的"全页阻塞"模式的关键技术。Next.js 的 `loading.tsx` 文件约定与 React `<Suspense>` 提供了两套互补的流式 API。
+
+## 为什么需要流式渲染
+
+传统 SSR：
+
+```text
+请求到达 → 全部渲染完成 → 一次返回整个 HTML → 浏览器显示
+           ^^^^^^^^^^^
+           这个等待可能很长（多个 API 调用、DB 查询）
+```
+
+流式渲染：
+
+```text
+请求到达 → 先返回可用部分（shell/header）→ 逐个返回延迟部分
+           ↓ 500ms: header 可见
+           ↓ 800ms: post list 可见
+           ↓ 1500ms: comments 可见
+```
+
+## `loading.tsx` —— 路由级流式边界
+
+```tsx filename="app/posts/loading.tsx"
+export default function PostsLoading() {
+  return (
+    <div className="animate-pulse space-y-4 p-8">
+      <div className="h-8 w-48 rounded bg-gray-200" />
+      <div className="h-4 w-96 rounded bg-gray-200" />
+      <div className="h-4 w-80 rounded bg-gray-200" />
+    </div>
+  )
+}
+```
+
+`loading.tsx` 自动包裹同级 `page.tsx`：
+
+```text
+app/posts/
+├── layout.tsx          ← 立即渲染（静态/缓存）
+├── loading.tsx         ← 包裹 page.tsx 为 Suspense 回退
+└── page.tsx            ← async，可能需要几秒
+```
+
+### 嵌套 loading
+
+```text
+app/
+├── loading.tsx          # 根 loading（很少用）
+└── posts/
+    ├── loading.tsx      # /posts 的 loading
+    ├── page.tsx
+    └── [slug]/
+        ├── loading.tsx  # /posts/:slug 的 loading
+        └── page.tsx
+```
+
+每次导航，Next.js 显示有变化的段（segment）对应的 loading。
+
+## `<Suspense>` —— 组件级流式边界
+
+```tsx filename="app/page.tsx"
+import { Suspense } from 'react'
+import { Header } from './Header'
+import { PostList, PostListSkeleton } from './PostList'
+import { Comments, CommentsSkeleton } from './Comments'
+import { Weather, WeatherSkeleton } from './Weather'
+
+export default function Home() {
+  return (
+    <div>
+      <Header />                        {/* ← 立即渲染 */}
+
+      <Suspense fallback={<PostListSkeleton />}>
+        <PostList />                    {/* ← 延迟：加载完毕流式发送 */}
+      </Suspense>
+
+      <Suspense fallback={<CommentsSkeleton />}>
+        <Comments />                    {/* ← 独立延迟 */}
+      </Suspense>
+
+      <Suspense fallback={<WeatherSkeleton />}>
+        <Weather />                    {/* ← 独立延迟 */}
+      </Suspense>
+    </div>
+  )
+}
+```
+
+每个 `<Suspense>` 是一个**独立的流式边界**——互相不阻塞。
+
+```text
+响应顺序：
+  <Header />            ← 先到
+  <PostListSkeleton />  ← PostList 还在等
+  <CommentsSkeleton />  ← Comments 还在等
+  <WeatherSkeleton />   ← Weather 还在等
+
+  ...等待 PostList 完成...
+  <PostList />          ← 替换 skeleton
+
+  ...等待 Comments 完成...
+  <Comments />          ← 替换 skeleton
+
+  ...等待 Weather 完成...
+  <Weather />           ← 替换 skeleton
+```
+
+### Suspense 嵌套
+
+```tsx
+<Suspense fallback={<BigSkeleton />}>
+  <SlowComponent>
+    <Suspense fallback={<SmallSkeleton />}>
+      <ReallySlowComponent />
+    </Suspense>
+  </SlowComponent>
+</Suspense>
+```
+
+内层 `<Suspense>` 被触发时，外层已经渲染了（不再显示外层的 fallback）。这使得你可以在"大块 loading"中嵌套"小块 loading"。
+
+## 选择性 Hydration
+
+`<Suspense>` 不仅控制服务端的流式发送，也控制客户端的 **hydration 优先级**：
+
+```text
+服务端流式输出：
+  shell → <Suspense boundary 1> → <Suspense boundary 2>
+
+客户端 hydration：
+  shell (立即 hydrate) → boundary 1 (按需) → boundary 2 (按需)
+```
+
+如果用户在 boundary 2 的内容加载完成前点击了 boundary 1 中的按钮，React 提升 boundary 1 的 hydration 优先级——"选择性 hydration"。
+
+## 流式与 navigation
+
+当用户从 `/posts` 导航到 `/posts/123`：
+
+```text
+app/posts/
+├── layout.tsx          ← 保持挂载，不重新渲染
+└── page.tsx            ← 卸载
+
+app/posts/[slug]/
+├── layout.tsx          ← 与 /posts 的 layout 可能是同一个（保持挂载）
+├── loading.tsx         ← 显示
+└── page.tsx            ← 加载完毕后替换 loading
+```
+
+`loading.tsx` 出现、新 `page.tsx` 完成、替换——与首次加载流程相同，但 layout 保持不动。
+
+## 代码拆分与 `React.lazy`
+
+```tsx
+const HeavyChart = lazy(() => import('./HeavyChart'))
+
+export default function Dashboard() {
+  return (
+    <Suspense fallback={<div>Loading chart...</div>}>
+      <HeavyChart />
+    </Suspense>
+  )
+}
+```
+
+`React.lazy` 配合 Suspense 实现组件级代码拆分——HeavyChart 仅在首次需要渲染时加载 JS。
+
+但 Next.js 默认已按路由拆分代码——只有非路由拆分场景或多 slot 场景才需要手动 `lazy` + Suspense。
+
+## 流式与 SEO
+
+流式渲染的 SSR 与静态 SSR 对搜索引擎无区别——两者都返回完整 HTML。搜索引擎的爬虫会等待完整响应（或可用 timeout 后取已渲染的部分）。`loading.tsx` 的骨架不会出现在最终 HTML 中。
+
+## 陷阱
+
+### `loading.tsx` 不包裹 layout
+
+如果你在 `layout.tsx` 中有 async 操作（如通过 `fetch` 获取导航数据），这会导致**整个路由切换被阻塞**：
+
+```text
+app/dashboard/
+├── layout.tsx          ← async fetch 获取用户信息 ×
+├── loading.tsx         ← 对 layout 中的延迟无效
+└── page.tsx
+```
+
+修复：在 layout 内手动使用 `<Suspense>` 包裹耗时的部分。
+
+### 过多 Suspense 边界 → 潜在的 layout shift
+
+```tsx
+<Suspense fallback={<div className="h-8" />}>
+  <DynamicContent />    {/* 实际渲染高度可能是 200px */}
+</Suspense>
+```
+
+如果骨架与实际内容的高度不一致，内容瀑布式加载会产生 CLS（累积布局偏移）。确保 fallback 与最终内容的尺寸匹配。
+
+### 低效的流式顺序
+
+```tsx
+<Suspense fallback={<Skeleton />}>
+  <GiantSlowComponent>
+    <Suspense fallback={<SmallSkeleton />}>
+      <FastTinyComponent />     {/* 被外层阻塞！ */}
+    </Suspense>
+  </GiantSlowComponent>
+</Suspense>
+```
+
+`FastTinyComponent` 被外层 `<Suspense>` 包裹——即使它很快，也必须等 `GiantSlowComponent` 完成后才渲染。将 `FastTinyComponent` 移到外层 `<Suspense>` 之外，或调整 Suspense 位置。
+
+### Streaming 超时
+
+在 PPR 场景，动态组件如果永远不 resolve（如 fetch hang），Suspense 会一直显示 fallback——没有内置 timeout。考虑对 fetch 使用 `AbortController` 或 `Promise.race`：
+
+```tsx
+async function getData() {
+  const res = await Promise.race([
+    fetch('https://api.example.com/data'),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
+  ])
+  // ...
+}
+```
+
+## 小结
+
+- `loading.tsx` 是路由级流式边界，包裹 `page.tsx`，自动放入 `<Suspense>`；
+- `<Suspense>` 是组件级流式边界，允许多个独立延迟块并行加载；
+- 流式维度：服务端渐进发送 → 客户端选择性 hydration；
+- 避免 layout 中的异步阻塞——因为 `loading.tsx` 无法包裹 layout。

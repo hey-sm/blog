@@ -1,0 +1,229 @@
+---
+title: 路由基础
+description: App Router 的 page.tsx、layout.tsx 与文件树即路由树的心智模型
+---
+
+# 路由基础
+
+App Router 的路由规则可以浓缩为一句：
+
+> **文件系统树 = 路由树。`folder/page.tsx` 产生一个路由，`folder/layout.tsx` 产生一层布局。**
+
+## 文件树 → 路由树
+
+```text
+app/
+├── layout.tsx              → 根布局（所有页面共享）
+├── page.tsx                → /
+├── about/
+│   └── page.tsx            → /about
+├── blog/
+│   ├── layout.tsx          → /blog 的共享布局
+│   ├── page.tsx            → /blog
+│   ├── [slug]/
+│   │   └── page.tsx        → /blog/:slug
+│   └── tags/
+│       └── page.tsx        → /blog/tags
+└── contact/
+    └── page.tsx            → /contact
+```
+
+映射结果：
+
+```text
+/                →  app/layout.tsx > app/page.tsx
+/about           →  app/layout.tsx > app/about/page.tsx
+/blog            →  app/layout.tsx > app/blog/layout.tsx > app/blog/page.tsx
+/blog/hello      →  app/layout.tsx > app/blog/layout.tsx > app/blog/[slug]/page.tsx
+/blog/tags       →  app/layout.tsx > app/blog/layout.tsx > app/blog/tags/page.tsx
+/contact         →  app/layout.tsx > app/contact/page.tsx
+```
+
+## `page.tsx` —— 路由的终端节点
+
+```tsx filename="app/posts/page.tsx"
+export default async function PostsPage() {
+  const posts = await fetch('https://api.example.com/posts').then(r => r.json())
+
+  return (
+    <main>
+      <h1>Posts</h1>
+      {posts.map((p: Post) => (
+        <article key={p.id}>{p.title}</article>
+      ))}
+    </main>
+  )
+}
+```
+
+规则：
+- **必须是默认导出**（`export default`）
+- **可以是 async**（服务端获取数据）
+- **可以被 `layout` 包裹**（自动作为 `children` prop 传入）
+- **文件夹下只能有一个 `page.tsx`**（没有命名 page）
+- **不能与 `route.ts` 共存**
+
+## `layout.tsx` —— 持久化的外壳
+
+```tsx filename="app/blog/layout.tsx"
+export default function BlogLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <div className="blog-layout">
+      <aside>
+        <BlogSidebar />
+      </aside>
+      <main>{children}</main>
+    </div>
+  )
+}
+```
+
+关键行为：
+
+| 特性 | 行为 |
+| ---- | ---- |
+| 嵌套 | 子路由被传入 `children` |
+| 持久性 | 路由切换时 layout **不重新挂载** |
+| 状态保持 | `useState` 中的值在导航中保留 |
+| async | **不支持**——layout 不能是 async 函数 |
+| 接收 params | 不直接接收；需 `useParams`（客户端） |
+
+### Layout 不能是 async
+
+```tsx
+// ✗ layout 不能是 async
+export default async function Layout({ children }) { ... }
+```
+
+需要在 layout 中获取数据时，将数据获取逻辑放入 Server Component，并作为 slot 传入；或使用 Route Handler + 客户端 fetch。
+
+### 根 layout 的职责
+
+```tsx filename="app/layout.tsx"
+import type { Metadata } from 'next'
+import './globals.css'
+
+export const metadata: Metadata = {
+  title: { template: '%s | My App', default: 'My App' },
+  description: '...',
+}
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body className="min-h-screen antialiased">
+        <Header />
+        {children}
+        <Footer />
+      </body>
+    </html>
+  )
+}
+```
+
+根 `layout` **必需**，且必须包含 `<html>` 和 `<body>` 标签。项目只能有一个。
+
+## 布局嵌套 = URL 嵌套
+
+```text
+app/
+├── layout.tsx              [1] 根
+├── (shop)/
+│   ├── layout.tsx          [2] 商户共享
+│   ├── products/
+│   │   ├── layout.tsx      [3] 产品共享
+│   │   └── page.tsx        /products
+│   └── cart/
+│       └── page.tsx        /cart
+```
+
+`/products` 的组件树：
+
+```text
+<[1] RootLayout>
+  <[2] ShopLayout>
+    <[3] ProductsLayout>
+      <ProductsPage />
+    </[3] ProductsLayout>
+  </[2] ShopLayout>
+</[1] RootLayout>
+```
+
+## 页面级数据流
+
+```text
+┌────────────────────────────────────────────────────────┐
+│                   layout.tsx                            │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │                  page.tsx                         │  │
+│  │                                                    │  │
+│  │  fetch data in component body (Server Component)   │  │
+│  │  ↓                                                 │  │
+│  │  pass data to client sub-components                │  │
+│  │                                                    │  │
+│  │  can NOT: pass data UP to parent layout            │  │
+│  │  can NOT: read from sibling page's data            │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
+```
+
+父 layout 无法读取页面 fetch 的数据——数据流是单向的（从父到子）。如果 layout 需要依赖于页面特定数据，考虑：
+- 将数据逻辑上提到共享的祖先
+- 使用 `params` 在 Server Component 中并行 fetch
+
+## 陷阱
+
+### `page.tsx` 不是 `route.ts`
+
+`page.tsx` 返回 UI → HTML 响应。`route.ts` 返回 `Response` 对象 → 自定义响应。两者在同一目录下**不能共存**：
+
+```text
+app/api/example/
+├── page.tsx     # ✗ 有 page 不能有 route
+└── route.ts     # ✗ 有 route 不能有 page
+```
+
+### Layout 不接收 `searchParams`
+
+```tsx
+// ✗ layout 没有 searchParams prop
+export default function Layout({
+  children,
+  searchParams,  // ← 不存在
+}: {
+  children: React.ReactNode
+  searchParams: { q: string }
+})
+```
+
+`searchParams` 只在 `page.tsx` 中可用。Layout 中获取 query string 需要在客户端用 `useSearchParams()`。
+
+### 不要在 layout 中依赖路径名渲染条件 UI
+
+```tsx
+// ✗ 反模式
+import { headers } from 'next/headers'
+
+export default function Layout({ children }: { children: React.ReactNode }) {
+  const pathname = headers().get('x-pathname')
+  if (pathname === '/admin') return <AdminLayout>{children}</AdminLayout>
+  return <PublicLayout>{children}</PublicLayout>
+}
+```
+
+Layout 应该按路由层级组织，而不是在 layout 内部做路由判断——将不同的 layout 放在它们各自的路由段中。
+
+## 小结
+
+- `folder/page.tsx` = 一个路由；`folder/layout.tsx` = 一层共享外壳；
+- 布局嵌套与 URL 嵌套一一对应，导航时 layout 保持挂载、状态保留；
+- `page.tsx` 可以是 async Server Component；`layout.tsx` 不能 async；
+- 数据流从 layout → page，不能反向传递。

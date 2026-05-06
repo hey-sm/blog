@@ -1,0 +1,222 @@
+---
+title: 语言介绍
+description: JavaScript 的语言定位、历史脉络、ECMAScript 版本演进与运行环境
+---
+
+# 语言介绍
+
+## 什么是 JavaScript
+
+JavaScript 是一门**多范式、动态类型、单线程、基于原型继承**的编程语言，由 ECMA TC39 委员会维护其语言规范 ECMA-262。它最初被设计为浏览器中的客户端脚本语言，如今已广泛用于服务端（Node.js / Deno / Bun）、桌面应用（Electron / Tauri）、移动端（React Native）、嵌入式与 Serverless 等运行环境。
+
+### 关键语言特征
+
+| 特征 | 含义 |
+| ---- | ---- |
+| 多范式 | 同时支持函数式、面向对象、过程式、响应式编程风格 |
+| 动态类型 | 变量没有静态类型，绑定关系仅在运行时确立 |
+| 弱类型 | 在运算时会发生隐式类型转换（详见[类型转换](/js/type-casting)） |
+| 基于原型 | 对象通过 `[[Prototype]]` 内部槽形成继承链，没有 Java/C++ 意义上的"类" |
+| 单线程 | 主线程一次只执行一段同步代码，并发依赖事件循环（详见[异步](/js/async)） |
+| 一等函数 | 函数是值，可被赋值、传递、返回 |
+
+```js
+// 一等函数示例：函数作为值传递
+const compose = (f, g) => x => f(g(x))
+const addOne = n => n + 1
+const double = n => n * 2
+
+const pipeline = compose(addOne, double)
+console.log(pipeline(3))   // → 7   等价于 addOne(double(3))
+```
+
+上例中 `compose` 接受两个函数，返回一个新的函数，这是函数式编程的高阶函数（higher-order function）模式，在 JavaScript 中无需额外语法支持即可实现。
+
+## 历史脉络
+
+| 年份 | 事件 |
+| ---- | ---- |
+| 1995 | Brendan Eich 在 Netscape 用 10 天完成首版语言原型，最初命名为 Mocha |
+| 1996 | 改名为 LiveScript，随后再改名为 JavaScript（市场策略：与当时火热的 Java 关联） |
+| 1997 | 提交至 ECMA International，ECMAScript 1 (ES1) 发布 |
+| 1999 | ES3 发布，正则表达式、`try/catch` 进入语言核心 |
+| 2009 | ES5 发布，引入 `strict mode`、JSON、`Object.defineProperty`、`Array.prototype.forEach` 等 |
+| 2015 | **ES6 / ES2015** 发布，里程碑级更新：`let` / `const`、箭头函数、`class`、模板字符串、解构、`Promise`、`Map` / `Set`、ESM |
+| 2016+ | 进入年度迭代节奏，每年发布一个版本 |
+| 2017 | `async / await`、`Object.values` / `entries` |
+| 2020 | 可选链 `?.`、空值合并 `??`、`BigInt`、动态 `import()` |
+| 2022 | `class` 私有字段、Top-level `await` |
+| 2024 | `Object.groupBy`、`Promise.withResolvers`、正则 `v` 标志 |
+
+ECMAScript 与 JavaScript 的关系：**ECMAScript 是规范，JavaScript 是该规范在不同宿主环境下的具体实现**。Mozilla 的 SpiderMonkey、Chrome / Node.js 的 V8、Safari 的 JavaScriptCore、微软曾经的 Chakra 都是符合规范的引擎。
+
+<details>
+<summary>为什么 ES4 没有发布？</summary>
+
+ES4 草案野心过大（计划引入静态类型、命名空间、包系统等），社区分歧严重，最终于 2008 年被弃用。其部分理念后来分化为 ES5 与 ActionScript 3。
+</details>
+
+## ECMAScript 版本演进
+
+### ES5（2009）：成熟与稳固
+
+```js
+'use strict'                                  // 严格模式
+
+const obj = {}
+Object.defineProperty(obj, 'name', {          // 属性描述符
+  value: 'js',
+  writable: false,
+  enumerable: true,
+  configurable: false
+})
+
+;[1, 2, 3].forEach(n => console.log(n))       // 数组迭代方法
+JSON.parse(JSON.stringify({ a: 1 }))          // JSON API
+```
+
+ES5 是分水岭：在它之后，"现代 JavaScript" 才真正成型。
+
+### ES2015（ES6）：语法革命
+
+```js
+// 1. 块级作用域
+let x = 1
+const y = 2
+
+// 2. 解构与展开
+const [a, b, ...rest] = [1, 2, 3, 4]
+const { name, age = 18 } = { name: 'js' }
+
+// 3. 模板字符串
+const greet = `Hello, ${name}!`
+
+// 4. 箭头函数
+const sum = (a, b) => a + b
+
+// 5. class
+class Point {
+  constructor(x, y) { this.x = x; this.y = y }
+  toString() { return `(${this.x}, ${this.y})` }
+}
+
+// 6. 模块
+// import { foo } from './foo.js'
+// export const bar = 1
+
+// 7. Promise
+fetch('/api/users').then(res => res.json())
+
+// 8. Map / Set
+const map = new Map([['k', 'v']])
+const set = new Set([1, 2, 3])
+```
+
+### ES2017+：异步与人体工学
+
+```js
+// async / await（ES2017）
+async function loadUser(id) {
+  const res = await fetch(`/api/users/${id}`)
+  return res.json()
+}
+
+// 可选链 / 空值合并（ES2020）
+const city = user?.address?.city ?? 'Unknown'
+
+// BigInt（ES2020）
+const big = 9007199254740993n
+console.log(big + 1n)                         // → 9007199254740994n
+
+// 私有字段（ES2022）
+class Counter {
+  #value = 0
+  inc() { this.#value++ }
+  get current() { return this.#value }
+}
+```
+
+## 运行环境
+
+JavaScript 代码不能脱离**宿主环境（host）**独立运行。宿主提供全局对象、I/O 接口、事件循环等运行时基础设施。
+
+### 浏览器
+
+宿主对象包括 `window`、`document`、`navigator`、`fetch`、`localStorage` 等。HTML 中通过 `<script>` 标签加载：
+
+```html
+<!-- 经典脚本：阻塞 HTML 解析 -->
+<script src="app.js"></script>
+
+<!-- defer：HTML 解析完成后按顺序执行 -->
+<script src="app.js" defer></script>
+
+<!-- async：下载完成立即执行，顺序不保证 -->
+<script src="analytics.js" async></script>
+
+<!-- ES Module：默认 defer，支持 import / export -->
+<script type="module" src="main.js"></script>
+```
+
+`defer` 与 `async` 的差异是关键面试点：
+
+| 属性 | 下载 | 执行时机 | 顺序保证 |
+| ---- | ---- | -------- | -------- |
+| 经典 | 阻塞解析 | 下载完立即执行，阻塞解析 | ✅ |
+| `defer` | 并行 | DOMContentLoaded 之前，按文档顺序 | ✅ |
+| `async` | 并行 | 下载完立即执行 | ❌ |
+| `type="module"` | 并行 | 默认等同 `defer` | ✅ |
+
+### Node.js
+
+Node.js 将 V8 引擎与 libuv（事件循环 / 线程池 / I/O 抽象）结合，提供 `process`、`require`、`Buffer`、`fs`、`http` 等宿主能力。从 v12 起原生支持 ESM，v18 起内建 `fetch`、`Web Streams`。
+
+```bash
+# 直接执行
+node app.js
+
+# REPL
+node
+
+# 评估表达式
+node -e "console.log(process.versions.node)"
+```
+
+### 其他运行时
+
+- **Deno**：默认安全沙箱，原生 TypeScript，Web 标准 API 优先
+- **Bun**：基于 JavaScriptCore，目标是更快的安装与启动速度
+- **WinterCG / Edge Runtime**：Cloudflare Workers、Vercel Edge Functions 等所遵循的子集规范，去除了 Node.js 专有 API
+
+## 如何运行 JavaScript
+
+### 浏览器控制台
+
+按 `F12` 打开 DevTools → 切换到 Console 面板，可立即执行任意表达式：
+
+```js
+[...new Set([1, 1, 2, 3])]                    // → [1, 2, 3]
+```
+
+### Node.js REPL
+
+终端执行 `node` 进入 REPL，支持多行输入与历史记录。
+
+```bash
+$ node
+Welcome to Node.js v22.x
+> [1, 2, 3].reduce((a, b) => a + b)
+6
+```
+
+### 在线 Playground
+
+- [TypeScript Playground](https://www.typescriptlang.org/play)：可关闭类型检查作为 JS Playground 使用
+- [esm.sh / jsfiddle / codesandbox.io / stackblitz.com]：支持包导入与项目级实验
+
+## 小结
+
+- JavaScript 是一门以 ECMAScript 规范为核心的多范式语言；
+- 经历了 ES5 的稳固期与 ES2015 起的快速演进期，目前进入年度迭代；
+- 真正的"运行时" = 引擎（V8/JSC/SpiderMonkey）+ 宿主（浏览器/Node.js/Deno/...）；
+- 学习 JavaScript 时建议同时关注规范层面与宿主层面的差异，避免将"浏览器行为"等同于"语言行为"。

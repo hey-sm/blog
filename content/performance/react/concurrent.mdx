@@ -1,0 +1,608 @@
+---
+title: 并发特性
+description: useTransition、useDeferredValue、startTransition 与 React 18+ 调度优先级
+---
+
+# 并发特性
+
+React 18 引入的并发特性是过去十年 React 最重要的能力升级——它让 React **可以优先响应用户输入**，把"不那么紧急"的渲染推迟。本章覆盖 `useTransition` / `useDeferredValue` / `startTransition` 三大 API、调度优先级模型，以及在搜索、Tab 切换、复杂列表等场景的实战用法。
+
+## 为什么需要并发
+
+### 单一优先级的问题
+
+React 17 及之前，所有渲染都是**同等紧急**：
+
+```jsx
+function SearchPage() {
+  const [query, setQuery] = useState('')
+
+  return (
+    <>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <ExpensiveSearchResults query={query} />   {/* 渲染 5000 项，需 200ms */}
+    </>
+  )
+}
+```
+
+用户敲一个字符 → setQuery → React 立即重渲染 → 200 ms 都被卡住 → 输入框也无响应 → 输入卡顿。
+
+```text
+用户输入 "h"     ─►  渲染 5000 项 (200ms 阻塞)  ─►  用户看到 "h"
+用户输入 "he"    ─►  渲染 5000 项 (200ms 阻塞)  ─►  用户看到 "he"
+                                                     ↑
+                                               输入感觉极慢
+```
+
+### 并发渲染的解法
+
+React 18+ 区分**紧急更新**和**过渡更新**：
+
+```text
+紧急（urgent）：    输入、点击、悬停 ── 立即响应
+过渡（transition）：导航、过滤、排序 ── 可被中断的"后台渲染"
+```
+
+```jsx
+function SearchPage() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [isPending, startTransition] = useTransition()
+
+  function handleChange(e) {
+    setQuery(e.target.value)              // 紧急：立即更新输入框
+
+    startTransition(() => {
+      setResults(filter(e.target.value))   // 过渡：可被中断
+    })
+  }
+
+  return (
+    <>
+      <input value={query} onChange={handleChange} />
+      {isPending && <Spinner />}
+      <ExpensiveSearchResults results={results} />
+    </>
+  )
+}
+```
+
+效果：
+
+```text
+用户输入 "h"  ─►  输入框立即更新 ─►  开始渲染 5000 项
+用户输入 "he" ─►  输入框立即更新 ─►  中断刚才的渲染，重新开始
+用户输入 "hel"─►  输入框立即更新 ─►  中断 ...
+用户停下      ─►  完成渲染
+```
+
+输入永远顺滑，结果"赶上来"——这是并发的核心价值。
+
+## 并发的工作原理
+
+### 时间切片（Time Slicing）
+
+React 18+ 在 Fiber 架构上实现"工作单元 + 让出主线程"：
+
+```text
+performWorkUntilDeadline()
+  while (workInProgress != null && !shouldYield()) {
+    performUnitOfWork()
+  }
+  if (workInProgress != null) {
+    requestNextChunk()                   // 下一帧继续
+  }
+
+shouldYield()
+  ├─ 当前任务时间片用完？（默认 5 ms）
+  ├─ 有更高优先级任务？
+  └─ 浏览器有输入待处理？（isInputPending）
+```
+
+每 5 ms 让出一次主线程，浏览器可以处理输入、布局、绘制。
+
+### Lane 模型（优先级通道）
+
+React 18 用"Lane"表示优先级。不同更新分配不同 lane：
+
+```text
+优先级（高 → 低）：
+SyncLane              ── flushSync 强制同步
+InputContinuousLane   ── 用户连续输入
+DefaultLane           ── 普通更新（默认）
+TransitionLane        ── startTransition / useTransition
+IdleLane              ── 完全空闲时
+```
+
+高优先级 lane 抢占低优先级。React 处理某个 lane 时，新的高优先级更新会让当前工作"中断重来"。
+
+### 哪些更新自动是过渡
+
+React 18+ 中**自动**走过渡通道的：
+
+- `startTransition` 包裹的 setState
+- `useTransition` 的 setter
+- React Router v6+ 的导航
+- Suspense 重新挂起
+
+其它默认是紧急更新。
+
+## useTransition
+
+```jsx
+const [isPending, startTransition] = useTransition()
+
+function handleClick() {
+  startTransition(() => {
+    // 这里的 setState 标记为过渡
+    setTab('reports')
+  })
+}
+```
+
+返回：
+
+| 值 | 含义 |
+| -- | ---- |
+| `isPending` | 过渡是否正在进行 |
+| `startTransition(fn)` | 把 `fn` 中的更新标记为过渡 |
+
+### 经典场景：Tab 切换
+
+```jsx
+function Dashboard() {
+  const [tab, setTab] = useState('overview')
+  const [isPending, startTransition] = useTransition()
+
+  function selectTab(next) {
+    startTransition(() => {
+      setTab(next)
+    })
+  }
+
+  return (
+    <>
+      <TabNav>
+        <Tab onClick={() => selectTab('overview')}>Overview</Tab>
+        <Tab onClick={() => selectTab('reports')}>Reports</Tab>
+        <Tab onClick={() => selectTab('analytics')}>Analytics</Tab>
+      </TabNav>
+
+      {isPending && <LoadingBar />}
+
+      {tab === 'overview' && <Overview />}
+      {tab === 'reports' && <Reports />}      {/* 渲染 50ms */}
+      {tab === 'analytics' && <Analytics />}  {/* 渲染 200ms */}
+    </>
+  )
+}
+```
+
+效果：点击 Tab 立即高亮（紧急），下方内容慢慢渲染（过渡），可被再次点击中断。
+
+### 搜索 + 列表
+
+```jsx
+function SearchableList({ items }) {
+  const [query, setQuery] = useState('')
+  const [filtered, setFiltered] = useState(items)
+  const [isPending, startTransition] = useTransition()
+
+  function handleChange(e) {
+    setQuery(e.target.value)              // 紧急
+
+    startTransition(() => {
+      setFiltered(items.filter(x =>       // 过渡
+        x.name.toLowerCase().includes(e.target.value.toLowerCase())
+      ))
+    })
+  }
+
+  return (
+    <>
+      <input value={query} onChange={handleChange} />
+      <List
+        items={filtered}
+        style={{ opacity: isPending ? 0.6 : 1 }}    // 视觉提示
+      />
+    </>
+  )
+}
+```
+
+### 嵌套 transition
+
+外层 transition 不会让内部 transition 失效——它们独立调度：
+
+```jsx
+startTransition(() => {
+  setTab('reports')
+  startTransition(() => {       // 嵌套 OK
+    setSubTab('sales')
+  })
+})
+```
+
+## startTransition（独立 API）
+
+不需要 `isPending` 时，直接用 `startTransition`：
+
+```jsx
+import { startTransition } from 'react'
+
+function selectTab(next) {
+  startTransition(() => {
+    setTab(next)
+  })
+}
+```
+
+适合：
+
+- 不需要显示 pending 状态
+- 在事件处理器外触发（如 setTimeout 内）
+- 与第三方库集成（路由库内部用）
+
+## useDeferredValue
+
+`useDeferredValue` 是另一种降级渲染的方式：
+
+```jsx
+function SearchableList({ items }) {
+  const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query)
+
+  const filtered = useMemo(
+    () => items.filter(x => x.name.includes(deferredQuery)),
+    [items, deferredQuery]
+  )
+
+  return (
+    <>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <List items={filtered} />
+    </>
+  )
+}
+```
+
+### 工作机制
+
+```text
+当 query 变化：
+  1. React 用新 query + 旧 deferredQuery 渲染（紧急）
+     → 输入框立即更新，列表保持旧内容
+  2. React 标记一次"过渡渲染"
+  3. 过渡渲染中 deferredQuery 才更新
+     → 列表赶上
+```
+
+### vs useTransition
+
+| 维度 | useTransition | useDeferredValue |
+| ---- | ------------- | ---------------- |
+| 谁控制 | setState 调用方 | 数据消费方 |
+| 触发 | 显式 startTransition() | 自动延迟 |
+| 适用 | 自己拥有 state | state 来自外部（props） |
+
+```jsx
+// useTransition：你在写"输入控件"
+function MyInput() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+  const [pending, startTransition] = useTransition()
+
+  function onChange(e) {
+    setQuery(e.target.value)
+    startTransition(() => setResults(...))
+  }
+}
+
+// useDeferredValue：你在写"被搜索的子组件"，query 是 prop
+function ResultList({ query }) {
+  const deferredQuery = useDeferredValue(query)
+  return <ExpensiveResults query={deferredQuery} />
+}
+```
+
+### 视觉提示：检测过期
+
+```jsx
+function ResultList({ query }) {
+  const deferredQuery = useDeferredValue(query)
+  const isStale = query !== deferredQuery
+
+  return (
+    <div style={{ opacity: isStale ? 0.6 : 1 }}>
+      <ExpensiveResults query={deferredQuery} />
+    </div>
+  )
+}
+```
+
+`isStale === true` 表示"显示的是旧数据，新数据正在生成"——可以加 spinner 或 dim。
+
+## 配合 React.memo / Compiler
+
+并发降级渲染要真正生效，需要被降级的组件能**跳过重渲染**：
+
+```jsx
+function SearchPage() {
+  const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query)
+
+  return (
+    <>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <ExpensiveResults query={deferredQuery} />
+    </>
+  )
+}
+
+// 必须 memo，否则 query 变化（紧急）时也会重渲染
+const ExpensiveResults = React.memo(function ({ query }) {
+  // 渲染逻辑
+})
+```
+
+不然每次 query 变化都触发紧急渲染——deferred 没意义。
+
+React Compiler 启用后，自动 memo 化让这个细节变得透明。
+
+## 与 Suspense 的协同
+
+`startTransition` 让"在过渡中遇到 Suspense 时**显示旧内容直到新内容就绪**"——而不是显示 fallback：
+
+```jsx
+function App() {
+  const [page, setPage] = useState('home')
+  const [pending, startTransition] = useTransition()
+
+  function navigate(next) {
+    startTransition(() => {
+      setPage(next)
+    })
+  }
+
+  return (
+    <>
+      <Nav onClick={navigate} />
+      <Suspense fallback={<Spinner />}>
+        {page === 'home' && <Home />}
+        {page === 'about' && <About />}     {/* 假设 About 用 lazy */}
+      </Suspense>
+    </>
+  )
+}
+```
+
+行为：
+
+- 不用 startTransition：点击 → 立即显示 `<Spinner />` → About 加载完替换
+- 用 startTransition：点击 → 保留 Home 显示 + isPending=true → About 加载完无缝替换
+
+后者体验显著更好——用户不会看到"flash of loading"。
+
+## 调度优先级实战
+
+### 实战 1：Markdown 编辑器实时预览
+
+```jsx
+function MarkdownEditor() {
+  const [text, setText] = useState('')
+  const deferredText = useDeferredValue(text)
+
+  return (
+    <div className="grid grid-cols-2">
+      <textarea value={text} onChange={e => setText(e.target.value)} />
+      <Preview text={deferredText} />
+    </div>
+  )
+}
+
+const Preview = React.memo(function Preview({ text }) {
+  const html = useMemo(() => marked.parse(text), [text])  // 解析慢
+  return <div dangerouslySetInnerHTML={{ __html: html }} />
+})
+```
+
+输入永远顺滑，预览"追赶"。
+
+### 实战 2：图表面板筛选
+
+```jsx
+function Dashboard() {
+  const [filters, setFilters] = useState({})
+  const [isPending, startTransition] = useTransition()
+
+  function applyFilter(name, value) {
+    startTransition(() => {
+      setFilters(prev => ({ ...prev, [name]: value }))
+    })
+  }
+
+  return (
+    <>
+      <FilterPanel onChange={applyFilter} />
+      {isPending && <ProgressBar />}
+      <ChartGrid filters={filters} />     {/* 含 10 个图表 */}
+    </>
+  )
+}
+```
+
+下拉选择立即响应，图表后台渲染。
+
+### 实战 3：路由切换保持旧 UI
+
+```jsx
+// React Router v6.4+ 内部已用 startTransition
+import { useNavigation } from 'react-router-dom'
+
+function App() {
+  const navigation = useNavigation()
+  const isLoading = navigation.state === 'loading'
+
+  return (
+    <>
+      <NavBar />
+      <main style={{ opacity: isLoading ? 0.5 : 1 }}>
+        <Outlet />
+      </main>
+    </>
+  )
+}
+```
+
+## 何时**不**该用并发
+
+### 1. 真正紧急的更新
+
+```jsx
+// ❌ 输入框值不能延迟
+const [query, setQuery] = useState('')
+const deferredQuery = useDeferredValue(query)
+
+<input value={deferredQuery} onChange={...} />  // 输入会卡顿
+```
+
+输入框的 value 必须是紧急更新——只有"被输入驱动的下游"才适合 defer。
+
+### 2. 渲染本身很快
+
+```jsx
+// ❌ 简单计数器加 transition 是过度设计
+startTransition(() => {
+  setCount(c => c + 1)
+})
+```
+
+只有渲染慢（> 16 ms）才需要并发。
+
+### 3. 副作用不能 defer
+
+```jsx
+// ❌ 表单提交、数据写入不能 defer
+startTransition(() => {
+  submitForm(data)        // 业务请求不应被中断
+})
+```
+
+并发是**渲染优化**，不影响副作用。但如果你 startTransition 中触发副作用，行为会复杂——避免。
+
+## 与状态库的兼容性
+
+### Redux / Zustand / Jotai
+
+需要库支持 `useSyncExternalStore`：
+
+```jsx
+// 老 Redux：直接订阅 store，可能在 transition 中"撕裂"
+// 新 Redux（react-redux 8+）：内部用 useSyncExternalStore，并发安全
+```
+
+绝大多数主流库已升级——但用旧版本可能有 tearing 问题。
+
+### 自实现 store
+
+```jsx
+// 推荐：用 useSyncExternalStore
+import { useSyncExternalStore } from 'react'
+
+function useStore(selector) {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => selector(store.getState()),
+    () => selector(store.getState())   // SSR
+  )
+}
+```
+
+`useSyncExternalStore` 会在并发场景下保证**一次提交内所有组件看到相同的 store snapshot**。
+
+## 调试与定位
+
+### 性能监控
+
+```jsx
+import { Profiler } from 'react'
+
+<Profiler id="search" onRender={(id, phase, actualDuration, baseDuration) => {
+  console.log(id, phase, actualDuration)
+  // phase: 'mount' | 'update' | 'nested-update'
+}}>
+  <SearchPage />
+</Profiler>
+```
+
+`actualDuration` 是实际渲染耗时——并发会让它分散到多帧。
+
+### React DevTools Profiler
+
+录制时勾选 "Show non-prioritized commits"——能看到 transition 渲染的实际时机。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 输入 value 用 useDeferredValue | 输入卡顿 | value 紧急，下游 defer |
+| transition 内做副作用 | 行为复杂 | 副作用在事件处理器中 |
+| 简单组件加 transition | 过度设计 | 只对慢渲染用 |
+| 被 defer 的组件没 memo | transition 没效果 | React.memo + 引用稳定 |
+| 老状态库（无 useSyncExternalStore） | tearing | 升级到并发安全版本 |
+| 过度使用 isPending 显示 spinner | UI 闪烁 | 配合 cssTransition 平滑 |
+
+## 综合实战：搜索 + 过滤 + 排序
+
+```jsx
+function ProductCatalog({ allProducts }) {
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('all')
+  const [sortBy, setSortBy] = useState('name')
+
+  // query 高频变化：用 deferred
+  const deferredQuery = useDeferredValue(query)
+
+  // 计算：基于 deferred 值
+  const filtered = useMemo(() => {
+    return allProducts
+      .filter(p => p.name.includes(deferredQuery))
+      .filter(p => category === 'all' || p.category === category)
+      .sort((a, b) => {
+        if (sortBy === 'price') return a.price - b.price
+        return a.name.localeCompare(b.name)
+      })
+  }, [allProducts, deferredQuery, category, sortBy])
+
+  // 视觉提示：query 变化期间显示半透明
+  const isStale = query !== deferredQuery
+
+  return (
+    <>
+      <SearchBar value={query} onChange={setQuery} />
+      <FilterBar
+        category={category} onCategoryChange={setCategory}
+        sortBy={sortBy} onSortChange={setSortBy}
+      />
+      <ProductList
+        items={filtered}
+        style={{ opacity: isStale ? 0.6 : 1 }}
+      />
+    </>
+  )
+}
+```
+
+输入永远顺滑，列表"追赶"。
+
+## 小结
+
+- React 18+ 区分紧急（输入、点击）与过渡（导航、过滤）两类更新，过渡可被中断；
+- `useTransition` 让你拥有 state 时把 setState 标记为过渡，返回 isPending 用于 UI 反馈；
+- `useDeferredValue` 让你消费 state 时把它的"应用时机"延迟到过渡阶段；
+- 并发渲染依赖时间切片——每 5 ms 让出主线程，输入永远不被阻塞；
+- 配合 Suspense 的 startTransition 能消除"flash of loading"，让路由切换无缝衔接；
+- 被 defer 的组件需要 memo / Compiler 配合，否则紧急渲染时一样会重渲染；
+- 输入框 value 必须紧急——defer 的是下游消费者，不是输入源；
+- 状态库需支持 useSyncExternalStore 才能在并发场景下避免 tearing。

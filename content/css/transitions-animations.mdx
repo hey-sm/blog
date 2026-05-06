@@ -1,0 +1,676 @@
+---
+title: 过渡与动画
+description: transition、transform、@keyframes、性能优化与现代视图过渡 API
+---
+
+# 过渡与动画
+
+CSS 提供三层动画能力：
+
+| 工具 | 适合场景 |
+| ---- | -------- |
+| `transition` | 状态变化时的过渡（hover / focus / class 切换） |
+| `@keyframes` + `animation` | 持续 / 复杂时序动画（loading、入场） |
+| `transform` | 位移 / 旋转 / 缩放（GPU 加速友好） |
+| View Transitions API | 跨路由的整页过渡（2024+） |
+
+## transition
+
+### 基本语法
+
+```css
+.btn {
+  background: blue;
+  transition: background 200ms ease;
+}
+
+.btn:hover {
+  background: darkblue;
+}
+```
+
+```css
+/* 简写：property duration timing-function delay */
+.x { transition: opacity 0.3s ease-out 0.1s; }
+
+/* 多属性 */
+.x {
+  transition:
+    background 200ms ease,
+    transform 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 全部属性（不推荐：可能动画到非预期属性） */
+.x { transition: all 200ms ease; }
+```
+
+### 缓动函数（timing-function）
+
+| 关键字 | 含义 |
+| ------ | ---- |
+| `linear` | 匀速 |
+| `ease` | 默认；先慢后快再慢 |
+| `ease-in` | 慢 → 快 |
+| `ease-out` | 快 → 慢（**最常用**：用户感受"自然停止"） |
+| `ease-in-out` | 慢 → 快 → 慢 |
+| `cubic-bezier(x1, y1, x2, y2)` | 自定义贝塞尔曲线 |
+| `steps(n)` | 阶梯式 |
+
+#### 选型经验
+
+- **进场用 `ease-out`**：内容快速出现 → 减速到位
+- **出场用 `ease-in`**：减速感反而拖沓，用 ease-in 让退场更利落
+- **悬停 / 微交互用 `ease`**：默认即可
+- **弹簧反弹用 `cubic-bezier(0.34, 1.56, 0.64, 1)`**：有"弹一下"的感觉
+
+```css
+.modal { transition: transform 200ms ease-out; }     /* 弹出 */
+.modal-leaving { transition: transform 150ms ease-in; }  /* 收起 */
+.button:active { transition: transform 100ms; transform: scale(0.96); }
+```
+
+### 哪些属性可以过渡？
+
+只有**可插值的属性**（数值、颜色、变换）能过渡：
+
+- ✅ `color` / `background-color` / `border-color`
+- ✅ `width` / `height` / `padding` / `margin`
+- ✅ `opacity` / `filter`
+- ✅ `transform`
+- ✅ `box-shadow` / `text-shadow`
+- ❌ `display`（整数离散值）
+- ❌ `font-family`
+- ❌ `position`（绝对定位与相对定位之间）
+
+#### display: none → block 怎么动画？
+
+历史上不能直接动画。Chrome 116+ / Firefox 129+ 引入 `transition-behavior: allow-discrete` + `@starting-style`：
+
+```css
+.popover {
+  display: none;
+  opacity: 0;
+  transition: opacity 200ms, display 200ms allow-discrete;
+}
+
+.popover.open {
+  display: block;
+  opacity: 1;
+}
+
+@starting-style {
+  .popover.open { opacity: 0; }
+}
+```
+
+老浏览器先用 `visibility: hidden / visible` 替代。
+
+### Tailwind 过渡
+
+```html
+<button class="
+  bg-blue-600 hover:bg-blue-700
+  transition-colors
+  duration-200
+  ease-out
+">Click</button>
+
+<div class="
+  opacity-0 hover:opacity-100
+  transition-opacity duration-300
+">Fade</div>
+```
+
+| Tailwind | CSS |
+| -------- | --- |
+| `transition` | 全部可动画属性 |
+| `transition-colors` | color / bg / border |
+| `transition-opacity` | opacity |
+| `transition-transform` | transform |
+| `transition-all` | all（慎用） |
+| `duration-150` ~ `duration-1000` | duration |
+| `ease-linear` / `ease-in` / `ease-out` / `ease-in-out` | timing-function |
+| `delay-150` 等 | transition-delay |
+
+## transform
+
+变换不影响布局——元素仍占据原位置，仅视觉位置 / 大小 / 旋转改变。
+
+### 基本变换
+
+```css
+.x { transform: translate(50px, 100px); }     /* 位移 */
+.x { transform: translateX(50px); }
+.x { transform: translateY(50px); }
+.x { transform: translateZ(20px); }            /* 3D（需 perspective） */
+
+.x { transform: scale(1.5); }                  /* 缩放 */
+.x { transform: scale(1.5, 0.5); }             /* x / y */
+
+.x { transform: rotate(45deg); }
+.x { transform: rotateX(45deg); }              /* 3D */
+.x { transform: rotateY(180deg); }
+.x { transform: rotateZ(90deg); }              /* 等价于 rotate */
+
+.x { transform: skew(10deg, 5deg); }           /* 倾斜 */
+.x { transform: matrix(1, 0, 0, 1, 50, 100); } /* 矩阵（少用） */
+
+/* 链式：从右到左执行 */
+.x { transform: translate(50px, 0) rotate(45deg) scale(0.8); }
+```
+
+### 现代独立属性（推荐）
+
+```css
+.x {
+  translate: 50px 100px;
+  scale: 1.5;
+  rotate: 45deg;
+}
+```
+
+新语法的好处：
+
+- 可独立动画：`transition: translate 300ms` 不影响 rotate
+- 不被 `transform` 覆盖
+- 类型化（`scale: 1.5` 比 `transform: scale(1.5)` 短）
+
+### transform-origin
+
+变换中心点：
+
+```css
+.x { transform-origin: center; }              /* 默认 */
+.x { transform-origin: top left; }
+.x { transform-origin: 0 0; }
+.x { transform-origin: 50% 100%; }            /* 底部中心（缩放从底部展开） */
+```
+
+### 3D 变换
+
+```css
+.scene {
+  perspective: 1000px;                        /* 父元素：透视距离 */
+}
+
+.card {
+  transition: transform 600ms;
+  transform-style: preserve-3d;               /* 保留子元素的 3D 位置 */
+}
+
+.card:hover {
+  transform: rotateY(180deg);
+}
+
+.card-front, .card-back {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;                /* 翻转后隐藏背面 */
+}
+.card-back { transform: rotateY(180deg); }
+```
+
+#### Tailwind transform
+
+```html
+<div class="translate-x-4 -translate-y-2">位移</div>
+<div class="scale-110 hover:scale-125">缩放</div>
+<div class="rotate-45">旋转</div>
+<div class="skew-x-12">倾斜</div>
+
+<!-- 任意值 -->
+<div class="translate-x-[50px]">任意</div>
+<div class="rotate-[15deg]">任意</div>
+
+<!-- 3D（Tailwind 4） -->
+<div class="perspective-[1000px]">
+  <div class="rotate-y-180 transform-3d">...</div>
+</div>
+```
+
+## @keyframes 与 animation
+
+复杂时序、循环、独立于交互的动画：
+
+```css
+@keyframes spin {
+  from { transform: rotate(0); }
+  to   { transform: rotate(360deg); }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+```
+
+### 完整语法
+
+```css
+.x {
+  animation:
+    name              /* keyframe 名 */
+    duration          /* 持续时间 */
+    timing-function   /* 缓动 */
+    delay
+    iteration-count   /* 循环次数 / infinite */
+    direction         /* normal / reverse / alternate / alternate-reverse */
+    fill-mode         /* none / forwards / backwards / both */
+    play-state;       /* running / paused */
+}
+```
+
+#### `fill-mode`
+
+控制动画结束后元素回到何种状态：
+
+| 值 | 行为 |
+| -- | ---- |
+| `none` | 默认，动画外保持原样 |
+| `forwards` | 保持最后一帧 |
+| `backwards` | 在 delay 期间提前应用首帧 |
+| `both` | 两者都 |
+
+```css
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.fade-in {
+  animation: fade-in 300ms ease-out forwards;  /* 不会回到 opacity: 0 */
+}
+```
+
+### 多帧
+
+```css
+@keyframes bounce {
+  0%   { transform: translateY(0); }
+  25%  { transform: translateY(-20px); }
+  50%  { transform: translateY(0); }
+  75%  { transform: translateY(-10px); }
+  100% { transform: translateY(0); }
+}
+
+.ball { animation: bounce 1s ease infinite; }
+```
+
+### 多个动画并行
+
+```css
+.x {
+  animation:
+    fade-in 300ms ease-out,
+    slide-up 400ms ease-out;
+}
+```
+
+### 控制 / 暂停
+
+```css
+.x.paused { animation-play-state: paused; }
+.x:hover  { animation-play-state: paused; }
+
+/* JS 控制 */
+element.style.animationPlayState = 'paused'
+```
+
+### Tailwind 动画
+
+Tailwind 内置常用动画：
+
+```html
+<div class="animate-spin">⟳</div>
+<div class="animate-ping">脉冲</div>
+<div class="animate-pulse">透明度脉动（骨架屏）</div>
+<div class="animate-bounce">弹跳</div>
+```
+
+自定义在 `@theme` 中：
+
+```css
+@theme {
+  --animate-fade-in: fade-in 0.3s ease-out;
+  --animate-slide-up: slide-up 0.4s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-up {
+  from { transform: translateY(20px); }
+  to   { transform: translateY(0); }
+}
+```
+
+```html
+<div class="animate-fade-in">渐入</div>
+```
+
+### `tailwindcss-animate` 插件
+
+shadcn/ui 默认依赖。配合 Radix `data-state` 表达进出：
+
+```html
+<DialogContent class="
+  data-[state=open]:animate-in
+  data-[state=closed]:animate-out
+  data-[state=open]:fade-in-0
+  data-[state=closed]:fade-out-0
+  data-[state=open]:zoom-in-95
+  data-[state=closed]:zoom-out-95
+">...</DialogContent>
+```
+
+## 性能：什么属性能 GPU 加速
+
+```text
+合成层属性（fast、GPU 加速）：
+  ✅ transform
+  ✅ opacity
+  ✅ filter（部分）
+  ✅ clip-path（部分）
+
+布局属性（slow，触发 layout）：
+  ❌ width / height / margin / padding
+  ❌ top / left / right / bottom
+  ❌ font-size
+
+绘制属性（中等，触发 paint）：
+  ⚠️ background / color / box-shadow
+  ⚠️ border-radius
+```
+
+#### 黄金法则：动画只用 `transform` 与 `opacity`
+
+```css
+/* ✗ 触发 layout，每帧重新计算所有元素位置 */
+.slide-bad {
+  transition: left 300ms;
+}
+.slide-bad:hover { left: 100px; }
+
+/* ✓ GPU 合成，60fps 稳定 */
+.slide-good {
+  transition: transform 300ms;
+}
+.slide-good:hover { transform: translateX(100px); }
+```
+
+### `will-change`
+
+提示浏览器"这个元素即将动画，请预留合成层"：
+
+```css
+.card {
+  will-change: transform;
+}
+.card:hover {
+  transform: translateY(-4px);
+}
+```
+
+#### 不要滥用
+
+`will-change` 让浏览器为元素**永久**创建合成层，占用内存。仅在确实有动画的元素上加，且动画结束后及时移除：
+
+```js
+element.addEventListener('transitionend', () => {
+  element.style.willChange = ''
+})
+```
+
+或仅在交互即将发生时设置：
+
+```css
+.card:hover { will-change: transform; }
+```
+
+### `contain`
+
+详见 [其他布局](/css/layouts-other#css-containment)。`contain: layout / paint` 让元素的样式变化不影响外部，是大型应用的性能优化基础。
+
+## 滚动动画
+
+### `scroll-behavior: smooth`
+
+```css
+html { scroll-behavior: smooth; }
+```
+
+锚点跳转时自动平滑滚动。注意：`prefers-reduced-motion` 用户应跳过：
+
+```css
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+```
+
+### Scroll-driven Animations（现代）
+
+让动画进度跟随滚动位置：
+
+```css
+@keyframes fade-in-on-scroll {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.section {
+  animation: fade-in-on-scroll linear;
+  animation-timeline: view();                  /* 元素进入视口时驱动 */
+  animation-range: entry 0% cover 30%;
+}
+```
+
+```css
+/* 进度条跟随滚动 */
+.progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 4px;
+  background: blue;
+  transform-origin: left;
+  animation: progress linear;
+  animation-timeline: scroll(root);
+}
+
+@keyframes progress {
+  to { transform: scaleX(1); }
+}
+```
+
+需要纯 CSS 的视差 / 滚动驱动动画时，过去必须 JS——现在 CSS 原生支持。
+
+#### 兼容性
+
+Chrome 115+ / Edge 115+ / Firefox 待支持。生产使用前查 [caniuse](https://caniuse.com/?search=scroll-timeline) 或加 JS fallback。
+
+## View Transitions API
+
+跨路由 / 状态切换的整页过渡：
+
+```js
+document.startViewTransition(() => {
+  // 切换 DOM
+  app.innerHTML = newContent
+})
+```
+
+```css
+/* 自定义切换效果 */
+::view-transition-old(root) { animation: fade-out 200ms; }
+::view-transition-new(root) { animation: fade-in 200ms; }
+
+/* 共享元素：在前后页面分别命名相同 */
+.thumbnail {
+  view-transition-name: hero-image;
+}
+```
+
+切换时浏览器自动捕获前后状态，跨同名元素插值——免去手写共享元素动画。Next.js / Astro 已开始集成。
+
+## 实战配方
+
+### 1. 卡片悬浮上移
+
+```css
+.card {
+  transition: transform 200ms ease-out, box-shadow 200ms;
+}
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
+}
+```
+
+```html
+<div class="transition hover:-translate-y-1 hover:shadow-lg">...</div>
+```
+
+### 2. 按钮按下
+
+```css
+.btn:active { transform: scale(0.96); }
+```
+
+```html
+<button class="active:scale-[0.96] transition">Click</button>
+```
+
+### 3. 入场淡入
+
+```css
+.fade-in {
+  animation: fade-in 400ms ease-out forwards;
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+```
+
+### 4. 骨架屏闪烁
+
+```css
+.skeleton {
+  background: linear-gradient(90deg, #eee 25%, #f5f5f5 50%, #eee 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+@keyframes shimmer {
+  to { background-position: -200% 0; }
+}
+```
+
+```html
+<div class="animate-pulse bg-gray-200 h-4 rounded"></div>
+```
+
+### 5. 旋转加载
+
+```css
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid #eee;
+  border-top-color: blue;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+```
+
+```html
+<div class="w-6 h-6 border-2 border-gray-200 border-t-blue-600 rounded-full animate-spin"></div>
+```
+
+### 6. 折叠面板
+
+```css
+.panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 300ms;
+}
+.panel.open {
+  grid-template-rows: 1fr;
+}
+.panel > div { overflow: hidden; }
+```
+
+`grid-template-rows: 0fr → 1fr` 是 2024 年 Chrome 117+ / Firefox 132+ 起支持的"动画到 height auto"的现代方案——完全替代 `max-height` hack。
+
+### 7. 文字渐显（逐字符）
+
+```css
+.title span {
+  opacity: 0;
+  animation: fade-in 0.5s forwards;
+}
+.title span:nth-child(1) { animation-delay: 0s; }
+.title span:nth-child(2) { animation-delay: 0.1s; }
+.title span:nth-child(3) { animation-delay: 0.2s; }
+```
+
+或用 JS 自动注入。
+
+### 8. 受 prefers-reduced-motion 影响的动画
+
+```css
+.card {
+  transition: transform 200ms;
+}
+.card:hover {
+  transform: translateY(-4px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card { transition: none; }
+  .card:hover { transform: none; }
+}
+```
+
+```html
+<div class="transition motion-reduce:transition-none">...</div>
+```
+
+## 调试动画
+
+### Chrome DevTools Animations 面板
+
+1. `Cmd/Ctrl + Shift + P` → "Show Animations"
+2. 触发动画 → 时间轴显示每个动画的进度
+3. 拖动滑块定格、调整速率
+
+### Performance 面板
+
+录制交互 → 查看 FPS 曲线。低于 60 即说明有掉帧；点击 long task 查找具体瓶颈。
+
+### 帧检查
+
+```js
+let last = performance.now()
+function tick() {
+  const now = performance.now()
+  console.log('frame:', now - last, 'ms')      /* 应接近 16.67 */
+  last = now
+  requestAnimationFrame(tick)
+}
+requestAnimationFrame(tick)
+```
+
+## 小结
+
+- `transition` 处理状态变化，`@keyframes` + `animation` 处理持续 / 复杂时序；
+- 现代独立变换属性（`translate` / `scale` / `rotate`）优于 `transform`，可独立动画；
+- 动画**只用 `transform` 与 `opacity`**——其他属性触发 layout / paint，掉帧风险高；
+- `prefers-reduced-motion` 用户应跳过装饰动画，用 `motion-reduce:` 变体处理；
+- `display: none` 与 `height: auto` 的过渡现已可用 `@starting-style` / `interpolate-size` / `grid-template-rows` 解决；
+- View Transitions API 是跨路由整页过渡的现代标准——配合 Next.js / Astro 使用。

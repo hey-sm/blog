@@ -1,0 +1,191 @@
+---
+title: 相等性比较
+description: ==, ===, Object.is 与 SameValue / SameValueZero / IsLooselyEqual / IsStrictlyEqual 四种等值算法
+---
+
+# 相等性比较
+
+ECMAScript 规范定义了 **四种等值算法**，分别对应不同的比较运算符与内置 API。理解这些算法的边界，是规避相等性 Bug 的前提。
+
+| 算法 | 触发场景 |
+| ---- | -------- |
+| `IsLooselyEqual(x, y)` | `==` / `!=` |
+| `IsStrictlyEqual(x, y)` | `===` / `!==` |
+| `SameValue(x, y)` | `Object.is`、`Object.defineProperty` 内部、`Array.prototype.includes` 早期语义 |
+| `SameValueZero(x, y)` | `Array.prototype.includes`、`Map` / `Set` 的键比较、`Array.prototype.indexOf`（从 ES2016 起部分场景） |
+
+## `===`（严格相等）
+
+`IsStrictlyEqual(x, y)` 的规则：
+
+1. 类型不同 → `false`
+2. 同为 `Number`：
+   - 任一为 `NaN` → `false`
+   - 同为 0（含 `+0` / `-0`） → `true`
+   - 否则按 IEEE 754 数值比较
+3. 同为对象 → 引用相同则 `true`
+4. 同为字符串 → 逐码元比较
+5. 其余基本类型 → 按值比较
+
+```js
+1 === 1                                       // → true
+'a' === 'a'                                   // → true
+NaN === NaN                                   // → false   ← NaN 不等于自身
++0 === -0                                     // → true    ← 不区分零的符号
+[] === []                                     // → false   ← 引用不同
+const a = []; a === a                         // → true    ← 同一引用
+```
+
+## `==`（宽松相等）
+
+`IsLooselyEqual(x, y)` 在类型相同时与 `===` 一致；类型不同时按规范流程进行**有限的隐式转换**。规范精简流程如下：
+
+```text
+1. 类型相同 → 与 === 一致
+2. (null, undefined) 或 (undefined, null) → true
+3. (Number, String) → 将 String 转 Number 后再比较
+4. (Boolean, *)     → 将 Boolean 转 Number 后再比较
+5. (Object, primitive) → ToPrimitive(Object) 后再比较
+6. (BigInt, Number)/(Number, BigInt) → 数值比较
+7. 否则 → false
+```
+
+### 反直觉案例
+
+```js
+null == undefined                             // → true   规则 2
+null == 0                                     // → false  规则 2 之外，不再做转换
+null == false                                 // → false  null 不与 boolean 转
+0 == false                                    // → true   规则 4
+'' == false                                   // → true   '' → 0，false → 0
+[] == false                                   // → true   [] → '' → 0
+[0] == false                                  // → true   [0] → '0' → 0
+[null] == false                               // → true   [null] → '' → 0
+'0' == 0                                      // → true   '0' → 0
+'0' == ''                                     // → false  类型相同，逐字符不等
+```
+
+#### 传递性失效
+
+```js
+'' == 0    // true
+'0' == 0   // true
+'' == '0'  // false
+```
+
+`==` **不满足传递性**，这是规范允许的。生产代码中应避免依赖该运算符。
+
+### `==` 的合理使用
+
+唯一推荐使用 `==` 的场景：判断 `null` 或 `undefined`：
+
+```js
+function isNullish(v) {
+  return v == null                            // 等价于 v === null || v === undefined
+}
+```
+
+ES2020 之后该模式可用 `??` 替代：
+
+```js
+const value = input ?? 'default'              // input 为 null/undefined 时取默认
+```
+
+## `Object.is`
+
+ES6 引入。语义上是"开发者直觉的相等"——基本与 `===` 一致，但修正了两处反直觉：
+
+```js
+Object.is(NaN, NaN)                           // → true    （===: false）
+Object.is(+0, -0)                             // → false   （===: true）
+Object.is(1, 1)                               // → true
+Object.is('a', 'a')                           // → true
+Object.is([], [])                             // → false
+```
+
+#### 应用场景
+
+- **数组方法**：`Array.prototype.includes` 用 `SameValueZero`（NaN 自相等，但 ±0 不区分）
+- **属性写入**：`Object.defineProperty` 用 `SameValue`（NaN 自相等，且区分 ±0）
+- **React 等框架**：依赖 `Object.is` 判断状态是否变更
+
+```js
+[NaN].includes(NaN)                           // → true   SameValueZero
+[NaN].indexOf(NaN)                            // → -1     IsStrictlyEqual
+```
+
+## 四种算法对比
+
+| 维度 | `==` | `===` | `Object.is`<br/>(SameValue) | `SameValueZero` |
+| ---- | :--: | :---: | :--: | :----: |
+| 类型不同 | 转换后比较 | `false` | `false` | `false` |
+| `NaN` 与 `NaN` | `false` | `false` | `true` | `true` |
+| `+0` 与 `-0` | `true` | `true` | `false` | `true` |
+| `null` 与 `undefined` | `true` | `false` | `false` | `false` |
+| 触发隐式转换 | 是 | 否 | 否 | 否 |
+
+## 引用相等 vs 结构相等
+
+JavaScript 内建运算符与方法**仅支持引用相等**。判断两个对象"内容相同"必须自行实现或使用库：
+
+```js
+{ a: 1 } === { a: 1 }                         // → false
+[1, 2] === [1, 2]                             // → false
+
+// JSON 比较：受属性顺序、undefined、Symbol 限制
+JSON.stringify({ a: 1, b: 2 }) === JSON.stringify({ b: 2, a: 1 })
+// → false   属性顺序不同
+
+// 简易深度比较（教学用，不处理循环引用、Date、Map 等特殊类型）
+function deepEqual(x, y) {
+  if (Object.is(x, y)) return true
+  if (typeof x !== 'object' || x === null) return false
+  if (typeof y !== 'object' || y === null) return false
+  const keysX = Reflect.ownKeys(x)
+  const keysY = Reflect.ownKeys(y)
+  if (keysX.length !== keysY.length) return false
+  return keysX.every(k => deepEqual(x[k], y[k]))
+}
+
+deepEqual({ a: 1 }, { a: 1 })                 // → true
+deepEqual([1, [2, 3]], [1, [2, 3]])           // → true
+```
+
+生产环境推荐 [`lodash.isEqual`](https://lodash.com/docs/#isEqual) 或 [`fast-deep-equal`](https://github.com/epoberezkin/fast-deep-equal)，它们处理了 `Date`、`RegExp`、`Map`、`Set`、循环引用等边角情况。
+
+## 比较运算符的相关性
+
+`<` `>` `<=` `>=` 不在等值算法中，但与相等性密切相关。它们使用 `IsLessThan(x, y, leftFirst)` 抽象操作：
+
+1. 若双方均为字符串 → 字典序比较
+2. 否则 → 双方均 `ToNumeric`，按数值比较
+
+```js
+'b' > 'aa'                                    // → true    ← 字典序
+1 < '2'                                       // → true    ← '2' → 2
+1 < '2abc'                                    // → false   ← '2abc' → NaN，与 NaN 比较结果总为 false
+```
+
+`>=` 与 `<` 的反直觉关系：
+
+```js
+null >= 0                                     // → true    null → 0
+null > 0                                      // → false
+null == 0                                     // → false   == 不会数字转换
+```
+
+`null >= 0` 等价于 `!(null < 0)`，而非 `null > 0 || null == 0`。
+
+## 实战建议
+
+1. **永远使用 `===`**，仅在判空时使用 `x == null`；
+2. **判断 `NaN`** 用 `Number.isNaN(v)` 而非 `v === NaN`；
+3. **判断零的符号** 用 `Object.is(v, -0)` 或 `1 / v === -Infinity`；
+4. **结构相等** 不可依赖内建运算符，使用 `lodash.isEqual` 或自行实现；
+5. **集合查重** `Map` / `Set` 使用 `SameValueZero`，对 `NaN` 友好。
+
+## 小结
+
+- 四种等值算法在 NaN、±0、null/undefined、隐式转换四个维度上有细微差异；
+- `===` 是最安全的默认选项，`==` 的合理使用面极窄；
+- 内建运算符只判引用相等，结构相等需要专门工具。

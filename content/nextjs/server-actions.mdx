@@ -1,0 +1,306 @@
+---
+title: Server Actions
+description: "'use server' 指令、Server Actions 作为表单 action 或命令式调用、useActionState、useOptimistic 与 revalidation"
+---
+
+# Server Actions
+
+Server Actions 是 Next.js 的 RPC 层——你在服务端定义一个函数，客户端可以直接调用，无需手动创建 API Route。
+
+## 定义 Server Action
+
+### 方式一：文件顶部的 `'use server'`
+
+```tsx filename="app/actions.ts"
+'use server'
+
+import { db } from '@/lib/db'
+import { revalidatePath } from 'next/cache'
+
+export async function createPost(formData: FormData) {
+  const title = formData.get('title') as string
+  const content = formData.get('content') as string
+
+  await db.post.create({ data: { title, content } })
+  revalidatePath('/posts')
+}
+```
+
+### 方式二：函数内的 `'use server'`
+
+```tsx filename="components/CreatePostForm.tsx"
+'use client'
+
+async function createPost(formData: FormData) {
+  'use server'
+  // 这里可以访问 DB、文件系统、secrets
+  await db.post.create({ data: { title: '...' } })
+}
+
+export function CreatePostForm() {
+  return (
+    <form action={createPost}>
+      <input name="title" />
+      <button type="submit">Create</button>
+    </form>
+  )
+}
+```
+
+注意：只有**表单元素可以直接使用 Server Action 的 `action` prop**。外部模块 import 的 Server Action 可在任何地方调用（不仅仅是表单）。
+
+## 表单 action 用法
+
+```tsx filename="app/posts/new/page.tsx"
+import { createPost } from '@/app/actions'
+
+export default function NewPostPage() {
+  return (
+    <form action={createPost} className="space-y-4">
+      <input
+        name="title"
+        className="w-full rounded border px-4 py-2"
+        placeholder="Post title"
+        required
+      />
+
+      <textarea
+        name="content"
+        className="w-full rounded border px-4 py-2"
+        rows={10}
+        placeholder="Write your post..."
+        required
+      />
+
+      <button
+        type="submit"
+        className="rounded bg-blue-600 px-6 py-2 text-white"
+      >
+        Publish
+      </button>
+    </form>
+  )
+}
+```
+
+提交时，浏览器调用 `createPost(formData)` → 运行在服务端。响应后 Next.js 自动 revalidate（除非显式设置静态）。
+
+### 带校验的 Server Action
+
+```tsx filename="app/actions.ts"
+'use server'
+
+import { z } from 'zod'
+
+const postSchema = z.object({
+  title: z.string().min(1).max(200),
+  content: z.string().min(10),
+})
+
+export async function createPost(formData: FormData) {
+  const parsed = postSchema.safeParse({
+    title: formData.get('title'),
+    content: formData.get('content'),
+  })
+
+  if (!parsed.success) {
+    return { errors: parsed.error.flatten().fieldErrors }
+  }
+
+  await db.post.create({ data: parsed.data })
+  revalidatePath('/posts')
+  return { success: true }
+}
+```
+
+客户端读取返回值：
+
+```tsx filename="components/CreatePostForm.tsx"
+'use client'
+
+import { useActionState } from 'react'
+import { createPost } from '@/app/actions'
+
+export function CreatePostForm() {
+  const [state, dispatch, isPending] = useActionState(createPost, null)
+
+  return (
+    <form action={dispatch}>
+      {state?.errors?.title && <p className="text-red-500">{state.errors.title}</p>}
+      <input name="title" />
+
+      {state?.errors?.content && <p className="text-red-500">{state.errors.content}</p>}
+      <textarea name="content" />
+
+      <button type="submit" disabled={isPending}>
+        {isPending ? 'Publishing...' : 'Publish'}
+      </button>
+
+      {state?.success && <p className="text-green-500">Post published!</p>}
+    </form>
+  )
+}
+```
+
+## `useActionState` —— 跟踪提交状态
+
+```tsx
+'use client'
+
+import { useActionState } from 'react'
+import { subscribeToNewsletter } from '@/app/actions'
+
+export function NewsletterForm() {
+  const [state, dispatch, isPending] = useActionState(subscribeToNewsletter, {
+    message: '',
+    error: '',
+  })
+
+  return (
+    <form action={dispatch}>
+      <input name="email" type="email" />
+      <button type="submit" disabled={isPending}>
+        {isPending ? 'Subscribing...' : 'Subscribe'}
+      </button>
+      {state.message && <p>{state.message}</p>}
+    </form>
+  )
+}
+```
+
+## `useOptimistic` —— 乐观更新
+
+```tsx filename="components/TodoList.tsx"
+'use client'
+
+import { useOptimistic } from 'react'
+import { toggleTodo } from '@/app/actions'
+
+export function TodoList({ todos }: { todos: Todo[] }) {
+  const [optimisticTodos, setOptimistic] = useOptimistic(
+    todos,
+    (state, id: string) =>
+      state.map(t => (t.id === id ? { ...t, done: !t.done } : t))
+  )
+
+  return (
+    <ul>
+      {optimisticTodos.map(todo => (
+        <li key={todo.id}>
+          <button
+            onClick={async () => {
+              setOptimistic(todo.id)       // ← 立即反映到 UI
+              await toggleTodo(todo.id)    // ← 服务端执行（可重试）
+            }}
+          >
+            {todo.done ? '✅' : '⬜'} {todo.title}
+          </button>
+        </li>
+      ))}
+    </ul>
+  )
+}
+```
+
+### 非表单元素调用 Server Action
+
+```tsx
+'use client'
+
+import { incrementViewCount } from '@/app/actions'
+import { useTransition } from 'react'
+
+export function ViewCounter({ slug }: { slug: string }) {
+  const [isPending, startTransition] = useTransition()
+
+  const handleClick = () => {
+    startTransition(() => {
+      incrementViewCount(slug)
+    })
+  }
+
+  return <button onClick={handleClick}>Count view</button>
+}
+```
+
+## Revalidation 与重定向
+
+```tsx filename="app/actions.ts"
+'use server'
+
+import { revalidatePath, revalidateTag } from 'next/cache'
+import { redirect } from 'next/navigation'
+
+export async function updatePost(id: string, formData: FormData) {
+  await db.post.update({ where: { id }, data: { ... } })
+
+  revalidatePath(`/posts/${id}`)   // 更新该页面的缓存
+  revalidateTag('posts')           // 更新所有 posts 标签的缓存
+  redirect(`/posts/${id}`)         // 导航到新页面
+}
+```
+
+## 在 Server Action 中获取 session
+
+```tsx filename="app/actions.ts"
+'use server'
+
+import { auth } from '@/lib/auth'
+import { db } from '@/lib/db'
+
+export async function createComment(postId: string, formData: FormData) {
+  const session = await auth()        // ← 读取 cookie / token
+
+  if (!session?.user) {
+    return { error: 'Please sign in' }
+  }
+
+  await db.comment.create({
+    data: {
+      content: formData.get('content') as string,
+      postId,
+      userId: session.user.id,
+    },
+  })
+
+  revalidatePath(`/posts/${postId}`)
+}
+```
+
+## 陷阱
+
+### 不要在 Server Action 中暴露 secrets 到客户端
+
+```tsx filename="✗ 反模式"
+'use server'
+
+export async function getApiKey() {
+  return process.env.SECRET_API_KEY   // ← 传到客户端
+}
+```
+
+Server Action 本身不发送 JS 代码——只有序列化后的**信息**（函数名 + 签名）被发送。但返回值会被完整地传回客户端。
+
+### 大文件通过 Server Action 上传
+
+Server Action 处理的 `FormData` 最大体量 = 4.5 MB。更大的文件上传应该用 Route Handler 或第三方上传服务。
+
+### `useActionState` 的返回值类型
+
+```tsx
+const [state, dispatch, isPending] = useActionState(action, initialState)
+```
+
+`action` 的签名是 `(prevState, formData) => Promise<State>`，不是 `(formData) => Promise<State>`。如果返回类型不匹配，TypeScript 会在 hook 处报错。
+
+### Server Action 在 `cache: 'no-store'` 后不会自动 revalidate
+
+如果调用 Server Action 的页面使用了 `cache: 'no-store'`，页面本身是动态的——但 Server Action 中显式 `revalidatePath` / `revalidateTag` **仍是必要的**，否则路由缓存不会被刷新。
+
+## 小结
+
+- Server Actions 使用 `'use server'` 指令，替代 API Routes 用于表单提交和副作用；
+- `action={serverAction}` 在表单中直接使用，浏览器自动处理 FormData 序列化；
+- `useActionState` 跟踪提交状态与返回值；`useOptimistic` 实现即时 UI 响应；
+- Server Action 中可用 `cookies()`、`headers()`、`auth()`、DB 等所有服务端资源；
+- 上传大文件或需要自定义 Header 的场景注意：Action 非万能，Route Handler 仍有生态位。

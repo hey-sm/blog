@@ -1,0 +1,320 @@
+---
+title: 链接与导航
+description: Link、useRouter、usePathname、redirect、useSearchParams、滚动恢复与 programmatic navigation
+---
+
+# 链接与导航
+
+Next.js 的导航体系分为两块：用于链接渲染的 `<Link>` 组件和用于编程式跳转的 `useRouter` hook。
+
+## `<Link>` —— 客户端导航
+
+```tsx
+import Link from 'next/link'
+
+export default function Nav() {
+  return (
+    <nav>
+      <Link href="/">Home</Link>
+      <Link href="/blog">Blog</Link>
+      <Link href="/about">About</Link>
+    </nav>
+  )
+}
+```
+
+与 `<a>` 标签的关键区别：
+
+| 维度 | `<a href="...">` | `<Link href="...">` |
+| ---- | ---------------- | ------------------- |
+| 导航方式 | 全页硬刷新 | 客户端路由（soft navigate） |
+| 状态 | 丢失 | 保留（React state / layout） |
+| 预加载 | 无 | 自动 prefetch（进入视口时） |
+| 速度 | 慢（重新请求 HTML） | 快（仅获取 RSC payload） |
+
+### Props
+
+```tsx
+<Link
+  href="/posts/hello"
+  replace                  // 替换历史记录，不 push
+  prefetch={false}         // 关闭预加载
+  scroll={false}           // 导航后不滚动到顶部
+  target="_blank"          // 新窗口打开
+  className="..."          // 样式
+>
+  Read post
+</Link>
+```
+
+### 动态 href
+
+```tsx
+<Link href={`/blog/${post.slug}`}>{post.title}</Link>
+
+// 带 query string
+<Link href={{ pathname: '/search', query: { q: 'nextjs' } }}>
+  Search
+</Link>
+```
+
+## `useRouter` —— 命令式导航
+
+```tsx filename="components/NavButton.tsx"
+'use client'
+
+import { useRouter } from 'next/navigation'
+
+export function GoBackButton() {
+  const router = useRouter()
+
+  return <button onClick={() => router.back()}>← Back</button>
+}
+```
+
+### 常用方法
+
+```tsx
+const router = useRouter()
+
+router.push('/dashboard')        // 导航 + 添加历史记录
+router.replace('/login')         // 导航 + 替换历史记录
+router.back()                    // 上一页
+router.forward()                 // 下一页
+router.refresh()                 // 重新获取服务端数据（不丢失客户端状态）
+router.prefetch('/dashboard')    // 预加载
+```
+
+### `router.refresh()` 的用途
+
+不刷新浏览器页面，但向服务端重新请求 RSC payload——服务端更新后客户端状态（state、refs）保持不变。适合 Server Action 后获取最新数据。
+
+## `usePathname` —— 当前路径
+
+```tsx filename="components/ActiveLink.tsx"
+'use client'
+
+import { usePathname } from 'next/navigation'
+import Link from 'next/link'
+
+export function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const pathname = usePathname()
+  const isActive = pathname === href
+
+  return (
+    <Link href={href} className={isActive ? 'font-bold text-blue-600' : ''}>
+      {children}
+    </Link>
+  )
+}
+```
+
+## `useSearchParams` —— Query String
+
+```tsx filename="components/SearchResults.tsx"
+'use client'
+
+import { useSearchParams } from 'next/navigation'
+
+export default function SearchResults() {
+  const searchParams = useSearchParams()
+
+  const query = searchParams.get('q')
+  const page = Number(searchParams.get('page') ?? 1)
+
+  return (
+    <div>
+      <p>Searching for: {query}</p>
+      <p>Page: {page}</p>
+    </div>
+  )
+}
+```
+
+### 更新 search params
+
+```tsx filename="components/FilterPanel.tsx"
+'use client'
+
+import { useSearchParams, usePathname, useRouter } from 'next/navigation'
+
+export function FilterPanel() {
+  const searchParams = useSearchParams()
+  const pathname = usePathname()
+  const router = useRouter()
+
+  const setFilter = (key: string, value: string) => {
+    const params = new URLSearchParams(searchParams)
+    params.set(key, value)
+    router.push(`${pathname}?${params.toString()}`)
+  }
+
+  return (
+    <select onChange={e => setFilter('sort', e.target.value)}>
+      <option value="newest">Newest</option>
+      <option value="popular">Popular</option>
+    </select>
+  )
+}
+```
+
+## `redirect` —— 服务端重定向
+
+```tsx filename="app/admin/page.tsx"
+import { redirect } from 'next/navigation'
+import { getSession } from '@/lib/auth'
+
+export default async function AdminPage() {
+  const session = await getSession()
+
+  if (!session?.user.isAdmin) {
+    redirect('/login')          // 服务端 307 重定向
+  }
+
+  return <AdminDashboard />
+}
+```
+
+与 `useRouter` 的区别：
+
+| 维度 | `redirect` | `router.push` |
+| ---- | ---------- | ------------- |
+| 运行位置 | 服务端 | 客户端 |
+| 机制 | HTTP 307 | 客户端路由 |
+| SEO | 搜索引擎看到重定向 | 不可见 |
+| 组件 | Server Component | Client Component |
+
+还有 `permanentRedirect`（308）：
+
+```tsx
+import { permanentRedirect } from 'next/navigation'
+
+permanentRedirect('/new-blog')   // 308 永久重定向
+```
+
+## 滚动恢复
+
+### 默认行为
+
+- 前进/后退时浏览器自动恢复滚动位置
+- `Link` 导航时默认滚动到顶部
+
+### 关闭滚动到顶部
+
+```tsx
+<Link href="/blog" scroll={false}>
+  Blog
+</Link>
+```
+
+### 手动控制
+
+```tsx filename="app/layout.tsx"
+// 在 layout 中处理滚动
+'use client'
+
+import { usePathname } from 'next/navigation'
+import { useEffect } from 'react'
+
+export function ScrollManager() {
+  const pathname = usePathname()
+
+  useEffect(() => {
+    // 路由变化时的滚动逻辑
+    const saved = sessionStorage.getItem(`scroll-${pathname}`)
+    if (saved) {
+      window.scrollTo(0, Number(saved))
+    }
+  }, [pathname])
+
+  return null
+}
+```
+
+## 导航时 Loading 指示器
+
+```tsx filename="components/RouteProgress.tsx"
+'use client'
+
+import { usePathname, useSearchParams } from 'next/navigation'
+import { useEffect, useState, useTransition } from 'react'
+
+export function RouteProgress() {
+  const [isPending, startTransition] = useTransition()
+
+  // 或使用 navigation events（不稳定）
+  // 推荐用 loading.tsx 代替
+
+  return isPending ? (
+    <div className="fixed inset-x-0 top-0 z-50 h-1">
+      <div className="h-full animate-pulse bg-blue-600" />
+    </div>
+  ) : null
+}
+```
+
+更好的方案是用 [`loading.tsx`](/nextjs/templates-loading-error#loadingtsx----加载状态) 而不是 `useTransition`——`loading.tsx` 只包裹 `page`，不阻塞现有 UI。
+
+## 陷阱
+
+### App Router 的 `useRouter` 来自 `next/navigation`
+
+```tsx
+// Pages Router — 旧
+import { useRouter } from 'next/router'
+
+// App Router — 新
+import { useRouter } from 'next/navigation'
+```
+
+两者 API 不同——App Router 版本**没有** `query` 对象（用 `useSearchParams` 替代）。
+
+### `useSearchParams` 需要 `Suspense`
+
+```tsx
+// 直接使用会导致整个页面在客户端渲染
+import { useSearchParams } from 'next/navigation'
+
+export default function Page() {
+  const params = useSearchParams()   // ← 可能触发客户端回退
+}
+```
+
+Next.js 16 中，将使用 `useSearchParams` 的组件包裹在 `<Suspense>` 中以避免整个页面的 SSR 被跳过：
+
+```tsx
+import { Suspense } from 'react'
+import SearchResults from './SearchResults'
+
+export default function Page() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <SearchResults />
+    </Suspense>
+  )
+}
+```
+
+### `redirect` 后的代码仍然运行
+
+`redirect` 抛出 `NEXT_REDIRECT` 错误——但这是由 Next.js 捕获的特殊错误。放在 `try/catch` 中会阻止重定向：
+
+```tsx
+try {
+  redirect('/login')
+} catch (e) {
+  // ✗ redirect 不会生效
+}
+```
+
+### 不要在 Server Component 中使用 `useRouter`
+
+`useRouter` 是客户端 hook。Server Component 中用 `redirect` / `permanentRedirect` 代替。
+
+## 小结
+
+- `<Link>` 用于声明式导航，自动 prefetch，状态保持；
+- `useRouter`（来自 `next/navigation`）用于命令式导航；
+- `usePathname` + `useSearchParams` 读取当前 URL 信息；
+- `redirect` 在服务端触发 307，`permanentRedirect` 触发 308；
+- `useSearchParams` 需要包裹在 `<Suspense>` 中。

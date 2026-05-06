@@ -1,0 +1,277 @@
+---
+title: 移动端
+description: Capacitor 集成、Vue Native 方案与移动端开发最佳实践
+---
+
+# 移动端
+
+Vue 可以通过 Capacitor 或其他方案构建原生移动应用。
+
+## Capacitor
+
+### 安装
+
+```bash
+npm install @capacitor/core @capacitor/cli
+npx cap init
+```
+
+### 添加平台
+
+```bash
+npm install @capacitor/android @capacitor/ios
+npx cap add android
+npx cap add ios
+```
+
+### 构建与同步
+
+```bash
+npm run build
+npx cap sync
+npx cap open android
+npx cap open ios
+```
+
+### 使用原生功能
+
+```vue
+<script setup lang="ts">
+import { Camera, CameraResultType } from '@capacitor/camera'
+import { ref } from 'vue'
+
+const photo = ref<string>()
+
+async function takePicture() {
+  const image = await Camera.getPhoto({
+    quality: 90,
+    allowEditing: false,
+    resultType: CameraResultType.Uri
+  })
+  
+  photo.value = image.webPath
+}
+</script>
+
+<template>
+  <button @click="takePicture">Take Photo</button>
+  <img v-if="photo" :src="photo" alt="Photo">
+</template>
+```
+
+### 常用插件
+
+```bash
+# 相机
+npm install @capacitor/camera
+
+# 地理位置
+npm install @capacitor/geolocation
+
+# 存储
+npm install @capacitor/preferences
+
+# 网络状态
+npm install @capacitor/network
+
+# 设备信息
+npm install @capacitor/device
+```
+
+## Ionic Vue
+
+```bash
+npm install @ionic/vue @ionic/vue-router
+```
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import { IonicVue } from '@ionic/vue'
+import App from './App.vue'
+import router from './router'
+
+import '@ionic/vue/css/core.css'
+import '@ionic/vue/css/normalize.css'
+import '@ionic/vue/css/structure.css'
+import '@ionic/vue/css/typography.css'
+
+const app = createApp(App)
+  .use(IonicVue)
+  .use(router)
+
+router.isReady().then(() => {
+  app.mount('#app')
+})
+```
+
+```vue filename="App.vue"
+<template>
+  <ion-app>
+    <ion-router-outlet />
+  </ion-app>
+</template>
+
+<script setup lang="ts">
+import { IonApp, IonRouterOutlet } from '@ionic/vue'
+</script>
+```
+
+## 移动端优化
+
+### 触摸事件
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const startX = ref(0)
+const startY = ref(0)
+
+function handleTouchStart(e: TouchEvent) {
+  startX.value = e.touches[0].clientX
+  startY.value = e.touches[0].clientY
+}
+
+function handleTouchEnd(e: TouchEvent) {
+  const endX = e.changedTouches[0].clientX
+  const endY = e.changedTouches[0].clientY
+  
+  const diffX = endX - startX.value
+  const diffY = endY - startY.value
+  
+  if (Math.abs(diffX) > Math.abs(diffY)) {
+    if (diffX > 50) {
+      console.log('Swipe right')
+    } else if (diffX < -50) {
+      console.log('Swipe left')
+    }
+  }
+}
+</script>
+
+<template>
+  <div
+    @touchstart="handleTouchStart"
+    @touchend="handleTouchEnd"
+  >
+    Swipe me
+  </div>
+</template>
+```
+
+### 响应式设计
+
+```vue
+<template>
+  <div class="container">
+    <div class="mobile-only">Mobile View</div>
+    <div class="desktop-only">Desktop View</div>
+  </div>
+</template>
+
+<style scoped>
+.mobile-only {
+  display: block;
+}
+
+.desktop-only {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .mobile-only {
+    display: none;
+  }
+  
+  .desktop-only {
+    display: block;
+  }
+}
+</style>
+```
+
+### 性能优化
+
+```vue
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted } from 'vue'
+
+// 使用 Intersection Observer 实现懒加载
+const imageRef = ref<HTMLImageElement>()
+const isVisible = ref(false)
+
+onMounted(() => {
+  const observer = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) {
+      isVisible.value = true
+      observer.disconnect()
+    }
+  })
+  
+  if (imageRef.value) {
+    observer.observe(imageRef.value)
+  }
+})
+</script>
+
+<template>
+  <img
+    ref="imageRef"
+    :src="isVisible ? actualSrc : placeholder"
+    alt="Lazy loaded image"
+  >
+</template>
+```
+
+## 最佳实践
+
+### ✅ 使用原生导航
+
+```vue
+<template>
+  <ion-page>
+    <ion-header>
+      <ion-toolbar>
+        <ion-title>Page Title</ion-title>
+      </ion-toolbar>
+    </ion-header>
+    
+    <ion-content>
+      <p>Content</p>
+    </ion-content>
+  </ion-page>
+</template>
+```
+
+### ✅ 适配安全区域
+
+```css
+.container {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+```
+
+### ✅ 优化触摸反馈
+
+```css
+button {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+```
+
+---
+
+至此，Vue 知识体系的 25 章内容已全部完成。从基础概念到高级特性，从核心 API 到生态系统，涵盖了 Vue 3 开发的完整路径。
+
+建议学习路径：
+1. **基础入门**（1-5章）：理解 Vue 核心概念
+2. **组件开发**（6-8章）：掌握组件通信
+3. **核心特性**（9-13章）：深入响应式系统
+4. **高级应用**（14-17章）：学习高级特性
+5. **工程实践**（18-25章）：构建完整应用
+
+每章都包含代码示例、最佳实践和常见陷阱，可作为日常开发的参考手册。

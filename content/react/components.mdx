@@ -1,0 +1,539 @@
+---
+title: 组件
+description: JSX、函数组件、Props 与 State、组合模式与 Class 组件遗留说明
+---
+
+# 组件
+
+组件是 React 应用的基本构建块。本章覆盖：JSX 语法、函数组件、Props 与 State 的语义边界、组合（composition）模式，以及一节专门讨论已弃用但仍可能在遗留代码中遇到的 **Class 组件**。
+
+## JSX
+
+JSX 是 JavaScript 的语法扩展，把"看起来像 HTML 的标签"编译为 `React.createElement` 调用：
+
+```tsx
+const el = <h1 className="title">Hello</h1>
+
+// 等价于（使用经典 runtime）
+const el = React.createElement('h1', { className: 'title' }, 'Hello')
+
+// React 17+ 默认使用 jsx runtime（无需手动 import React）
+import { jsx as _jsx } from 'react/jsx-runtime'
+const el = _jsx('h1', { className: 'title', children: 'Hello' })
+```
+
+### 与 HTML 的关键差异
+
+| HTML | JSX | 原因 |
+| ---- | --- | ---- |
+| `class` | `className` | `class` 是 JS 保留字 |
+| `for` | `htmlFor` | 同上 |
+| `tabindex` / `readonly` 等 | `tabIndex` / `readOnly`（驼峰） | DOM 属性命名风格 |
+| 内联 style 字符串 | 对象 + 驼峰：`style={{ fontSize: 16 }}` | 类型安全 + 防注入 |
+| 自闭合 `<br>` | 必须 `<br />` | XML 严格性 |
+| 注释 `<!-- -->` | `{/* 注释 */}` | JS 表达式 |
+
+### 表达式插值
+
+任何 JS 表达式都可以放在 `{}` 中：
+
+```tsx
+function Greet({ user }: { user?: { name: string } }) {
+  return (
+    <div>
+      <p>{user ? `Hello, ${user.name}` : 'Loading…'}</p>
+      <p>{2 + 3}</p>
+      <p>{[1, 2, 3].map(n => <span key={n}>{n}</span>)}</p>
+    </div>
+  )
+}
+```
+
+不能插入：语句（`if` / `for`）、对象（除非作为 `style` / 属性）、`undefined`（会被忽略，但显式 `null` 也安全）。
+
+### Fragment
+
+返回多个相邻元素时使用 Fragment：
+
+```tsx
+function List() {
+  return (
+    <>
+      <li>a</li>
+      <li>b</li>
+    </>
+  )
+}
+
+// 需要传 key 时使用完整形式
+function ListWithKeys({ items }: { items: Item[] }) {
+  return items.map(item => (
+    <React.Fragment key={item.id}>
+      <dt>{item.term}</dt>
+      <dd>{item.def}</dd>
+    </React.Fragment>
+  ))
+}
+```
+
+### 条件与列表
+
+```tsx
+function Status({ value }: { value: 'idle' | 'loading' | 'done' }) {
+  return (
+    <div>
+      {/* 短路 */}
+      {value === 'loading' && <Spinner />}
+
+      {/* 三元 */}
+      {value === 'done' ? <Check /> : null}
+
+      {/* 提前 return */}
+      {value === 'idle' && <Idle />}
+    </div>
+  )
+}
+```
+
+避免使用 `&&` 渲染数字 0：
+
+```tsx
+const items: number[] = []
+return <div>{items.length && <List />}</div>
+//             ^^^^^^^^^^^^^ 0 会被渲染为字符串 "0"
+
+// 修复
+return <div>{items.length > 0 && <List />}</div>
+```
+
+## 函数组件
+
+```tsx
+type ButtonProps = {
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+  variant?: 'primary' | 'secondary'
+}
+
+export function Button({
+  children,
+  onClick,
+  disabled = false,
+  variant = 'primary'
+}: ButtonProps) {
+  return (
+    <button className={`btn btn-${variant}`} onClick={onClick} disabled={disabled}>
+      {children}
+    </button>
+  )
+}
+```
+
+组件名必须**首字母大写**——React 据此区分自定义组件与 HTML 标签：
+
+```tsx
+<button>...</button>   // 渲染为 <button>
+<Button>...</Button>   // 调用 Button 函数
+```
+
+### children prop
+
+`children` 是被特殊对待的 prop：嵌套在标签内的内容自动被收为 `children`：
+
+```tsx
+<Card>
+  <h2>Title</h2>
+  <p>Body</p>
+</Card>
+
+// 等价
+<Card children={[<h2>Title</h2>, <p>Body</p>]} />
+```
+
+类型：
+
+```ts
+type CardProps = {
+  children: React.ReactNode               // 任何可渲染的值
+  // 也可以更严格：
+  // children: React.ReactElement<typeof Item>
+}
+```
+
+### 组件可以返回什么
+
+- React Element（JSX）
+- 字符串、数字
+- 数组（需要 key）
+- `null` / `undefined` / `false`（不渲染任何内容）
+- Promise（仅 Server Components / `use` 配合 Suspense）
+
+不能返回：普通对象、纯函数。
+
+## Props vs State
+
+| 维度 | Props | State |
+| ---- | ----- | ----- |
+| 来源 | 父组件传入 | 组件自身 |
+| 可变性 | 在组件内**只读** | 通过 `setState` / `useState` 更新 |
+| 触发渲染 | 父组件渲染 | `setX` 调用 |
+| 持久性 | 由父决定 | 组件存活期间保留 |
+
+判定一份数据应该是 props 还是 state，问自己：
+
+1. 它是从外部传进来的吗？→ **Props**
+2. 组件能否通过其他 props 推导出它？→ **不要存为 state**，直接计算
+3. 它会随用户交互变化吗？→ **State**
+
+#### 反模式：将 props 复制到 state
+
+```tsx
+// ✗ 反模式
+function User({ name }: { name: string }) {
+  const [localName, setLocalName] = useState(name)
+  // 当 props.name 变化时，localName 不会更新
+  return <h1>{localName}</h1>
+}
+
+// ✓ 直接使用
+function User({ name }: { name: string }) {
+  return <h1>{name}</h1>
+}
+```
+
+仅当 state 需要**与 props 解耦**（如表单的"草稿"状态）时才将其本地化，且需要正确处理 props 变化（参见 [`useEffect` 同步外部状态](/react/hooks#与外部系统同步)）。
+
+## State：`useState`
+
+```tsx
+const [count, setCount] = useState(0)
+const [user, setUser] = useState<User | null>(null)
+```
+
+### 函数式更新
+
+当新 state 依赖旧 state 时，传入函数而非值：
+
+```tsx
+// ✗ 在异步 / 批处理中可能读到过期的 count
+setCount(count + 1)
+setCount(count + 1)
+// 实际只 +1
+
+// ✓ 函数式：保证拿到最新值
+setCount(c => c + 1)
+setCount(c => c + 1)
+// 实际 +2
+```
+
+### 惰性初始化
+
+初始值计算昂贵时，传入函数（仅在首次渲染调用）：
+
+```tsx
+// 每次渲染都会调用 expensiveCompute()
+const [data, setData] = useState(expensiveCompute())
+
+// 仅首次调用
+const [data, setData] = useState(() => expensiveCompute())
+```
+
+### State 是不可变的
+
+```tsx
+const [user, setUser] = useState({ name: 'js', age: 20 })
+
+// ✗ 直接改对象 → React 看不到变化（引用未变）
+user.age = 21
+setUser(user)
+
+// ✓ 创建新对象
+setUser({ ...user, age: 21 })
+
+// ✗ 直接改数组
+items.push(newItem)
+setItems(items)
+
+// ✓
+setItems([...items, newItem])
+```
+
+复杂状态可考虑 Immer：`setUser(produce(user, draft => { draft.age = 21 }))`，或用 `useReducer`。
+
+## 组合模式
+
+React 推荐**组合 > 继承**。所有"想用继承解决的问题"都应改为组合。
+
+### 1. children 注入
+
+```tsx
+function Card({ children }: { children: React.ReactNode }) {
+  return <div className="card">{children}</div>
+}
+
+<Card>
+  <h2>Title</h2>
+  <p>Body</p>
+</Card>
+```
+
+### 2. 多 slot
+
+```tsx
+type LayoutProps = {
+  header: React.ReactNode
+  sidebar: React.ReactNode
+  children: React.ReactNode
+}
+
+function Layout({ header, sidebar, children }: LayoutProps) {
+  return (
+    <div className="layout">
+      <header>{header}</header>
+      <aside>{sidebar}</aside>
+      <main>{children}</main>
+    </div>
+  )
+}
+
+<Layout
+  header={<TopBar />}
+  sidebar={<Nav />}
+>
+  <Page />
+</Layout>
+```
+
+### 3. Render props
+
+```tsx
+function MouseTracker({
+  children
+}: {
+  children: (pos: { x: number; y: number }) => React.ReactNode
+}) {
+  const [pos, setPos] = useState({ x: 0, y: 0 })
+  return (
+    <div onMouseMove={e => setPos({ x: e.clientX, y: e.clientY })}>
+      {children(pos)}
+    </div>
+  )
+}
+
+<MouseTracker>
+  {pos => <p>{pos.x}, {pos.y}</p>}
+</MouseTracker>
+```
+
+Hook 时代多数 render props 场景被自定义 Hook 替代。
+
+### 4. 组件复合（compound components）
+
+通过 `Context` 在父子组件间隐式共享状态：
+
+```tsx
+const TabsContext = React.createContext<{
+  active: string
+  setActive: (v: string) => void
+}>(null!)
+
+function Tabs({ defaultValue, children }: {
+  defaultValue: string
+  children: React.ReactNode
+}) {
+  const [active, setActive] = useState(defaultValue)
+  return (
+    <TabsContext.Provider value={{ active, setActive }}>
+      <div className="tabs">{children}</div>
+    </TabsContext.Provider>
+  )
+}
+
+Tabs.List = function List({ children }: { children: React.ReactNode }) {
+  return <div className="tabs-list">{children}</div>
+}
+
+Tabs.Tab = function Tab({ value, children }: { value: string; children: React.ReactNode }) {
+  const ctx = React.useContext(TabsContext)
+  return (
+    <button
+      className={ctx.active === value ? 'active' : ''}
+      onClick={() => ctx.setActive(value)}
+    >
+      {children}
+    </button>
+  )
+}
+
+Tabs.Panel = function Panel({ value, children }: { value: string; children: React.ReactNode }) {
+  const ctx = React.useContext(TabsContext)
+  return ctx.active === value ? <div>{children}</div> : null
+}
+
+// 使用
+<Tabs defaultValue="a">
+  <Tabs.List>
+    <Tabs.Tab value="a">A</Tabs.Tab>
+    <Tabs.Tab value="b">B</Tabs.Tab>
+  </Tabs.List>
+  <Tabs.Panel value="a">Content A</Tabs.Panel>
+  <Tabs.Panel value="b">Content B</Tabs.Panel>
+</Tabs>
+```
+
+Radix UI、shadcn/ui 大量采用此模式，详见 [样式方案](/react/styling)。
+
+## 条件渲染
+
+```tsx
+function Greet({ user }: { user?: User }) {
+  // 1. 早返回（推荐：扁平、可读）
+  if (!user) return <Login />
+  return <h1>Welcome, {user.name}</h1>
+}
+
+function Greet2({ user }: { user?: User }) {
+  // 2. 三元（短表达式可用，嵌套时可读性差）
+  return user ? <h1>Welcome, {user.name}</h1> : <Login />
+}
+
+function Greet3({ user }: { user?: User }) {
+  // 3. 短路（仅 truthy 才渲染）
+  return <>{user && <h1>Welcome, {user.name}</h1>}</>
+}
+```
+
+## 列表渲染与 Key
+
+```tsx
+function List({ items }: { items: Item[] }) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={item.id}>{item.name}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+Key 的作用：让 Reconciler 在 diff 时识别"哪个节点是同一个"，复用对应的 fiber + DOM。详见 [渲染机制](/react/rendering#列表与-key)。
+
+#### Key 的反模式
+
+```tsx
+// ✗ 用索引做 key：列表插入 / 删除中间项时会"复用错对象"
+items.map((item, i) => <Row key={i} {...item} />)
+
+// ✗ 用 Math.random()：每次渲染都是新 key，等于不复用
+items.map(item => <Row key={Math.random()} {...item} />)
+
+// ✓ 稳定的业务 ID
+items.map(item => <Row key={item.id} {...item} />)
+```
+
+## Class 组件遗留说明
+
+> 图示中已明确标注"不推荐用于新代码"。新建组件**永远使用函数 + Hook**。本节仅为维护遗留项目时的速查。
+
+```tsx
+class Counter extends React.Component<
+  { initial?: number },
+  { count: number }
+> {
+  state = { count: this.props.initial ?? 0 }
+
+  componentDidMount() {
+    document.title = `Count: ${this.state.count}`
+  }
+
+  componentDidUpdate(prevProps: { initial?: number }, prevState: { count: number }) {
+    if (prevState.count !== this.state.count) {
+      document.title = `Count: ${this.state.count}`
+    }
+  }
+
+  componentWillUnmount() {
+    document.title = 'App'
+  }
+
+  inc = () => {
+    this.setState(prev => ({ count: prev.count + 1 }))
+  }
+
+  render() {
+    return <button onClick={this.inc}>{this.state.count}</button>
+  }
+}
+```
+
+### 与 Hook 的等价对应
+
+| Class API | Hook 等价 |
+| --------- | --------- |
+| `state` / `setState` | `useState` / `useReducer` |
+| `componentDidMount` | `useEffect(() => {...}, [])` |
+| `componentDidUpdate` | `useEffect(() => {...}, [deps])` |
+| `componentWillUnmount` | `useEffect` 返回的清理函数 |
+| `getDerivedStateFromProps` | 渲染中直接计算 + `useState` |
+| `shouldComponentUpdate` / `PureComponent` | `React.memo` + `useMemo` / `useCallback` |
+| `componentDidCatch` | `<ErrorBoundary>` 仍需 class（暂无 Hook 等价） |
+| `this.refs` / `createRef` | `useRef` |
+| `this.context` | `useContext` |
+
+### 仍需 class 的唯一场景
+
+错误边界（Error Boundary）目前必须用 class 实现，因为 Hook 无法捕获子组件的渲染异常：
+
+```tsx
+class ErrorBoundary extends React.Component<
+  { fallback: React.ReactNode; children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    reportError(error, info)
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children
+  }
+}
+```
+
+或使用 [`react-error-boundary`](https://github.com/bvaughn/react-error-boundary) 库提供的封装。详见 [高级主题](/react/advanced#error-boundary)。
+
+### 不要在新代码混用
+
+不要在同一组件树里临时穿插 class——Hook 与 class 状态无法相互访问，混用会让心智模型割裂。
+
+## 命名与文件约定
+
+```text
+components/
+├── Button/
+│   ├── Button.tsx
+│   ├── Button.module.css
+│   ├── Button.test.tsx
+│   ├── Button.stories.tsx        # Storybook
+│   └── index.ts                  # re-export
+└── Card.tsx                      # 简单组件可单文件
+```
+
+- 组件文件名 PascalCase
+- 一个文件一个组件（小辅助组件除外）
+- `index.ts` 仅 re-export，不写实现
+
+## 小结
+
+- React 组件 = 接受 props、返回 React Element 的纯函数；
+- Props 是只读的"输入"，State 是组件自治的"内部记忆"；
+- 优先组合（children / 多 slot / compound）而非继承；
+- Class 组件已不推荐，仅 Error Boundary 仍需 class 实现；
+- 列表 key 必须使用稳定业务 ID，索引与随机值都是反模式。

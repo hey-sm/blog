@@ -1,0 +1,595 @@
+---
+title: HTML 优化
+description: HTML 压缩、关键渲染路径、文档结构、iframes 与流式输出
+---
+
+# HTML 优化
+
+HTML 是浏览器从服务器收到的**第一个字节**，也是关键渲染路径的起点。任何让 HTML 更早到达、更早完成解析的优化，都会传导到所有后续指标——LCP、FCP、TTI 都依赖 HTML 解析的速度。本章从字节层、结构层、解析层、传输层四个维度系统梳理 HTML 优化。
+
+## HTML 在加载链条中的位置
+
+```text
+T=0     用户输入 URL
+T+ε     浏览器解析 URL → DNS 查询 → TCP/TLS 握手
+T+α     发送 GET / 请求
+T+β     ◄─── 服务器返回首字节（TTFB） ───
+T+γ     接收 HTML 主体，开始流式解析
+T+γ+    解析中：
+        ├─ 遇到 <link rel="stylesheet"> → 阻塞渲染（默认）
+        ├─ 遇到 <script src="..."> → 阻塞解析（默认）
+        ├─ 遇到 <img src="..."> → 异步加载
+        └─ 遇到 <link rel="preload"> → 提前下载
+T+δ     DOM 构建完成 (DOMContentLoaded)
+T+ε     所有资源加载完成 (load)
+```
+
+HTML 文档**本身的字节大小**、**结构组织**、**资源声明顺序**都会影响这条时间线上每个节点的到达时间。
+
+## 字节层：HTML 压缩
+
+### Minification 的内容
+
+HTML 压缩通常做这些事：
+
+- 删除注释（`<!-- -->`）
+- 折叠空白（连续多个空格 → 1 个）
+- 删除可省略的属性引号（`type="text"` → `type=text`，需谨慎）
+- 删除空属性（`class=""`）
+- 折叠布尔属性（`disabled="disabled"` → `disabled`）
+- 内联小段 CSS / JS
+- 移除可省略的标签（`<html>` / `<head>` / `<body>` 部分场景可省）
+
+实测一个中等复杂度页面（35 KB 原始 HTML）：
+
+| 步骤 | 体积 | 减少 |
+| ---- | ---- | ---- |
+| 原始 | 35.0 KB | — |
+| 删注释 + 折空白 | 30.2 KB | -14% |
+| html-minifier-terser 全量 | 26.8 KB | -23% |
+| + Brotli | 6.4 KB | -82% |
+
+注意：**Brotli 压缩本身就消化了大部分空白冗余**——压缩前的 minify 收益边际递减。但 minify 仍有价值，因为：
+
+1. SSR 框架的渲染输出常常体积可观，节省 CPU 序列化时间
+2. minify 后的字符串更利于 streaming HTML 的尽早提交
+3. 对纯静态 HTML（无 Brotli 的小服务）收益直接
+
+### 工具选择
+
+| 工具 | 特点 |
+| ---- | ---- |
+| `html-minifier-terser` | 最常用，社区维护活跃 |
+| Vite 内置 | 默认开启 `minify: 'esbuild'` |
+| Next.js | 生产构建自动 minify |
+| Nuxt 3 | 生产构建自动 minify |
+
+```js
+// html-minifier-terser 推荐配置
+import { minify } from 'html-minifier-terser'
+
+const result = await minify(html, {
+  collapseWhitespace: true,
+  removeComments: true,
+  removeRedundantAttributes: true,
+  removeScriptTypeAttributes: true,
+  removeStyleLinkTypeAttributes: true,
+  minifyCSS: true,
+  minifyJS: true,
+  useShortDoctype: true,
+  // 谨慎项
+  collapseBooleanAttributes: true,
+  removeEmptyAttributes: true,
+  removeOptionalTags: false  // 改为 true 后某些 SSR 框架水合会出问题
+})
+```
+
+⚠️ **`removeOptionalTags: true`**（移除 `</p>` 等可省略闭合标签）会让 React/Vue 的客户端水合（hydration）失败——服务端 HTML 与客户端虚拟 DOM 字符不匹配。**仅在静态站启用**。
+
+### 内联 vs 外链的权衡
+
+```html
+<!-- 方案 A：外链（可缓存，但多一次请求） -->
+<link rel="stylesheet" href="/main.css">
+
+<!-- 方案 B：内联（首屏快，但每次都重传） -->
+<style>/* 内联 CSS */</style>
+```
+
+判断标准：
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 首次访问占多数 | 内联关键部分 |
+| 重复访问占多数 | 外链 + 长缓存 |
+| 资源 < 1 KB | 内联（请求开销大于体积） |
+| 资源 > 14 KB | 外链（超过单 TCP 拥塞窗口） |
+| 跨页面复用 | 外链（命中缓存） |
+
+**14 KB 阈值的来历**：TCP 初始拥塞窗口（initcwnd）通常为 10 个 MSS（约 14.6 KB），意味着**首个 RTT 内**最多能传 14 KB。HTML 控制在 14 KB 内可以让用户在 1 RTT 内拿到完整文档。
+
+## 结构层：文档头部秩序
+
+`<head>` 中标签的**先后顺序**会直接影响浏览器的资源调度。理想顺序：
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <!-- 1. 字符集 + viewport，必须最先（影响后续解析） -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- 2. <title> + meta description（SEO + 标签页） -->
+  <title>页面标题</title>
+  <meta name="description" content="...">
+
+  <!-- 3. preconnect / dns-prefetch（最早建立连接） -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://api.example.com" crossorigin>
+
+  <!-- 4. preload 关键资源（LCP 图、关键字体、关键 CSS） -->
+  <link rel="preload" href="/hero.webp" as="image" fetchpriority="high">
+  <link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin>
+
+  <!-- 5. 内联 critical CSS（消除 RTT） -->
+  <style>/* 首屏关键 CSS */</style>
+
+  <!-- 6. 异步加载主 CSS -->
+  <link rel="preload" href="/main.css" as="style"
+        onload="this.onload=null;this.rel='stylesheet'">
+
+  <!-- 7. defer / async 脚本 -->
+  <script src="/main.js" defer></script>
+
+  <!-- 8. 第三方脚本（最低优先） -->
+  <script src="https://example.com/analytics.js" async></script>
+</head>
+```
+
+**为什么 charset 必须最早**：浏览器需要它来正确解码后续字节。如果它出现在 1024 字节之后，浏览器会重新解析整个文档。
+
+**为什么 viewport 也要早**：影响 CSS 的媒体查询匹配，进而影响首屏布局。
+
+### `<base>` 与相对 URL
+
+```html
+<base href="/app/v2/">
+```
+
+设置后，所有相对 URL 都基于这个 base 解析。在某些 SPA 部署到子路径时有用，但**会影响 `<a href="#anchor">` 跳转到当前页**——这是常见 bug。除非必要否则不用。
+
+## 关键渲染路径
+
+浏览器把 HTML 解析为 DOM，把 CSS 解析为 CSSOM，二者合并为 Render Tree，最终 Layout → Paint。这条路径上**任何阻塞**都直接推迟首屏。
+
+```text
+       HTML  ──► DOM ────┐
+                          ├──► Render Tree ──► Layout ──► Paint
+       CSS   ──► CSSOM ──┘
+                ▲
+        阻塞渲染：所有 <link rel="stylesheet"> 必须加载完
+```
+
+### 阻塞 vs 非阻塞资源
+
+| 资源 | 默认行为 | 阻塞什么 |
+| ---- | -------- | -------- |
+| 同步 `<script>` | 阻塞 HTML 解析 | DOM 构建 |
+| `<script async>` | 不阻塞解析，下载完立即执行 | 仅执行时阻塞解析 |
+| `<script defer>` | 不阻塞解析，DOMContentLoaded 前执行 | 不阻塞 |
+| `<link rel="stylesheet">` | 不阻塞解析 | 阻塞 Render Tree 与首次渲染 |
+| `<link rel="preload">` | 不阻塞 | 不阻塞 |
+| `<img>` | 不阻塞 | 仅自身布局 |
+
+### CSS 阻塞渲染的本质
+
+```html
+<head>
+  <link rel="stylesheet" href="/main.css">  ← 必须加载完才能首次绘制
+</head>
+<body>
+  <h1>Hello</h1>
+</body>
+```
+
+即使 HTML 已经解析完，浏览器也不会绘制——因为 CSS 还没就绪，渲染会"闪一下样式"（FOUC）。
+
+**避开 CSS 阻塞的三种思路**：
+
+1. **拆分**：关键 CSS 内联（`<style>`），剩余的异步加载（[CSS 优化](/performance/css#critical-css)）
+2. **media 限定**：非匹配的样式表不阻塞渲染
+
+```html
+<link rel="stylesheet" href="/print.css" media="print">
+<link rel="stylesheet" href="/landscape.css" media="(orientation: landscape)">
+```
+
+3. **预加载 + 异步切换**：
+
+```html
+<link rel="preload" href="/main.css" as="style"
+      onload="this.onload=null;this.rel='stylesheet'">
+<noscript><link rel="stylesheet" href="/main.css"></noscript>
+```
+
+### `<script>` 阻塞解析的本质
+
+```html
+<body>
+  <h1>Hello</h1>
+  <script src="/heavy.js"></script>   ← 这里阻塞
+  <p>World</p>                         ← 必须等 heavy.js 下载并执行才解析
+</body>
+```
+
+历史原因：`document.write` 可以修改后续 DOM。现代代码不应使用 `document.write`，所以加 `defer` 或 `async`：
+
+```html
+<!-- defer：保证文档顺序，DOMContentLoaded 前执行 -->
+<script src="/a.js" defer></script>
+<script src="/b.js" defer></script>
+
+<!-- async：下载完立即执行，不保证顺序 -->
+<script src="https://analytics.example.com/sdk.js" async></script>
+```
+
+ES Module 默认就是 `defer` 行为：
+
+```html
+<script type="module" src="/main.js"></script>   <!-- 默认 defer -->
+<script type="module" src="/early.js" async></script> <!-- 显式 async -->
+```
+
+## 解析层：流式 HTML 与提前提示
+
+### 流式渲染（Streaming）
+
+服务器可以分片输出 HTML，让浏览器**边接收边解析**——而不是等整个文档生成完。这要求服务端框架支持分块编码（`Transfer-Encoding: chunked`）。
+
+```js
+// Node.js 原生流式
+const http = require('node:http')
+http.createServer((req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.setHeader('Transfer-Encoding', 'chunked')
+
+  // 立即冲刷 head（让浏览器开始下载 CSS / JS）
+  res.write(`<!DOCTYPE html><html><head>
+    <link rel="stylesheet" href="/main.css">
+    <link rel="preload" href="/hero.webp" as="image">
+  </head><body>`)
+
+  // 慢操作（数据库查询）
+  fetchData().then(data => {
+    res.write(`<main>${render(data)}</main></body></html>`)
+    res.end()
+  })
+}).listen(3000)
+```
+
+**关键收益**：浏览器在 head 到达后立即发起 CSS / 字体 / 图片下载，与服务端渲染**并行**。
+
+```text
+非流式：
+[等待 SSR 全部完成]──► [浏览器开始解析]──► [发现 CSS]──► [下载 CSS]
+       1500 ms              50 ms             50 ms       300 ms = 1900 ms
+
+流式：
+[head 立即冲刷]──► [CSS 下载]
+[同时 SSR body 渲染]
+       300 ms (并行)        = ~1500 ms（受 SSR 时间制约）
+```
+
+### 框架支持
+
+#### React 18+
+
+`renderToPipeableStream` / `renderToReadableStream` + `<Suspense>`：
+
+```jsx
+import { renderToPipeableStream } from 'react-dom/server'
+
+app.get('/', (req, res) => {
+  const { pipe } = renderToPipeableStream(<App />, {
+    bootstrapScripts: ['/main.js'],
+    onShellReady() {
+      // shell 准备好就开始 stream（Suspense 内的部分晚点）
+      res.setHeader('Content-Type', 'text/html')
+      pipe(res)
+    }
+  })
+})
+```
+
+#### Next.js App Router
+
+默认开启流式 SSR + Server Components，详见 [React 渲染策略](/performance/react-ssr)。
+
+#### Vue 3
+
+```js
+import { renderToWebStream } from 'vue/server-renderer'
+
+const stream = renderToWebStream(app)
+return new Response(stream, { headers: { 'Content-Type': 'text/html' } })
+```
+
+详见 [Vue 渲染策略](/performance/vue-ssr)。
+
+### Early Hints (HTTP 103)
+
+新一代提前提示机制，HTTP/2/3 支持。服务端在 SSR 还在跑的时候**先回一个 103 状态码**，告诉浏览器需要哪些资源：
+
+```http
+HTTP/1.1 103 Early Hints
+Link: </main.css>; rel=preload; as=style
+Link: </hero.webp>; rel=preload; as=image
+
+[服务端继续渲染……]
+
+HTTP/1.1 200 OK
+Content-Type: text/html
+…
+```
+
+收益：在 SSR 渲染完成前（可能 500-2000 ms）就让浏览器并行下载关键资源。Cloudflare、Fastly、Vercel Edge 已支持。
+
+```js
+// Express 示例（需 Node.js 18.11+ 或 fastify）
+res.writeEarlyHints({
+  link: ['</main.css>; rel=preload; as=style']
+})
+```
+
+## iframes 与嵌入资源
+
+### iframe 的成本
+
+每个 iframe 是一个独立的浏览器上下文：
+
+- 独立的 JS 引擎实例
+- 独立的事件循环
+- 独立的渲染管线
+- 自己的网络请求队列
+
+实测：嵌入一个空的 about:blank iframe ≈ 增加 50–200 KB 内存 + 2–10 ms 主线程时间。嵌入 YouTube / Twitter 等第三方 iframe 可能花费数十 MB 内存与数百毫秒。
+
+### 减少 iframe 数量的策略
+
+**错误用法**：
+
+```html
+<!-- 用 iframe 嵌入广告、视频、地图、社交分享按钮 ... -->
+<iframe src="https://www.youtube.com/embed/xxx"></iframe>
+<iframe src="https://twitter.com/embed/yyy"></iframe>
+<iframe src="https://maps.google.com/..."></iframe>
+```
+
+**优化方法**：
+
+#### 1. Facade 模式（点击前不加载）
+
+先放一张静态图，用户点击播放才替换为 iframe：
+
+```html
+<div class="youtube-facade" data-id="VIDEO_ID">
+  <img src="/thumbnails/VIDEO_ID.jpg" alt="Video">
+  <button>▶</button>
+</div>
+```
+
+```js
+document.querySelectorAll('.youtube-facade').forEach(el => {
+  el.addEventListener('click', () => {
+    const id = el.dataset.id
+    el.innerHTML = `<iframe src="https://www.youtube.com/embed/${id}?autoplay=1"
+                            allow="autoplay" allowfullscreen></iframe>`
+  })
+})
+```
+
+社区方案：[lite-youtube-embed](https://github.com/paulirish/lite-youtube-embed) / [@lite-vimeo-embed](https://github.com/luwes/lite-vimeo-embed)。
+
+#### 2. iframe 懒加载
+
+```html
+<iframe src="..." loading="lazy" width="560" height="315"></iframe>
+```
+
+视口外的 iframe 推迟加载。Chrome 77+ 支持。
+
+#### 3. 同源化（仅自己的 iframe）
+
+如果 iframe 是自己的应用（如嵌入子产品），考虑直接用同源页面 + 路由代替——免去 iframe 隔离开销。
+
+## 文档结构语义
+
+### 减少 DOM 深度与节点数
+
+每个 DOM 节点都消耗内存与渲染计算。一般规则：
+
+- 总节点数 < 1500（理想 < 800）
+- DOM 深度 < 32 层（理想 < 14）
+- 单父节点子节点数 < 60
+
+Lighthouse 会针对此发出警告。
+
+```js
+// 快速审计当前页面
+console.log({
+  total: document.querySelectorAll('*').length,
+  maxDepth: getMaxDepth(document.body),
+  avgChildren: getAvgChildren(document.body)
+})
+
+function getMaxDepth(node, d = 0) {
+  if (!node.children?.length) return d
+  return Math.max(...[...node.children].map(c => getMaxDepth(c, d + 1)))
+}
+```
+
+常见臃肿源：
+
+- 过度使用 `div` 包裹（"divitis"）
+- 列表渲染时未做虚拟化（10000 行表格）
+- 第三方 widget 注入大量节点
+
+### 语义化标签的隐性收益
+
+```html
+<!-- ❌ 全用 div + class -->
+<div class="header">
+  <div class="nav">
+    <div class="link">Home</div>
+  </div>
+</div>
+
+<!-- ✅ 语义化 -->
+<header>
+  <nav>
+    <a href="/">Home</a>
+  </nav>
+</header>
+```
+
+收益不仅是可读性：
+
+- 浏览器可以做**优先布局**（视口顶部的 `<header>` 优先）
+- 屏幕阅读器跳转更快
+- 搜索引擎索引质量更高（影响导流）
+
+## 高级技巧
+
+### `<link rel="modulepreload">` 优化 ESM 入口
+
+ES Module 是按需链式加载的：浏览器解析 `import` 后才知道下一层依赖。`modulepreload` 让浏览器**同时**预加载整个图：
+
+```html
+<link rel="modulepreload" href="/main.js">
+<link rel="modulepreload" href="/utils.js">
+<link rel="modulepreload" href="/api.js">
+<script type="module" src="/main.js"></script>
+```
+
+详见 [资源预加载](/performance/preload#modulepreload)。
+
+### Speculation Rules API
+
+2024 年新加入的实验性 API，让浏览器在**用户可能跳转前**就预渲染整个目标页：
+
+```html
+<script type="speculationrules">
+{
+  "prerender": [{
+    "where": { "href_matches": "/products/*" },
+    "eagerness": "moderate"
+  }],
+  "prefetch": [{
+    "where": { "href_matches": "/*" },
+    "eagerness": "conservative"
+  }]
+}
+</script>
+```
+
+`prerender` 让目标页面在后台**完整运行 JS**——用户点击后秒开。但消耗资源较大，需精准范围限定。Chrome 121+ 支持。
+
+### 字符引用与转义
+
+```html
+<!-- ❌ 多余的实体引用 -->
+<p>I&apos;m here&hellip;</p>
+
+<!-- ✅ UTF-8 直接输出 -->
+<p>I'm here…</p>
+```
+
+实体引用占字节多，UTF-8 直接编码 1-3 字节。
+
+## 监控与审计
+
+### Lighthouse HTML 相关审计
+
+| 审计项 | 关注点 |
+| ------ | ------ |
+| Eliminate render-blocking resources | 阻塞渲染的 CSS / JS |
+| Avoid an excessive DOM size | DOM 节点数与深度 |
+| Document uses legible font sizes | 移动端字号 |
+| Document doesn't use plugins | Flash 等老插件 |
+| Avoid chaining critical requests | 关键请求链长度 |
+
+### Performance API 监控解析时间
+
+```js
+const navEntry = performance.getEntriesByType('navigation')[0]
+console.log({
+  ttfb: navEntry.responseStart - navEntry.requestStart,
+  download: navEntry.responseEnd - navEntry.responseStart,
+  domInteractive: navEntry.domInteractive - navEntry.responseEnd,
+  domComplete: navEntry.domComplete - navEntry.domInteractive,
+  load: navEntry.loadEventEnd - navEntry.startTime
+})
+```
+
+`domInteractive` 是 DOM 解析完成的时间——HTML 优化效果直接反映在这里。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| `charset` 不在前 1024 字节 | 重新解析 | 放到 `<head>` 第一行 |
+| 大量同步 `<script>` 在 `<head>` | 阻塞解析 | 加 `defer` 或下移到 body 末尾 |
+| 单 HTML > 100 KB | 解析与传输都慢 | 拆分到组件级懒加载 |
+| 把广告 / 社交按钮全用 iframe | 内存与首屏成本 | Facade + lazy load |
+| 不必要的注释保留到生产 | 体积与信息泄露 | 构建期 minify |
+| `removeOptionalTags` 在 SSR 应用启用 | 水合失败 | 仅静态站启用 |
+| iframe 没有 `loading="lazy"` | 视口外仍下载 | 加 lazy 属性 |
+
+## 框架特定优化
+
+### React (Next.js App Router)
+
+```jsx
+// app/layout.tsx
+export default function RootLayout({ children }) {
+  return (
+    <html lang="zh">
+      <head>
+        {/* Next.js 自动注入合适的 meta + preload */}
+      </head>
+      <body>{children}</body>
+    </html>
+  )
+}
+
+// 使用 next/script 控制加载策略
+import Script from 'next/script'
+<Script src="/heavy.js" strategy="lazyOnload" />
+//                              ↑ beforeInteractive | afterInteractive | lazyOnload | worker
+```
+
+### Vue 3 (Nuxt)
+
+```vue
+<script setup>
+useHead({
+  htmlAttrs: { lang: 'zh-CN' },
+  link: [
+    { rel: 'preload', as: 'image', href: '/hero.webp', fetchpriority: 'high' }
+  ]
+})
+</script>
+```
+
+`@unhead/vue` 自动处理头部标签的去重与排序。
+
+## 小结
+
+- HTML 是关键渲染路径的起点，TTFB → FCP → LCP 都从它出发；
+- 字节优化（minify + Brotli）边际收益递减，结构优化（preconnect / preload / 内联 critical）回报更大；
+- `<head>` 的标签顺序直接决定浏览器调度——charset → preconnect → preload → critical CSS → defer JS 是黄金顺序；
+- CSS 阻塞渲染、同步 JS 阻塞解析，绕过这两点是首屏优化的基本功；
+- 流式 HTML + 103 Early Hints 是 SSR 应用的下一代加速手段，可让首屏与服务端渲染并行；
+- iframe 是高成本的隔离上下文，能不用就不用，要用就 facade + lazy；
+- DOM 节点数 / 深度 / 单层子节点数都有上限，臃肿 DOM 会拖累整个生命周期。

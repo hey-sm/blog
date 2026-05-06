@@ -1,0 +1,447 @@
+---
+title: 动画
+description: Framer Motion、react-spring、GSAP 与 CSS 动画的选型与实践
+---
+
+# 动画
+
+React 没有内置动画 API。社区主流方案分三个层次：
+
+| 方案 | 心智模型 | 包大小 | 适合 |
+| ---- | -------- | ------ | ---- |
+| 纯 CSS / Tailwind | 声明式 transition / animation | 0 | 状态切换、hover、简单进出 |
+| Framer Motion | 声明式、组件化 | ~40 KB | 主流推荐，复杂手势 / 布局动画 |
+| react-spring | 物理弹簧、命令式 + Hook | ~25 KB | 自然的物理感、SVG / Canvas |
+| GSAP | 时间轴、命令式 | ~50 KB | 视效繁重的营销页、SVG 动画 |
+| Motion One | 极简、Web Animations API | ~5 KB | 在意包大小、追求性能 |
+
+绝大多数业务场景：**优先用 CSS / Tailwind**，复杂时升级到 **Framer Motion**。GSAP 在 React 中需要更多手动管理（ref + useEffect），通常仅在专门做品牌动效时选用。
+
+## CSS / Tailwind 动画
+
+最便宜的方案——浏览器原生、可被 GPU 加速、零 JS 开销。
+
+### Transition
+
+```tsx
+<button className="
+  bg-blue-600 hover:bg-blue-700
+  transition-colors duration-200 ease-in-out
+">
+  Click
+</button>
+```
+
+### Keyframes
+
+Tailwind 内置常用动画（`animate-spin` / `animate-pulse` / `animate-bounce`），自定义可在 `@theme` 中声明（Tailwind 4）：
+
+```css
+@theme {
+  --animate-fade-in: fade-in 0.3s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+```
+
+```tsx
+<div className="animate-fade-in">...</div>
+```
+
+### `data-state` 模式（Radix）
+
+Radix 组件通过 `data-state` 属性暴露状态，配合 CSS 动画即可：
+
+```tsx
+<DialogContent className="
+  data-[state=open]:animate-in
+  data-[state=closed]:animate-out
+  data-[state=open]:fade-in-0
+  data-[state=closed]:fade-out-0
+  data-[state=open]:zoom-in-95
+">
+  ...
+</DialogContent>
+```
+
+`tailwindcss-animate` 插件提供配套类名，shadcn/ui 默认包含。
+
+## Framer Motion
+
+```bash
+pnpm add motion
+```
+
+> 自 2024 年起包名从 `framer-motion` 迁移到 `motion`，二者目前共存，新项目用 `motion`。
+
+### 基本动画
+
+```tsx
+import { motion } from 'motion/react'
+
+function Box() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.3, ease: 'easeOut' }}
+    >
+      Hello
+    </motion.div>
+  )
+}
+```
+
+`motion.div` / `motion.button` / `motion.svg` 等是 HTML 元素的"可动画"版本——接受额外的 `initial` / `animate` / `exit` / `transition` / `whileHover` / `whileTap` 等 prop。
+
+### 进出动画：`<AnimatePresence>`
+
+```tsx
+import { AnimatePresence, motion } from 'motion/react'
+
+function Toggle({ open, children }: Props) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+        >
+          {children}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+```
+
+`<AnimatePresence>` 让"被卸载的组件"先播放 `exit` 动画再真正移除。注意：
+
+- 包装的子元素必须有稳定 `key`
+- `mode="wait"`：等待退场动画结束再播放进场（适合切换）
+- `mode="popLayout"`：兄弟元素布局动画
+
+### 手势 / 拖拽
+
+```tsx
+<motion.div
+  drag
+  dragConstraints={{ left: 0, right: 300, top: 0, bottom: 200 }}
+  dragElastic={0.1}
+  whileDrag={{ scale: 1.05 }}
+>
+  Drag me
+</motion.div>
+```
+
+```tsx
+<motion.div
+  whileHover={{ scale: 1.05 }}
+  whileTap={{ scale: 0.95 }}
+  whileFocus={{ outline: '2px solid blue' }}
+>
+  Button
+</motion.div>
+```
+
+### 布局动画：`layout` prop
+
+`layout` 自动平滑过渡布局变化（位置、尺寸）：
+
+```tsx
+function List({ items }: { items: Item[] }) {
+  return (
+    <ul>
+      {items.map(item => (
+        <motion.li key={item.id} layout>
+          {item.text}
+        </motion.li>
+      ))}
+    </ul>
+  )
+}
+```
+
+排序、增删时元素自动滑动到新位置——FLIP 动画的声明式封装。
+
+`layoutId` 用于跨组件的"共享元素动画"：
+
+```tsx
+<motion.div layoutId="card" />
+{/* 在另一处 */}
+<motion.div layoutId="card" />
+{/* 两个相同 layoutId 的元素之间会自动播放过渡 */}
+```
+
+### 滚动驱动
+
+```tsx
+import { useScroll, useTransform, motion } from 'motion/react'
+
+function ParallaxHero() {
+  const { scrollY } = useScroll()
+  const y = useTransform(scrollY, [0, 500], [0, -150])
+  const opacity = useTransform(scrollY, [0, 300], [1, 0])
+
+  return (
+    <motion.div style={{ y, opacity }}>
+      <h1>Hero</h1>
+    </motion.div>
+  )
+}
+```
+
+### 入场触发
+
+```tsx
+<motion.div
+  initial={{ opacity: 0 }}
+  whileInView={{ opacity: 1 }}
+  viewport={{ once: true, margin: '-100px' }}
+  transition={{ duration: 0.5 }}
+>
+  Reveal me on scroll
+</motion.div>
+```
+
+### 性能注意
+
+- 优先动画 `transform` / `opacity`（GPU 加速），避免动画 `width` / `height` / `top` / `left`
+- 大量元素同时动画时考虑 `will-change` 或减少帧
+- 复杂场景使用 `layoutId` 替代手写动画
+
+## react-spring
+
+物理弹簧模型——动画曲线由 `tension` / `friction` / `mass` 决定，效果更自然。
+
+```bash
+pnpm add @react-spring/web
+```
+
+```tsx
+import { useSpring, animated } from '@react-spring/web'
+
+function Box() {
+  const styles = useSpring({
+    from: { opacity: 0, transform: 'translateY(20px)' },
+    to:   { opacity: 1, transform: 'translateY(0)' },
+    config: { tension: 280, friction: 60 }
+  })
+
+  return <animated.div style={styles}>Hello</animated.div>
+}
+```
+
+`useTransition` 提供进出动画：
+
+```tsx
+import { useTransition, animated } from '@react-spring/web'
+
+function List({ items }: { items: Item[] }) {
+  const transitions = useTransition(items, {
+    from: { opacity: 0, height: 0 },
+    enter: { opacity: 1, height: 40 },
+    leave: { opacity: 0, height: 0 },
+    keys: item => item.id
+  })
+
+  return transitions((style, item) => (
+    <animated.div style={style}>{item.text}</animated.div>
+  ))
+}
+```
+
+适合非视觉设计师都能直觉判断"自然不自然"的场景——拖拽回弹、滑入式 modal、菜单展开。
+
+## GSAP
+
+时间轴动画的标杆，但与 React 集成需要更多手工：
+
+```bash
+pnpm add gsap @gsap/react
+```
+
+```tsx
+import { useGSAP } from '@gsap/react'
+import gsap from 'gsap'
+import { useRef } from 'react'
+
+function Hero() {
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useGSAP(() => {
+    const tl = gsap.timeline()
+    tl.from('.title', { y: 50, opacity: 0, duration: 0.8 })
+      .from('.subtitle', { y: 20, opacity: 0, duration: 0.6 }, '-=0.4')
+      .from('.cta', { scale: 0.8, opacity: 0, duration: 0.4 })
+  }, { scope: containerRef })
+
+  return (
+    <div ref={containerRef}>
+      <h1 className="title">Welcome</h1>
+      <p className="subtitle">Subtitle here</p>
+      <button className="cta">Get started</button>
+    </div>
+  )
+}
+```
+
+`@gsap/react` 包提供 `useGSAP` Hook，正确处理 cleanup 与 React 生命周期。
+
+GSAP 的强项：
+
+- 时间轴控制（`tl.from(...)` 链式编排）
+- ScrollTrigger 插件（视差、滚动驱动 SVG）
+- MotionPath 插件（沿路径动画）
+- 复杂的 SVG morphing
+
+### 何时选 GSAP
+
+- 营销 / 品牌动效
+- 复杂的时间轴序列
+- 已有 GSAP 资产 / 团队熟悉度
+
+业务应用通常 Framer Motion 已足够；GSAP 适合"视觉设计强需求"的项目。
+
+## Motion One
+
+[Motion One](https://motion.dev/) 是基于 Web Animations API 的极简动画库，包大小约 5 KB：
+
+```tsx
+import { animate } from 'motion'
+
+useEffect(() => {
+  animate('.box', { transform: 'scale(1.2)' }, { duration: 0.3 })
+}, [])
+```
+
+适合包大小敏感、动画需求简单的项目。Motion 团队也是 Framer Motion 的维护者。
+
+## 实战配方
+
+### 进场 / 退场动画
+
+```tsx
+<AnimatePresence>
+  {open && (
+    <motion.div
+      key="modal"
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ duration: 0.15 }}
+    >
+      ...
+    </motion.div>
+  )}
+</AnimatePresence>
+```
+
+### 列表项动画
+
+```tsx
+<AnimatePresence mode="popLayout">
+  {todos.map(todo => (
+    <motion.li
+      key={todo.id}
+      layout
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 20 }}
+    >
+      {todo.text}
+    </motion.li>
+  ))}
+</AnimatePresence>
+```
+
+### 路由切换
+
+```tsx
+import { Outlet, useLocation } from 'react-router'
+import { AnimatePresence, motion } from 'motion/react'
+
+function Root() {
+  const location = useLocation()
+  return (
+    <AnimatePresence mode="wait">
+      <motion.div
+        key={location.pathname}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.2 }}
+      >
+        <Outlet />
+      </motion.div>
+    </AnimatePresence>
+  )
+}
+```
+
+### 共享元素
+
+```tsx
+// 列表项
+<motion.div layoutId={`card-${item.id}`}>
+  <img src={item.thumb} />
+</motion.div>
+
+// 详情页打开时
+<motion.div layoutId={`card-${item.id}`}>
+  <img src={item.fullSize} />
+</motion.div>
+
+// 元素自动从列表"飞"到详情位置
+```
+
+### 减少动画（无障碍）
+
+尊重用户的 OS 偏好：
+
+```tsx
+import { useReducedMotion } from 'motion/react'
+
+function Card() {
+  const reduce = useReducedMotion()
+  return (
+    <motion.div
+      initial={{ y: reduce ? 0 : 20 }}
+      animate={{ y: 0 }}
+    />
+  )
+}
+```
+
+或在 CSS：
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+```
+
+## 何时不要用动画
+
+- **加载指示**：用骨架屏，不要无限 spinner
+- **密集表格 / 列表**：让 layout 动画在大列表上跑会卡
+- **关键交互**：等待动画播放完才能继续，体感慢
+- **频繁切换**：tab 切换的微动画过多反而干扰阅读
+
+动画是体验的"调味"，不是"主菜"。优先体感快、关键路径短。
+
+## 小结
+
+- 简单交互优先 CSS / Tailwind；复杂时升级到 Framer Motion；
+- 物理感强的场景（拖拽、回弹）react-spring；视觉创意营销选 GSAP；
+- `<AnimatePresence>` + `layout` 是 Framer Motion 最有用的两个 API；
+- 始终尊重 `prefers-reduced-motion` 与无障碍准则；
+- 优先动画 `transform` 与 `opacity`，避免触发 layout / paint。

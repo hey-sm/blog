@@ -1,0 +1,362 @@
+---
+title: 简介与优势
+description: TypeScript 是什么、为什么使用、核心特性与生态系统
+---
+
+# 简介与优势
+
+TypeScript 是 Microsoft 开发的 JavaScript 超集，为 JavaScript 添加了**静态类型系统**。
+
+## TypeScript 是什么
+
+TypeScript = JavaScript + 类型系统 + 编译时检查
+
+```ts
+// JavaScript
+function greet(name) {
+  return `Hello, ${name}!`
+}
+
+greet(123)  // 运行时才发现错误
+
+// TypeScript
+function greet(name: string): string {
+  return `Hello, ${name}!`
+}
+
+greet(123)  // ❌ 编译时错误：类型 'number' 不能赋值给类型 'string'
+```
+
+### 核心特性
+
+1. **静态类型检查**：编译时发现错误
+2. **类型推断**：自动推断类型
+3. **渐进式采用**：可以逐步迁移
+4. **工具支持**：强大的 IDE 支持
+5. **向后兼容**：编译为标准 JavaScript
+
+## 为什么使用 TypeScript
+
+### 1. 提前发现错误
+
+```ts
+// JavaScript：运行时才报错
+const user = { name: 'Alice', age: 25 }
+console.log(user.email.toLowerCase())  // 💥 运行时错误
+
+// TypeScript：编译时就报错
+interface User {
+  name: string
+  age: number
+}
+
+const user: User = { name: 'Alice', age: 25 }
+console.log(user.email.toLowerCase())  // ❌ 属性 'email' 不存在
+```
+
+### 2. 更好的代码提示
+
+```tsx
+interface ButtonProps {
+  label: string
+  onClick: () => void
+  variant?: 'primary' | 'secondary'
+}
+
+// IDE 会自动提示所有属性和类型
+function Button(props: ButtonProps) {
+  return <button onClick={props.onClick}>{props.label}</button>
+}
+
+// 使用时有完整的类型提示
+<Button 
+  label="Click me"
+  onClick={() => {}}
+  variant="primary"  // IDE 会提示可选值
+/>
+```
+
+### 3. 重构更安全
+
+```ts
+// 修改接口定义
+interface User {
+  id: number
+  name: string
+  email: string  // 新增字段
+}
+
+// TypeScript 会标记所有需要更新的地方
+function createUser(name: string): User {
+  return {
+    id: Date.now(),
+    name,
+    // ❌ 缺少 'email' 属性
+  }
+}
+```
+
+### 4. 自文档化
+
+```ts
+// 类型即文档
+interface ApiResponse<T> {
+  data: T
+  status: number
+  message: string
+}
+
+async function fetchUser(id: number): Promise<ApiResponse<User>> {
+  // 返回类型清晰明确
+  const response = await fetch(`/api/users/${id}`)
+  return response.json()
+}
+```
+
+## TypeScript 在 React 中的优势
+
+### 1. Props 类型安全
+
+```tsx
+interface UserCardProps {
+  user: {
+    id: number
+    name: string
+    avatar: string
+  }
+  onEdit: (id: number) => void
+}
+
+function UserCard({ user, onEdit }: UserCardProps) {
+  return (
+    <div>
+      <img src={user.avatar} alt={user.name} />
+      <h3>{user.name}</h3>
+      <button onClick={() => onEdit(user.id)}>Edit</button>
+    </div>
+  )
+}
+
+// 使用时类型检查
+<UserCard 
+  user={{ id: 1, name: 'Alice', avatar: '/avatar.jpg' }}
+  onEdit={(id) => console.log(id)}
+/>
+```
+
+### 2. Hooks 类型推断
+
+```tsx
+import { useState } from 'react'
+
+// 自动推断类型
+const [count, setCount] = useState(0)  // count: number
+
+// 显式指定类型
+const [user, setUser] = useState<User | null>(null)
+
+// 泛型约束
+const [items, setItems] = useState<string[]>([])
+```
+
+### 3. 事件处理类型
+
+```tsx
+function Form() {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    // 类型安全的事件处理
+  }
+  
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log(e.target.value)
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input onChange={handleChange} />
+    </form>
+  )
+}
+```
+
+## TypeScript 的权衡
+
+### 优势
+
+✅ **类型安全**：编译时发现错误  
+✅ **更好的 IDE 支持**：自动补全、重构  
+✅ **代码可维护性**：类型即文档  
+✅ **团队协作**：接口契约清晰  
+✅ **重构信心**：类型系统保护  
+
+### 劣势
+
+❌ **学习曲线**：需要学习类型系统  
+❌ **编译步骤**：需要编译为 JavaScript  
+❌ **初期投入**：编写类型定义需要时间  
+❌ **第三方库**：可能缺少类型定义  
+
+## TypeScript 生态系统
+
+### 核心工具
+
+- **tsc**：TypeScript 编译器
+- **ts-node**：直接运行 TypeScript
+- **@types**：第三方库类型定义
+
+### React 生态
+
+- **@types/react**：React 类型定义
+- **@types/react-dom**：ReactDOM 类型定义
+- **create-react-app**：内置 TypeScript 支持
+- **Vite**：原生 TypeScript 支持
+
+### 开发工具
+
+- **VS Code**：最佳 TypeScript 支持
+- **ESLint**：代码检查
+- **Prettier**：代码格式化
+- **ts-jest**：Jest TypeScript 支持
+
+## 快速开始
+
+### 创建 React + TypeScript 项目
+
+```bash
+# 使用 Create React App
+npx create-react-app my-app --template typescript
+
+# 使用 Vite
+npm create vite@latest my-app -- --template react-ts
+```
+
+### 基础示例
+
+```tsx filename="App.tsx"
+import { useState } from 'react'
+
+interface Todo {
+  id: number
+  text: string
+  completed: boolean
+}
+
+function App() {
+  const [todos, setTodos] = useState<Todo[]>([])
+  const [input, setInput] = useState('')
+  
+  const addTodo = () => {
+    const newTodo: Todo = {
+      id: Date.now(),
+      text: input,
+      completed: false
+    }
+    setTodos([...todos, newTodo])
+    setInput('')
+  }
+  
+  return (
+    <div>
+      <input 
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+      />
+      <button onClick={addTodo}>Add</button>
+      
+      <ul>
+        {todos.map(todo => (
+          <li key={todo.id}>
+            {todo.text}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+export default App
+```
+
+## TypeScript 的设计哲学
+
+### 1. 渐进式类型系统
+
+可以从 JavaScript 逐步迁移到 TypeScript：
+
+```ts
+// 阶段 1：JavaScript（.js）
+function add(a, b) {
+  return a + b
+}
+
+// 阶段 2：添加类型注解（.ts）
+function add(a: number, b: number): number {
+  return a + b
+}
+
+// 阶段 3：使用高级类型
+function add<T extends number | string>(a: T, b: T): T {
+  return (a as any) + (b as any)
+}
+```
+
+### 2. 结构化类型系统
+
+TypeScript 使用**结构化类型**（Duck Typing），而非名义类型：
+
+```ts
+interface Point {
+  x: number
+  y: number
+}
+
+function printPoint(p: Point) {
+  console.log(`${p.x}, ${p.y}`)
+}
+
+// ✅ 只要结构匹配就可以
+const point = { x: 10, y: 20, z: 30 }
+printPoint(point)  // 正常工作
+```
+
+### 3. 类型推断优先
+
+TypeScript 会尽可能自动推断类型：
+
+```ts
+// 自动推断为 number
+const count = 0
+
+// 自动推断为 string[]
+const names = ['Alice', 'Bob']
+
+// 自动推断为 (a: number, b: number) => number
+const add = (a: number, b: number) => a + b
+```
+
+## 何时使用 TypeScript
+
+### ✅ 推荐使用
+
+- 大型项目
+- 团队协作
+- 长期维护的项目
+- 需要重构的项目
+- 复杂的业务逻辑
+
+### ❌ 可以不用
+
+- 小型脚本
+- 原型验证
+- 一次性项目
+- 学习阶段
+
+## 学习路径
+
+1. **基础**：类型注解、基本类型、接口
+2. **进阶**：泛型、工具类型、类型守卫
+3. **高级**：条件类型、映射类型、模板字面量类型
+4. **实战**：React + TypeScript 项目
+
+下一章 [TypeScript vs JavaScript](/ts/typescript-vs-javascript) 详细对比两者差异。

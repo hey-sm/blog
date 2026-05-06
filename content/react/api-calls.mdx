@@ -1,0 +1,523 @@
+---
+title: 数据请求
+description: TanStack Query、SWR、Axios 与 GraphQL 客户端的现代实践
+---
+
+# 数据请求
+
+服务端状态（server state）是绝大多数 React 应用最复杂的状态——它远在另一台机器上、有自己的生命周期、可能并发更新、需要缓存、需要失效、需要重试。
+
+> **不要用 `useEffect` + `useState` 取数据，也不要用 Redux 装 API 数据。**
+
+本章覆盖：
+
+- **数据获取库**：TanStack Query（首选）、SWR
+- **HTTP 客户端**：原生 `fetch`、`axios`、`ky`
+- **GraphQL 客户端**：Apollo、urql、Relay
+
+## 为什么不能用 useEffect 取数据
+
+```tsx
+// ✗ 看似简单，实际是地狱的入口
+function UserProfile({ id }: { id: string }) {
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<Error | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    fetch(`/api/users/${id}`)
+      .then(r => r.json())
+      .then(setUser)
+      .catch(setError)
+      .finally(() => setLoading(false))
+  }, [id])
+  // ...
+}
+```
+
+未解决的问题：
+
+| 问题 | useEffect 方案 | TanStack Query |
+| ---- | -------------- | -------------- |
+| 缓存 | ❌ 切换路由再回来重新请求 | ✅ 自动缓存 + 失效策略 |
+| 去重 | ❌ 同一请求并发触发多次 | ✅ 同 key 共享请求 |
+| 自动重试 | ❌ 失败需要手写 | ✅ 配置即生效 |
+| 后台刷新 | ❌ 需要手动 setInterval | ✅ refetchInterval / focus |
+| 取消旧请求 | ❌ 需要 AbortController | ✅ 自动 |
+| 乐观更新 | ❌ 全手写 | ✅ optimisticUpdate |
+| Race condition | ❌ 切换 id 时旧请求可能后到 | ✅ 自动忽略过期请求 |
+| DevTools | ❌ 无 | ✅ 强大的 DevTools |
+| Suspense | ❌ 需要自己集成 | ✅ 一等公民 |
+
+**结论**：API 数据应该用专门的库管理。
+
+## TanStack Query
+
+业界事实标准。原名 React Query，现支持 React / Vue / Svelte / Solid。
+
+```bash
+pnpm add @tanstack/react-query @tanstack/react-query-devtools
+```
+
+```tsx filename="main.tsx"
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 60_000,                      // 1 分钟内数据视为新鲜
+      gcTime: 5 * 60_000,                     // 5 分钟后未引用即清除缓存
+      retry: 2,                                // 失败自动重试 2 次
+      refetchOnWindowFocus: false              // 默认 true，根据需要关闭
+    }
+  }
+})
+
+createRoot(document.getElementById('root')!).render(
+  <QueryClientProvider client={queryClient}>
+    <App />
+    <ReactQueryDevtools />
+  </QueryClientProvider>
+)
+```
+
+### `useQuery`
+
+```tsx
+import { useQuery } from '@tanstack/react-query'
+
+function UserProfile({ id }: { id: string }) {
+  const { data, error, isPending, isFetching } = useQuery({
+    queryKey: ['user', id],
+    queryFn: () => fetch(`/api/users/${id}`).then(r => {
+      if (!r.ok) throw new Error('Failed')
+      return r.json() as Promise<User>
+    })
+  })
+
+  if (isPending) return <Spinner />
+  if (error)     return <p>Error: {error.message}</p>
+  return <h1>{data.name}</h1>
+}
+```
+
+### Query Key
+
+`queryKey` 是该查询的唯一标识，类似数据库的复合主键：
+
+```tsx
+['user', id]                                  // 单条
+['users', { page: 1, sort: 'name' }]          // 列表
+['users', id, 'posts']                        // 嵌套
+```
+
+实践经验：用**数组 + 对象**做 query key，由扁平到嵌套。详见 [Query Keys 最佳实践](https://tkdodo.eu/blog/effective-react-query-keys)。
+
+#### 集中管理 Key（推荐）
+
+```ts filename="api/queries.ts"
+export const queries = {
+  users: {
+    all: () => ['users'] as const,
+    list: (filters: { page: number }) => [...queries.users.all(), 'list', filters] as const,
+    detail: (id: string) => [...queries.users.all(), 'detail', id] as const,
+    posts: (id: string) => [...queries.users.detail(id), 'posts'] as const
+  }
+}
+
+// 使用
+useQuery({ queryKey: queries.users.detail(id), queryFn: () => fetchUser(id) })
+
+// 失效"该用户的所有数据"
+queryClient.invalidateQueries({ queryKey: queries.users.detail(id) })
+
+// 失效所有 users
+queryClient.invalidateQueries({ queryKey: queries.users.all() })
+```
+
+或使用 [`@lukemorales/query-key-factory`](https://github.com/lukemorales/query-key-factory) 自动生成。
+
+### `useMutation`
+
+写操作（POST / PUT / DELETE）使用 `useMutation`，并主动失效相关查询：
+
+```tsx
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+
+function EditUser({ id }: { id: string }) {
+  const queryClient = useQueryClient()
+
+  const mutation = useMutation({
+    mutationFn: (data: Partial<User>) =>
+      fetch(`/api/users/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+        headers: { 'Content-Type': 'application/json' }
+      }).then(r => r.json()),
+    onSuccess: () => {
+      // 让相关缓存失效，下次访问自动重新请求
+      queryClient.invalidateQueries({ queryKey: queries.users.detail(id) })
+      queryClient.invalidateQueries({ queryKey: queries.users.all() })
+    }
+  })
+
+  return (
+    <button onClick={() => mutation.mutate({ name: 'new name' })}>
+      {mutation.isPending ? 'Saving…' : 'Save'}
+    </button>
+  )
+}
+```
+
+### 乐观更新
+
+```tsx
+const mutation = useMutation({
+  mutationFn: deleteTodo,
+  onMutate: async todoId => {
+    await queryClient.cancelQueries({ queryKey: ['todos'] })
+    const previous = queryClient.getQueryData<Todo[]>(['todos'])
+    queryClient.setQueryData<Todo[]>(['todos'], old =>
+      old?.filter(t => t.id !== todoId)
+    )
+    return { previous }
+  },
+  onError: (err, todoId, context) => {
+    if (context?.previous) {
+      queryClient.setQueryData(['todos'], context.previous)
+    }
+  },
+  onSettled: () => {
+    queryClient.invalidateQueries({ queryKey: ['todos'] })
+  }
+})
+```
+
+React 19 起 `useOptimistic` Hook 是更轻量的替代，详见 [Hooks](/react/hooks#useoptimistic)。
+
+### 分页
+
+```tsx
+const [page, setPage] = useState(1)
+
+const { data, isPending } = useQuery({
+  queryKey: ['users', { page }],
+  queryFn: () => fetchUsers({ page }),
+  placeholderData: prev => prev               // 切页时显示上一页数据，避免闪烁
+})
+```
+
+### 无限滚动
+
+```tsx
+import { useInfiniteQuery } from '@tanstack/react-query'
+
+const { data, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+  queryKey: ['posts'],
+  queryFn: ({ pageParam }) => fetchPosts({ cursor: pageParam }),
+  initialPageParam: '',
+  getNextPageParam: last => last.nextCursor ?? undefined
+})
+
+const posts = data?.pages.flatMap(p => p.items) ?? []
+```
+
+### Suspense 模式
+
+```tsx
+import { useSuspenseQuery } from '@tanstack/react-query'
+
+function UserProfile({ id }: { id: string }) {
+  const { data: user } = useSuspenseQuery({
+    queryKey: ['user', id],
+    queryFn: () => fetchUser(id)
+  })
+  // 不需要 isPending 判断，data 始终可用
+  return <h1>{user.name}</h1>
+}
+
+// 父组件
+<Suspense fallback={<Spinner />}>
+  <ErrorBoundary fallback={<Error />}>
+    <UserProfile id="1" />
+  </ErrorBoundary>
+</Suspense>
+```
+
+### 与路由 loader 集成
+
+```tsx
+// React Router v7
+const userLoader = ({ params }: LoaderFunctionArgs) =>
+  queryClient.ensureQueryData({
+    queryKey: ['user', params.id],
+    queryFn: () => fetchUser(params.id!)
+  })
+
+// TanStack Router
+export const Route = createFileRoute('/users/$id')({
+  loader: ({ params, context }) =>
+    context.queryClient.ensureQueryData({
+      queryKey: ['user', params.id],
+      queryFn: () => fetchUser(params.id)
+    })
+})
+```
+
+路由切换时数据预取，避免组件挂载后才发请求的瀑布流。
+
+### DevTools
+
+```tsx
+<ReactQueryDevtools />
+```
+
+可视化所有 query 的状态、缓存内容、失效时机。开发期必备。
+
+## SWR
+
+由 Vercel 团队维护，API 极简，适合"只需要简单 GET 缓存"的场景：
+
+```bash
+pnpm add swr
+```
+
+```tsx
+import useSWR from 'swr'
+
+const fetcher = (url: string) => fetch(url).then(r => r.json())
+
+function UserProfile({ id }: { id: string }) {
+  const { data, error, isLoading, mutate } = useSWR<User>(`/api/users/${id}`, fetcher)
+
+  if (isLoading) return <Spinner />
+  if (error) return <p>Failed to load</p>
+  return (
+    <>
+      <h1>{data!.name}</h1>
+      <button onClick={() => mutate()}>Refresh</button>
+    </>
+  )
+}
+```
+
+### SWR vs TanStack Query
+
+| 维度 | SWR | TanStack Query |
+| ---- | --- | -------------- |
+| API 复杂度 | 极简 | 更全面 |
+| Mutation | 简单 | 强大（乐观更新、回滚） |
+| 类型推断 | 弱（key 是字符串） | 强（key 是数组） |
+| 包大小 | ~5 KB | ~12 KB |
+| 框架集成 | 仅 React | 多框架 |
+| DevTools | 有但简陋 | 强大 |
+| Next.js 集成 | 自家产品，与 Next 适配最好 | 也良好 |
+
+实战推荐：**新项目优先 TanStack Query**，除非项目极简或已重度依赖 Vercel 生态。
+
+## HTTP 客户端
+
+### 原生 fetch
+
+```tsx
+const res = await fetch('/api/users', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(data)
+})
+
+if (!res.ok) throw new Error(`HTTP ${res.status}`)
+const json = await res.json()
+```
+
+需手动处理：
+
+- 序列化 / 反序列化
+- 状态码校验（4xx/5xx 不会让 fetch reject）
+- 超时（需 AbortController）
+- 拦截器（需自己写包装）
+
+通常会包装一层"客户端 SDK"：
+
+```ts filename="lib/api.ts"
+class ApiError extends Error {
+  constructor(public status: number, message: string) { super(message) }
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 10_000)
+
+  try {
+    const res = await fetch(`${import.meta.env.VITE_API_BASE}${path}`, {
+      ...init,
+      signal: ctrl.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(localStorage.getItem('token') && {
+          Authorization: `Bearer ${localStorage.getItem('token')}`
+        }),
+        ...init?.headers
+      }
+    })
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new ApiError(res.status, body?.message ?? res.statusText)
+    }
+    return res.json()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export const userApi = {
+  get: (id: string) => api<User>(`/users/${id}`),
+  list: (params: { page: number }) => api<User[]>(`/users?page=${params.page}`),
+  update: (id: string, body: Partial<User>) =>
+    api<User>(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+}
+```
+
+### Axios
+
+老牌 HTTP 客户端，自带拦截器、自动 JSON、超时、`CancelToken`：
+
+```tsx
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE,
+  timeout: 10_000
+})
+
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+api.interceptors.response.use(
+  res => res,
+  err => {
+    if (err.response?.status === 401) location.href = '/login'
+    return Promise.reject(err)
+  }
+)
+
+const { data } = await api.get<User>(`/users/${id}`)
+```
+
+Axios 比原生 `fetch` 多一些便利，但带来约 13 KB 体积。是否需要看项目情况——很多新项目仅用原生 fetch + 工具函数已足够。
+
+### ky
+
+[`ky`](https://github.com/sindresorhus/ky) 是基于 fetch 的轻量包装：
+
+```tsx
+import ky from 'ky'
+
+const api = ky.create({
+  prefixUrl: import.meta.env.VITE_API_BASE,
+  hooks: {
+    beforeRequest: [request => {
+      const token = localStorage.getItem('token')
+      if (token) request.headers.set('Authorization', `Bearer ${token}`)
+    }]
+  }
+})
+
+const user: User = await api.get(`users/${id}`).json()
+```
+
+包大小 ~3 KB，提供拦截器与重试，介于 fetch 与 axios 之间。
+
+## GraphQL
+
+| 客户端 | 特点 |
+| ------ | ---- |
+| **Apollo Client** | 生态最成熟、缓存最复杂 |
+| **urql** | 轻量、可定制 |
+| **Relay** | Meta 出品，与 Schema 高度耦合，类型生成自动化 |
+| **graphql-request** | 极简 fetch 封装，只处理"发出请求" |
+
+### Apollo Client
+
+```tsx
+import { ApolloClient, InMemoryCache, ApolloProvider, useQuery, gql } from '@apollo/client'
+
+const client = new ApolloClient({
+  uri: '/graphql',
+  cache: new InMemoryCache()
+})
+
+const GET_USER = gql`
+  query GetUser($id: ID!) {
+    user(id: $id) {
+      id
+      name
+      email
+    }
+  }
+`
+
+function UserProfile({ id }: { id: string }) {
+  const { data, loading, error } = useQuery(GET_USER, { variables: { id } })
+  if (loading) return <Spinner />
+  if (error) return <p>{error.message}</p>
+  return <h1>{data.user.name}</h1>
+}
+```
+
+### urql
+
+API 与 Apollo 类似，包更小，缓存更简单：
+
+```bash
+pnpm add urql graphql
+```
+
+```tsx
+import { Client, Provider, useQuery } from 'urql'
+
+const client = new Client({ url: '/graphql', exchanges: [...] })
+
+<Provider value={client}>
+  <App />
+</Provider>
+```
+
+### Relay
+
+只在已有 Relay 基础设施 / Meta 内部生态时考虑。学习曲线陡，但类型与缓存深度集成。
+
+### REST + Codegen
+
+如果后端是 OpenAPI / Swagger，可以用 [`openapi-typescript`](https://github.com/drwpow/openapi-typescript) 自动生成类型化客户端：
+
+```bash
+pnpm dlx openapi-typescript ./openapi.yaml -o ./src/types/api.d.ts
+```
+
+配合 `openapi-fetch` 得到完全类型化的 API 调用，无需 GraphQL 也能享受类型安全。
+
+## 实战配方
+
+```text
+中型 React 应用：
+├── HTTP                     原生 fetch + 自定义包装  或  ky
+├── 服务端状态               TanStack Query
+├── 客户端状态               Zustand / Jotai
+├── 类型化（REST）           openapi-typescript
+└── 类型化（GraphQL）        graphql-codegen
+```
+
+## 小结
+
+- 永远不要用 `useEffect` 直接取业务数据；
+- TanStack Query 是当前事实标准，覆盖缓存 / 失效 / 重试 / 乐观更新；
+- 路由 loader 与 TanStack Query 协作能消除"组件挂载后才请求"的瀑布；
+- HTTP 层根据需要选 fetch / ky / axios，不要过度依赖；
+- GraphQL 客户端按生态选 Apollo / urql / Relay，REST 配合 codegen 可获得同等类型安全。

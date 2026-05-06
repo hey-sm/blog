@@ -1,0 +1,349 @@
+---
+title: 装饰器
+description: TypeScript 5.0 装饰器 Decorators：类装饰器、方法装饰器、属性装饰器、访问器装饰器与元数据
+---
+
+# 装饰器
+
+装饰器（Decorators）是一种声明式的元编程语法，用于修改或增强类及其成员的行为。TypeScript 5.0 实现了 ECMAScript Stage 3 装饰器规范。
+
+## 启用装饰器
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": false  // TypeScript 5.0+ 新装饰器不需要此标志
+  }
+}
+```
+
+需要 `target` 至少为 ES2022，或 `lib` 包含 `"ES2023"`。
+
+## 类装饰器
+
+类装饰器接收类本身并返回一个新类或 undefined：
+
+```ts
+type Constructor = new (...args: any[]) => {}
+
+function sealed<T extends Constructor>(target: T, context: ClassDecoratorContext<T>) {
+  // context.name: 类名
+  // context.kind: 'class'
+  // 可以返回新类来覆盖
+  return class extends target {
+    // 扩展或修改类
+  }
+}
+
+@sealed
+class User {
+  constructor(public name: string) {}
+}
+```
+
+### context 对象
+
+```ts
+// ClassDecoratorContext 包含的元数据
+{
+  kind: 'class',
+  name: 'User',
+  addInitializer(callback: () => void): void,
+  metadata: DecoratorMetadata  // 共享元数据
+}
+```
+
+**React 示例——依赖注入**：
+
+```tsx
+const InjectableRegistry = new Map<string, unknown>()
+
+function Injectable(name?: string) {
+  return <T extends Constructor>(target: T, context: ClassDecoratorContext<T>) {
+    const key = name ?? context.name!.toString()
+    InjectableRegistry.set(key, target)
+
+    context.addInitializer(() => {
+      console.log(`Registered: ${key}`)
+    })
+  }
+}
+
+@Injectable('UserRepository')
+class UserRepository {
+  getUsers() {
+    return fetch('/api/users').then(r => r.json())
+  }
+}
+```
+
+## 方法装饰器
+
+方法装饰器可以拦截和替换方法：
+
+```ts
+function log(
+  target: Object,
+  context: ClassMethodDecoratorContext,
+) {
+  const methodName = String(context.name)
+
+  return function(this: any, ...args: any[]) {
+    console.log(`Calling ${methodName} with`, args)
+    const result = target.call(this, ...args)
+    console.log(`${methodName} returned`, result)
+    return result
+  }
+}
+
+class Calculator {
+  @log
+  add(a: number, b: number) {
+    return a + b
+  }
+}
+
+const calc = new Calculator()
+calc.add(1, 2)
+// Calling add with [1, 2]
+// add returned 3
+```
+
+### 方法装饰器 context 类型
+
+```ts
+interface ClassMethodDecoratorContext<T = any> {
+  kind: 'method'
+  name: string | symbol
+  static: boolean
+  private: boolean
+  access: { get(): T }
+  addInitializer(init: (this: any) => void): void
+  metadata: DecoratorMetadata
+}
+```
+
+## 属性装饰器
+
+```ts
+function required(target: undefined, context: ClassFieldDecoratorContext) {
+  // 在初始化完成后校验
+  context.addInitializer(function(this: any) {
+    const key = String(context.name)
+    const value = this[key]
+    if (value === undefined || value === null) {
+      throw new Error(`${key} is required`)
+    }
+  })
+}
+
+class FormData {
+  @required
+  email!: string
+
+  @required
+  password!: string
+
+  name?: string
+}
+
+const form = new FormData()
+// ❌ Runtime error: email is required
+form.email = 'alice@example.com'
+form.password = 'secret'
+// ✅ 通过
+```
+
+## 访问器装饰器（Getter/Setter）
+
+```ts
+function logged(target: any, context: ClassAccessorDecoratorContext) {
+  const name = String(context.name)
+  const { get, set } = context.access
+
+  return {
+    get() {
+      const value = get.call(this)
+      console.log(`GET ${name}: ${value}`)
+      return value
+    },
+    set(value: any) {
+      console.log(`SET ${name}: ${value}`)
+      set.call(this, value)
+    }
+  }
+}
+
+class Temperature {
+  private _celsius = 0
+
+  @logged
+  get celsius(): number {
+    return this._celsius
+  }
+
+  set celsius(value: number) {
+    this._celsius = value
+  }
+}
+```
+
+### Auto-Accessor（TS 5.0+）
+
+```ts
+class Settings {
+  @observed
+  accessor theme: 'light' | 'dark' = 'light'
+
+  // 等价于自动生成：
+  // #theme = 'light'
+  // get theme() { return this.#theme }
+  // set theme(v) { this.#theme = v }
+}
+```
+
+## 元数据
+
+### 内置 Metadata API (TS 5.2+)
+
+```ts
+function validate(schema: Record<string, string>) {
+  return function (_: any, context: ClassFieldDecoratorContext) {
+    const key = String(context.name)
+    const rule = schema[key]
+
+    if (rule) {
+      context.metadata[`validation:${key}`] = rule
+    }
+  }
+}
+```
+
+### 使用 Symbol 作为 metadata key
+
+```ts
+const TableName = Symbol('tableName')
+
+@Entity
+class User {
+  @Column
+  name!: string
+}
+
+// 读取元数据
+function getTableName(target: Function): string | undefined {
+  return (target as any)[Symbol.metadata]?.[TableName]
+}
+```
+
+## React 中装饰器的替代方案
+
+React 函数组件 + Hooks 体系下，装饰器使用的场景有限。典型的替代方式：
+
+```tsx
+// ❌ Class-based with decorator (legacy)
+@withRouter
+class UserProfile extends React.Component<RouteComponentProps> {
+  render() { /* ... */ }
+}
+
+// ✅ HOC -> 函数组件
+function UserProfile() {
+  const navigate = useNavigate()
+  // ...
+}
+
+// ✅ HOC 仍然有效
+function withAuth<T extends object>(Component: React.ComponentType<T>) {
+  return (props: T) => {
+    const { user } = useAuth()
+    if (!user) return <Navigate to="/login" />
+    return <Component {...props} />
+  }
+}
+
+const ProtectedDashboard = withAuth(Dashboard)
+```
+
+## 陷阱
+
+### 1. 新旧装饰器不兼容
+
+```ts
+// ❌ 旧版装饰器（experimentalDecorators）
+// ❌ 新版装饰器（TS 5.0+）
+// 同一项目只能使用一种，不能混用
+```
+
+### 2. 装饰器的执行顺序
+
+```ts
+// 装饰器求值顺序：
+// 1. 实例成员（属性 → 方法 → 访问器）
+// 2. 静态成员
+// 3. 构造函数参数（仅旧版）
+// 4. 类装饰器
+
+// addInitializer 的执行顺序：
+// 1. 静态成员的 initializer
+// 2. 类装饰器的 initializer
+// 3. 实例成员的 initializer（每次 new 时）
+```
+
+### 3. 装饰器不能用于函数或独立函数声明
+
+```ts
+// ❌ 错误：装饰器只能用于类成员
+@log
+function greet(name: string) {
+  return `Hello, ${name}!`
+}
+```
+
+## 最佳实践
+
+### ✅ 用 addInitializer 做 post-init 检查
+
+```ts
+function range(min: number, max: number) {
+  return (_: undefined, ctx: ClassFieldDecoratorContext) => {
+    ctx.addInitializer(function(this: any) {
+      const value = this[ctx.name]
+      if (value < min || value > max) {
+        throw new RangeError(`${String(ctx.name)} must be between ${min} and ${max}`)
+      }
+    })
+  }
+}
+
+class Product {
+  @range(0, 10000)
+  price = 5000
+}
+```
+
+### ✅ 装饰器适合做横切关注点
+
+```ts
+// ✅ 权限检查、日志、缓存、验证等横切关注点
+@withRole('admin')
+class AdminDashboard {
+  @cache(60)  // 60秒缓存
+  getMetrics() { /* ... */ }
+}
+```
+
+### ✅ React 项目中优先使用 Hooks + HOC
+
+```tsx
+// ✅ React 中 Hooks 体系比装饰器更自然
+function useLogger(name: string) {
+  useEffect(() => {
+    console.log(`${name} mounted`)
+    return () => console.log(`${name} unmounted`)
+  }, [name])
+}
+```
+
+下一章 [模块系统](/ts/modules) 介绍 TypeScript 的 ES Modules 与模块解析策略。

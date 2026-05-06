@@ -1,0 +1,424 @@
+---
+title: React 高级类型
+description: React 中 TypeScript 高级类型模式：satisfies、Discriminated Union Props、never props、类型辅助工具与常见技巧
+---
+
+# React 高级类型
+
+本章涵盖在 React 项目中运用高级 TypeScript 类型的模式与技巧。
+
+## satisfies 在 React 中的应用
+
+### 类型安全 + 保留字面量推断（TS 4.9+）
+
+```tsx
+// ❌ 仅注解：丢失字面量类型
+const BUTTON_VARIANTS: Record<string, string> = {
+  primary: 'bg-blue-500 text-white',
+  secondary: 'bg-gray-200 text-gray-800',
+  danger: 'bg-red-500 text-white'
+}
+type V = keyof typeof BUTTON_VARIANTS  // string——丢失了 'primary' | 'secondary' | 'danger'
+
+// ✅ satisfies：同时验证类型又保留字面量
+const BUTTON_VARIANTS = {
+  primary: 'bg-blue-500 text-white',
+  secondary: 'bg-gray-200 text-gray-800',
+  danger: 'bg-red-500 text-white'
+} satisfies Record<string, string>
+
+type Variant = keyof typeof BUTTON_VARIANTS  // 'primary' | 'secondary' | 'danger' ✅
+```
+
+### satisfies 与组件配置
+
+```tsx
+// ✅ 验证每个配置都符合类型，同时保留每个 item 的精确类型
+const ROUTE_CONFIG = [
+  {
+    path: '/',
+    component: HomePage,
+    public: true
+  },
+  {
+    path: '/dashboard',
+    component: DashboardPage,
+    public: false,
+    requiredRole: 'admin' as const
+  },
+  {
+    path: '/settings',
+    component: SettingsPage,
+    public: false,
+    requiredRole: 'user' as const
+  }
+] satisfies Array<{
+  path: string
+  component: React.ComponentType
+  public: boolean
+  requiredRole?: string
+}>
+
+// ROUTE_CONFIG[1].requiredRole 推断为 'admin'（而非 string）
+// ROUTE_CONFIG[0].requiredRole 推断为 undefined
+```
+
+### satisfies 确保穷尽性
+
+```tsx
+type Status = 'idle' | 'loading' | 'success' | 'error'
+
+const statusMessages = {
+  idle: 'Ready',
+  loading: 'Loading...',
+  success: 'Done!',
+  error: 'Something went wrong'
+} satisfies Record<Status, string>
+// ❌ 如果遗漏任何 Status 成员会报错
+```
+
+## Discriminated Union Props（完整的类型安全 Props）
+
+这个模式在前面的章节中已有介绍，这里补充一个更复杂的示例：
+
+```tsx
+// ✅ 表单字段组件——根据 type 改变接受的 props
+type FieldProps =
+  | {
+      type: 'text' | 'email' | 'password'
+      label: string
+      value: string
+      placeholder?: string
+      onChange: (value: string) => void
+    }
+  | {
+      type: 'number'
+      label: string
+      value: number
+      min?: number
+      max?: number
+      onChange: (value: number) => void
+    }
+  | {
+      type: 'select'
+      label: string
+      value: string
+      options: { label: string; value: string }[]
+      onChange: (value: string) => void
+    }
+  | {
+      type: 'checkbox'
+      label: string
+      checked: boolean
+      onChange: (checked: boolean) => void
+    }
+
+function FormField(props: FieldProps) {
+  switch (props.type) {
+    case 'text':
+    case 'email':
+    case 'password':
+      return (
+        <div>
+          <label>{props.label}</label>
+          <input
+            type={props.type}
+            value={props.value}
+            placeholder={props.placeholder}
+            onChange={e => props.onChange(e.target.value)}
+          />
+        </div>
+      )
+    case 'number':
+      return (
+        <div>
+          <label>{props.label}</label>
+          <input
+            type="number"
+            value={props.value}
+            min={props.min}
+            max={props.max}
+            onChange={e => props.onChange(Number(e.target.value))}
+          />
+        </div>
+      )
+    case 'select':
+      return (
+        <div>
+          <label>{props.label}</label>
+          <select value={props.value} onChange={e => props.onChange(e.target.value)}>
+            {props.options.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+      )
+    case 'checkbox':
+      return (
+        <div>
+          <label>
+            <input
+              type="checkbox"
+              checked={props.checked}
+              onChange={e => props.onChange(e.target.checked)}
+            />
+            {props.label}
+          </label>
+        </div>
+      )
+  }
+}
+```
+
+## 使用 never 禁止特定属性组合
+
+```tsx
+// ✅ 头像组件：必须提供 src 或 initials，不能同时提供或都不提供
+type AvatarProps =
+  | {
+      src: string
+      alt: string
+      initials?: never
+    }
+  | {
+      initials: string
+      src?: never
+      alt?: never
+    }
+
+function Avatar(props: AvatarProps) {
+  if (props.src) {
+    return <img src={props.src} alt={props.alt} className="avatar" />
+  }
+  return <div className="avatar-placeholder">{props.initials}</div>
+}
+
+// ✅
+<Avatar src="/user.png" alt="User" />
+<Avatar initials="JD" />
+
+// ❌ 错误
+<Avatar src="/user.png" initials="JD" />
+<Avatar />
+```
+
+### 使用 never 禁止过时 Props
+
+```tsx
+// ✅ 逐渐废弃 onPress，替换为 onClick
+type BaseButtonProps = {
+  label: string
+  onClick: () => void
+}
+
+type LegacyButtonProps = {
+  label: string
+  onPress: () => void
+  onClick?: never  // 禁止同时使用
+}
+
+type ButtonProps = BaseButtonProps | LegacyButtonProps
+
+function Button(props: ButtonProps) {
+  const handleClick = 'onClick' in props ? props.onClick : props.onPress
+  return <button onClick={handleClick}>{props.label}</button>
+}
+
+// ✅ 新用法
+<Button label="Click" onClick={() => {}} />
+// ✅ 旧用法（deprecated）
+<Button label="Click" onPress={() => {}} />
+// ❌ 错误：不能同时使用
+<Button label="Click" onClick={() => {}} onPress={() => {}} />
+```
+
+## 实用类型辅助工具
+
+### Exact Props（禁止多余属性）
+
+```tsx
+// ✅ 确保 props 没有多余属性
+type Exact<T, U extends T> =
+  T & Record<Exclude<keyof U, keyof T>, never>
+
+interface ComponentProps {
+  id: number
+  name: string
+}
+
+function ExactComponent<T extends ComponentProps>(props: Exact<ComponentProps, T>) {
+  return <div>{props.name}</div>
+}
+
+// ❌ 不能传入多余属性
+// <ExactComponent id={1} name="test" extraProp={true} />
+```
+
+### NonNullable Props
+
+```tsx
+// ✅ 从 Props 中排除 null 和 undefined 类型
+type NonNullableProps<T> = {
+  [K in keyof T]: NonNullable<T[K]>
+}
+```
+
+### Required 子集
+
+```tsx
+// ✅ 指定某些属性为必填，其余保持原样
+type WithRequired<T, K extends keyof T> = T & Required<Pick<T, K>>
+
+interface FormConfig {
+  name?: string
+  email?: string
+  phone?: string
+  agreedToTerms?: boolean
+}
+
+// 邮箱和条款必须填写
+type RegisterForm = WithRequired<FormConfig, 'email' | 'agreedToTerms'>
+```
+
+## 自定义 Hooks 的类型组合
+
+### 组合多个 Hook 的类型
+
+```tsx
+function useUserData(userId: number) {
+  return useQuery<User>(`/api/users/${userId}`)
+}
+
+function useUserPermissions(userId: number) {
+  return useQuery<string[]>(`/api/users/${userId}/permissions`)
+}
+
+// ✅ 组合多个 Hook 返回类型
+function useUserDashboard(userId: number) {
+  const { data: user, loading: userLoading, error: userError } = useUserData(userId)
+  const { data: permissions, loading: permLoading } = useUserPermissions(userId)
+
+  return {
+    user,
+    permissions,
+    loading: userLoading || permLoading,
+    error: userError,
+    canEdit: permissions?.includes('edit') ?? false,
+    canDelete: permissions?.includes('delete') ?? false
+  } as const
+}
+
+// 在组件中使用
+function Dashboard({ userId }: { userId: number }) {
+  const { user, permissions, loading, canEdit } = useUserDashboard(userId)
+
+  if (loading) return <div>Loading...</div>
+
+  return (
+    <div>
+      <h1>{user?.name}</h1>
+      <p>Permissions: {permissions?.join(', ')}</p>
+      {canEdit && <button>Edit</button>}
+    </div>
+  )
+}
+```
+
+## 泛型 Context Factory
+
+```tsx
+// ✅ 创建类型安全的泛型 Context
+function createSafeContext<T>() {
+  const ctx = createContext<T | null>(null)
+
+  function useCtx() {
+    const value = useContext(ctx)
+    if (value === null) {
+      throw new Error('Missing context provider')
+    }
+    return value
+  }
+
+  return [ctx.Provider, useCtx] as const
+}
+
+// 使用
+const [UserProvider, useUser] = createSafeContext<{
+  user: User | null
+  login: () => void
+  logout: () => void
+}>()
+
+function App() {
+  return (
+    <UserProvider value={{ user: null, login: () => {}, logout: () => {} }}>
+      <Dashboard />
+    </UserProvider>
+  )
+}
+
+function Dashboard() {
+  const { user, logout } = useUser()
+  // ✅ user 和 logout 非 null
+}
+```
+
+## 陷阱
+
+### 1. 组件 Props 的解构导致硬性绑定
+
+```tsx
+// ❌ 解构后 handleClick 的 this 可能丢失
+function Button({ onClick }: { onClick: () => void }) {
+  return <button onClick={onClick} />  // ✅ 引用了原始引用
+}
+
+// ✅ 但无意义地包裹会破坏引用
+function Button({ onClick }: { onClick: () => void }) {
+  const handleClick = () => onClick()  // ❌ 多余包裹
+  return <button onClick={handleClick} />
+}
+```
+
+### 2. useState 推断出错时的类型推演
+
+```tsx
+// ❌ 数组推断失败
+const [list, setList] = useState([])
+
+// 第一次 setList 决定了类型！
+// setList([1, 2, 3])  // 后续这样也不行——类型已在 setState 定义时固定
+```
+
+### 3. 使用 as 覆盖 React 组件 Props 是危险的
+
+```tsx
+// ❌ 危险：掩盖类型错误
+const props = {
+  onClick: 'not-a-function'  // 方法变成了 string！
+} as unknown as ButtonProps
+```
+
+## 最佳实践
+
+### ✅ 使用 satisfies 保存字面量类型推断
+
+```tsx
+const STYLES = { primary: 'btn-primary', secondary: 'btn-secondary' } satisfies Record<string, string>
+```
+
+### ✅ 互斥 Props 用 discriminated union + never
+
+```tsx
+type Props = { src: string; initials?: never } | { initials: string; src?: never }
+```
+
+### ✅ 复杂类型抽取到单独文件
+
+```tsx
+// types/component.ts
+export interface ButtonProps { /* ... */ }
+export type ButtonVariant = /* ... */
+```
+
+下一章 [生态系统工具](/ts/ecosystem) 介绍 TypeScript 配套工具。

@@ -1,0 +1,389 @@
+---
+title: 控制流
+description: if / else / switch、try / catch / finally 与 JavaScript 错误体系
+---
+
+# 控制流
+
+控制流语句决定代码的执行路径。JavaScript 提供两类：**条件语句**与**异常处理**。本章不再覆盖循环（详见 [循环与迭代](/js/loops)）。
+
+## 条件语句
+
+### `if / else`
+
+```js
+if (condition) {
+  // ...
+} else if (other) {
+  // ...
+} else {
+  // ...
+}
+```
+
+条件位置触发 `ToBoolean`，可以传入任意值：
+
+```js
+if ('hello') console.log('truthy')            // 输出
+if (0)       console.log('truthy')            // 不输出
+if ([])      console.log('truthy')            // 输出（[] 是 truthy）
+if ({})      console.log('truthy')            // 输出
+```
+
+#### 单行 `if` 的陷阱
+
+```js
+if (cond) doA()
+else doB()
+
+// ✗ 加新行容易出错
+if (cond)
+  doA()
+  doB()                                       // 始终执行，与 if 无关
+```
+
+无论一行还是多行，**始终使用 `{}`** 是稳妥的工程约定。
+
+### 三元运算符
+
+适用于"基于条件返回值"：
+
+```js
+const tag = age >= 18 ? 'adult' : 'minor'
+```
+
+不要用三元代替 `if`/`else` 的副作用语句：
+
+```js
+// ✗ 反模式
+condition ? doA() : doB()
+// ✓
+if (condition) doA()
+else doB()
+```
+
+### `switch`
+
+`switch` 用 `===` 比较：
+
+```js
+const status = 'pending'
+
+switch (status) {
+  case 'idle':
+    console.log('idle')
+    break
+  case 'loading':
+  case 'pending':                             // 多个 case 共享 body
+    console.log('working')
+    break
+  case 'done':
+    console.log('done')
+    break
+  default:
+    console.log('unknown')
+}
+```
+
+#### 穿透行为
+
+未写 `break` 的 `case` 会**穿透**到下一个：
+
+```js
+switch (n) {
+  case 1:
+    console.log('one')
+  case 2:                                     // 不写 break，1 也会输出 'two'
+    console.log('two')
+    break
+}
+```
+
+显式利用穿透时，建议加注释 `// fallthrough`。
+
+#### 块级作用域
+
+`switch` 整体共享一个块作用域，多个 `case` 中声明同名 `let` / `const` 会冲突。每个 `case` 包一个 `{}` 即可隔离：
+
+```js
+switch (key) {
+  case 'a': {
+    const x = 1
+    break
+  }
+  case 'b': {
+    const x = 2                               // ✓ 各 case 独立作用域
+    break
+  }
+}
+```
+
+#### 用对象映射替代 `switch`
+
+值映射场景下，对象往往更清晰：
+
+```js
+// switch 写法
+function statusText(s) {
+  switch (s) {
+    case 'idle': return 'IDLE'
+    case 'loading': return 'LOADING'
+    case 'done': return 'DONE'
+    default: return 'UNKNOWN'
+  }
+}
+
+// 映射表写法
+const STATUS_TEXT = {
+  idle: 'IDLE',
+  loading: 'LOADING',
+  done: 'DONE'
+}
+const statusText = s => STATUS_TEXT[s] ?? 'UNKNOWN'
+```
+
+逻辑较复杂或需要类型守卫时，仍以 `switch` 为优。
+
+## 异常处理
+
+### `throw`
+
+可以抛出任意值，但**强烈推荐抛 `Error` 子类实例**——原始值不携带堆栈信息，会显著降低排错效率。
+
+```js
+// ✗ 不推荐
+throw 'failed'
+
+// ✓ 推荐
+throw new Error('failed')
+throw new TypeError('expected number, got ' + typeof x)
+throw new RangeError('index out of bounds')
+```
+
+### `try / catch / finally`
+
+```js
+try {
+  riskyOp()
+} catch (err) {
+  console.error('caught:', err)
+} finally {
+  cleanup()                                   // 无论是否异常，都会执行
+}
+```
+
+#### `catch` 绑定可选（ES2019）
+
+```js
+try {
+  JSON.parse(maybeJson)
+} catch {                                     // 不需要错误对象时可省略
+  return null
+}
+```
+
+#### `finally` 的特殊语义
+
+`finally` 中的 `return` / `throw` / `break` 会**覆盖** `try` / `catch` 中的：
+
+```js
+function f() {
+  try {
+    return 1
+  } finally {
+    return 2                                  // ← 覆盖 try 的 return
+  }
+}
+console.log(f())                              // → 2
+
+function g() {
+  try {
+    throw new Error('boom')
+  } finally {
+    return 'silent'                           // ← 异常被吞掉
+  }
+}
+console.log(g())                              // → 'silent'
+```
+
+`finally` 只用于**清理副作用**（关闭文件、释放锁、隐藏 loading），避免在其中 `return` 或 `throw`。
+
+#### 异常的同步性
+
+`try / catch` **只能捕获同步异常**：
+
+```js
+try {
+  setTimeout(() => { throw new Error('async') }, 0)
+} catch (e) {
+  console.log('caught')                       // 不会执行
+}
+```
+
+异步错误的处理方式：
+
+- `Promise` → `.catch()` 或 `try { await } catch`
+- 事件监听器 → `addEventListener('error', ...)` / `window.onerror`
+- Node.js → `process.on('uncaughtException', ...)` 与 `'unhandledRejection'`
+
+```js
+async function load() {
+  try {
+    const res = await fetch('/api')
+    return await res.json()
+  } catch (err) {
+    console.error('async caught:', err)
+    return null
+  }
+}
+```
+
+## 错误体系
+
+### 内置错误类型
+
+| 类型 | 触发场景 |
+| ---- | -------- |
+| `Error` | 通用基类 |
+| `TypeError` | 类型不匹配（如调用非函数） |
+| `RangeError` | 数值超出允许范围（如 `Array(-1)`） |
+| `ReferenceError` | 引用未声明的变量 |
+| `SyntaxError` | 解析期错误 |
+| `URIError` | `decodeURI` / `encodeURI` 输入非法 |
+| `EvalError` | 历史遗留，已不主动抛出 |
+| `AggregateError`（ES2021） | `Promise.any` 全部失败时 |
+
+```js
+try {
+  null.x                                      // TypeError
+} catch (e) {
+  console.log(e.name)                         // → 'TypeError'
+  console.log(e.message)                      // → "Cannot read properties of null (reading 'x')"
+  console.log(e.stack)                        // → 调用栈
+  console.log(e instanceof TypeError)         // → true
+  console.log(e instanceof Error)             // → true
+}
+```
+
+### 自定义错误类
+
+```js
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.name = 'HttpError'
+    this.status = status
+  }
+}
+
+try {
+  throw new HttpError(404, 'not found')
+} catch (e) {
+  if (e instanceof HttpError) {
+    console.log(`HTTP ${e.status}: ${e.message}`)
+  } else {
+    throw e                                   // 重新抛出未知错误
+  }
+}
+```
+
+### `Error` 链：`cause` 选项（ES2022）
+
+为保留底层错误信息，避免日志中的"原始错误丢失"问题：
+
+```js
+try {
+  await loadConfig()
+} catch (low) {
+  throw new Error('app boot failed', { cause: low })
+}
+```
+
+```js
+try {
+  app.start()
+} catch (e) {
+  console.error(e.message)                    // → 'app boot failed'
+  console.error(e.cause)                      // → 原始错误对象
+}
+```
+
+### 类型保护与重新抛出
+
+错误处理的常见反模式是"吞错"：
+
+```js
+// ✗ 静默吞掉所有异常
+try {
+  doRisky()
+} catch {}
+
+// ✓ 已知错误处理，未知错误重新抛出
+try {
+  return JSON.parse(text)
+} catch (e) {
+  if (e instanceof SyntaxError) return null
+  throw e
+}
+```
+
+## 跳转语句
+
+### `break` / `continue`
+
+```js
+for (let i = 0; i < 5; i++) {
+  if (i === 3) break                          // 跳出整个循环
+  if (i % 2 === 0) continue                   // 跳过本次
+  console.log(i)                              // → 1
+}
+```
+
+### 标签语句
+
+可在嵌套循环中跳出指定层级：
+
+```js
+outer: for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 3; j++) {
+    if (j === 1) continue outer               // 跳到外层下一次迭代
+    if (i === 2) break outer
+    console.log(i, j)
+  }
+}
+```
+
+标签可读性较差，使用频率低，常被函数 `return` 替代。
+
+## 早期返回模式
+
+深嵌套的条件可读性差。以"早期返回"扁平化更清晰：
+
+```js
+// ✗ 嵌套
+function process(user) {
+  if (user) {
+    if (user.active) {
+      if (user.email) {
+        return send(user.email)
+      }
+    }
+  }
+  return null
+}
+
+// ✓ 早期返回
+function process(user) {
+  if (!user) return null
+  if (!user.active) return null
+  if (!user.email) return null
+  return send(user.email)
+}
+```
+
+## 小结
+
+- 条件语句的判定均经过 `ToBoolean`；
+- `switch` 的穿透与作用域共享是高频坑点，每个 `case` 加 `{}` 与 `break` 是稳妥实践；
+- `try/catch` 只捕获同步异常，异步错误必须由 Promise 链或事件机制处理；
+- 抛错使用 `Error` 子类并保留 `cause`，不要吞错。

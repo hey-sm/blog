@@ -1,0 +1,683 @@
+---
+title: Server Components
+description: React Server Components、Server Actions、流式 RSC 与 use client 边界
+---
+
+# Server Components
+
+React Server Components（RSC）是 React 19 时代最重要的范式转变——把组件渲染搬到**服务端**，让客户端只接收必要的 HTML 和"交互组件"。这彻底改变了"什么放服务端、什么放客户端、数据怎么取"的架构。本章覆盖 RSC 的工作机制、`use client` / `use server` 边界、Server Actions 与流式 RSC。
+
+## 为什么需要 RSC
+
+### 传统 SSR 的问题
+
+```text
+传统 SSR (Next.js Pages Router 或 Remix)：
+
+服务端：渲染 HTML → 发送
+客户端：接收 HTML（FCP/LCP）
+       下载 JS（仍包含所有组件代码）
+       解析 + 执行 + 水合
+       客户端 JS 中重新执行所有组件函数（!!）
+       变成可交互
+```
+
+问题：
+
+1. **JS 体积**：所有组件代码都打包给客户端，即使有些组件只渲染静态内容
+2. **重复执行**：同一组件在服务端渲染一次，在客户端水合时又渲染一次
+3. **数据获取瀑布流**：客户端组件挂载后才发请求
+
+### RSC 的解决思路
+
+```text
+React Server Components：
+
+服务端：渲染 RSC（不打包到客户端）→ 发送序列化结果
+客户端：接收 RSC payload + 必要 JS（仅 'use client' 组件）
+       渲染组合好的 UI
+       仅交互组件需要水合
+```
+
+收益：
+
+- **更小客户端 JS**：只有标记为 `use client` 的组件才打包
+- **直接访问后端资源**：在组件内直接调用数据库 / 文件 / 内部 API
+- **零客户端执行成本**：服务端组件不在客户端运行
+- **避免数据瀑布**：服务端组件可直接 `await` 数据，无需 useEffect
+
+## 三种组件类型
+
+```text
+Server Component (默认)
+  - 仅在服务端运行
+  - 可直接 async/await 数据
+  - 不能用 useState、useEffect、事件处理器
+  - 可以渲染 Server / Client / Static 子组件
+
+Client Component (use client 标记)
+  - 在服务端预渲染（生成 HTML）+ 在客户端水合 + 后续渲染
+  - 完整 React 能力（hooks、事件、浏览器 API）
+  - 不能 import Server Component
+  - 可以接收 Server Component 作为 children prop
+
+Shared Component (无标记)
+  - 既可在服务端也可在客户端运行
+  - 由"调用方"的环境决定
+  - 不能用任何环境特定的 API
+```
+
+### Server Component 示例
+
+```tsx
+// app/posts/page.tsx (默认就是 Server Component)
+import { db } from '@/lib/db'
+
+async function PostList() {
+  const posts = await db.posts.findMany()    // 直接查数据库
+  return (
+    <ul>
+      {posts.map(p => <li key={p.id}>{p.title}</li>)}
+    </ul>
+  )
+}
+
+export default function PostsPage() {
+  return (
+    <main>
+      <h1>Posts</h1>
+      <PostList />
+    </main>
+  )
+}
+```
+
+注意：
+
+- 整个 `PostList` 不会出现在客户端 JS 中
+- 数据库连接代码不会泄露
+- 没有 `useEffect` 没有 `useState` 没有 `loading` 状态
+- Tree Shaking 把所有"仅服务端"的依赖（如 `pg`、`mongodb`）从客户端 bundle 中移除
+
+### Client Component 示例
+
+```tsx
+// app/components/LikeButton.tsx
+'use client'
+
+import { useState } from 'react'
+
+export default function LikeButton({ postId, initialLikes }) {
+  const [likes, setLikes] = useState(initialLikes)
+  return (
+    <button onClick={() => setLikes(l => l + 1)}>
+      ♥ {likes}
+    </button>
+  )
+}
+```
+
+```tsx
+// app/posts/page.tsx (Server Component)
+import LikeButton from '@/app/components/LikeButton'
+
+async function PostList() {
+  const posts = await db.posts.findMany()
+  return (
+    <ul>
+      {posts.map(p => (
+        <li key={p.id}>
+          <h2>{p.title}</h2>
+          <LikeButton postId={p.id} initialLikes={p.likes} />
+        </li>
+      ))}
+    </ul>
+  )
+}
+```
+
+服务端拼装 HTML + 把 `LikeButton` 的代码（与所有它的依赖）打包进客户端 chunk。点击时 React 按需水合 LikeButton。
+
+## `use client` 边界
+
+`'use client'` 不是给单个组件打标——而是**进入客户端边界的入口**：
+
+```text
+'use client' 文件
+  ├─ 自身是 Client Component
+  ├─ import 的所有模块都进入客户端 bundle
+  └─ 它渲染的所有子组件都默认为 Client Component（除非显式作为 children 传入）
+
+Server Component 文件（默认）
+  ├─ 不能 import 'use client' 之外的客户端组件吗？
+  │   实际上可以 import 'use client' 组件——但那部分进入客户端 bundle
+  └─ 可以渲染 Client Component
+```
+
+### 边界设计原则
+
+把 `use client` **尽量靠近叶子节点**，让大部分组件保留为 Server：
+
+```text
+❌ 高位 use client：
+  RootLayout (use client)
+    ├─ Header (client)
+    ├─ Main (client)
+    │   └─ ProductList (client)        ← 整棵树都是 client，bundle 大
+    └─ Footer (client)
+
+✅ 低位 use client：
+  RootLayout (server)
+    ├─ Header (server)
+    ├─ Main (server)
+    │   ├─ ProductList (server)        ← 数据获取、列表渲染都在服务端
+    │   └─ AddToCartButton (client)    ← 仅按钮是 client
+    └─ Footer (server)
+```
+
+### children 模式跨越边界
+
+Client Component 不能 import Server Component，但**可以接收 Server Component 作为 children**：
+
+```tsx
+// ClientWrapper.tsx
+'use client'
+export default function ClientWrapper({ children }) {
+  const [open, setOpen] = useState(true)
+  return open ? <div>{children}</div> : null
+}
+
+// page.tsx (Server Component)
+import ClientWrapper from './ClientWrapper'
+import ServerContent from './ServerContent'
+
+export default function Page() {
+  return (
+    <ClientWrapper>
+      <ServerContent />     {/* Server Component 在 server 渲染 */}
+    </ClientWrapper>
+  )
+}
+```
+
+`ServerContent` 的 RSC payload 作为 children 传入 `ClientWrapper`——客户端只接收已渲染好的结果，不需要 `ServerContent` 的源码。
+
+### 何时必须 use client
+
+```tsx
+'use client'                  // 必须！
+
+// 1. 用 hooks
+const [x, setX] = useState()
+useEffect(() => {})
+
+// 2. 事件处理器
+<button onClick={...}>
+
+// 3. 浏览器 API
+useEffect(() => {
+  window.localStorage.setItem(...)
+})
+
+// 4. Class 组件
+class X extends Component {}
+
+// 5. 用了 use* hook（除了 use(promise) / use(context)）
+```
+
+### 何时不需要 use client
+
+```tsx
+// 默认 Server Component，可以：
+
+// 1. async/await（顶层）
+async function Page() {
+  const data = await fetch(...)
+  // ...
+}
+
+// 2. 直接访问后端
+import { db } from '@/lib/db'
+const posts = await db.posts.findMany()
+
+// 3. 渲染纯展示性 JSX
+function Card({ title, content }) {
+  return <div><h2>{title}</h2><p>{content}</p></div>
+}
+```
+
+## RSC payload
+
+Server Component 渲染输出不是 HTML——而是**RSC payload**，一种特殊的序列化格式：
+
+```text
+模拟 RSC payload（简化）：
+M1:{"id":"./components/LikeButton.tsx","chunks":["chunk-abc.js"],"name":"default"}
+J0:["$","main",null,{"children":[
+  ["$","h1",null,{"children":"Posts"}],
+  ["$","ul",null,{"children":[
+    ["$","li","1",{"children":[
+      ["$","h2",null,{"children":"First Post"}],
+      ["$","$L1",null,{"postId":"1","initialLikes":42}]
+    ]}]
+  ]}]
+]}]
+```
+
+包含：
+
+- 静态内容（HTML 结构）
+- 客户端组件**引用**（`$L1` 指向 LikeButton）+ 它的 props
+- 流式片段（用于 Suspense）
+
+客户端接收后：
+
+1. 渲染静态部分到 DOM
+2. 找到 `$L1` 等客户端组件 → 下载对应 chunk → 水合
+
+## Server Actions
+
+> Server Action = 在服务端运行的函数，可被客户端调用（自动序列化、网络传输、错误处理）。
+
+### 基础用法
+
+```tsx
+// app/post/[id]/page.tsx (Server Component)
+import { db } from '@/lib/db'
+import LikeButton from './LikeButton'
+
+async function likePost(postId: string) {
+  'use server'                    // 标记为 Server Action
+  await db.posts.update({
+    where: { id: postId },
+    data: { likes: { increment: 1 } }
+  })
+}
+
+export default async function PostPage({ params }) {
+  const post = await db.posts.findUnique({ where: { id: params.id } })
+  return (
+    <div>
+      <h1>{post.title}</h1>
+      <LikeButton postId={post.id} likes={post.likes} onLike={likePost} />
+    </div>
+  )
+}
+```
+
+```tsx
+// LikeButton.tsx
+'use client'
+export default function LikeButton({ postId, likes, onLike }) {
+  return (
+    <button onClick={async () => {
+      await onLike(postId)         // 实际是 RPC，跨网络
+    }}>♥ {likes}</button>
+  )
+}
+```
+
+工作流程：
+
+```text
+点击按钮 → 客户端把 onLike(postId) 调用包装成请求
+        → 发送给服务端
+        → 服务端找到注册的 likePost 函数 → 执行
+        → 返回结果
+        → 客户端继续
+```
+
+### 表单与 Server Action
+
+最佳搭档：
+
+```tsx
+async function createPost(formData: FormData) {
+  'use server'
+  const title = formData.get('title')
+  await db.posts.create({ data: { title } })
+}
+
+export default function NewPost() {
+  return (
+    <form action={createPost}>
+      <input name="title" />
+      <button type="submit">Submit</button>
+    </form>
+  )
+}
+```
+
+特点：
+
+- **无需 JS 也能工作**：浏览器原生 form submit
+- 自动处理序列化（FormData / JSON）
+- 配合 `useFormStatus` 显示 pending 状态
+- 配合 `useOptimistic` 做乐观更新
+
+### useOptimistic：乐观更新
+
+```tsx
+'use client'
+import { useOptimistic } from 'react'
+
+function PostList({ posts, addPost }) {
+  const [optimisticPosts, setOptimistic] = useOptimistic(
+    posts,
+    (current, newPost) => [...current, { ...newPost, pending: true }]
+  )
+
+  async function action(formData) {
+    const newPost = { id: crypto.randomUUID(), title: formData.get('title') }
+    setOptimistic(newPost)         // 立即更新 UI
+    await addPost(newPost)         // 实际请求
+  }
+
+  return (
+    <>
+      <ul>{optimisticPosts.map(p => <li key={p.id}>{p.title}</li>)}</ul>
+      <form action={action}>
+        <input name="title" />
+        <button>Add</button>
+      </form>
+    </>
+  )
+}
+```
+
+立即看到新 item，请求失败时回滚。详见 React 文档。
+
+### useFormStatus：提交状态
+
+```tsx
+'use client'
+import { useFormStatus } from 'react-dom'
+
+function SubmitButton() {
+  const { pending } = useFormStatus()
+  return (
+    <button disabled={pending}>
+      {pending ? 'Saving...' : 'Save'}
+    </button>
+  )
+}
+```
+
+注意：必须在 `<form>` 子组件内使用。
+
+### Server Action 的安全考虑
+
+Server Actions 暴露**网络端点**——必须像 API 一样做权限检查：
+
+```tsx
+async function deletePost(id: string) {
+  'use server'
+  const session = await auth()
+  if (!session) throw new Error('Unauthorized')
+
+  const post = await db.posts.findUnique({ where: { id } })
+  if (post.userId !== session.user.id) throw new Error('Forbidden')
+
+  await db.posts.delete({ where: { id } })
+}
+```
+
+不要假设"只有特定按钮才能调用这个 Action"——攻击者可以直接构造请求。
+
+## 流式 RSC
+
+服务端组件可以**流式输出**，结合 Suspense 让"快的部分先到，慢的部分后到"：
+
+```tsx
+async function FastSection() {
+  return <h1>Title</h1>          // 快速完成
+}
+
+async function SlowPosts() {
+  const posts = await fetch('https://slow.api/posts').then(r => r.json())
+  return <ul>{posts.map(...)}</ul>   // 慢
+}
+
+async function SlowComments() {
+  const comments = await fetch('https://slow.api/comments').then(r => r.json())
+  return <ul>{comments.map(...)}</ul>
+}
+
+export default function Page() {
+  return (
+    <>
+      <FastSection />
+      <Suspense fallback={<PostsSkeleton />}>
+        <SlowPosts />
+      </Suspense>
+      <Suspense fallback={<CommentsSkeleton />}>
+        <SlowComments />
+      </Suspense>
+    </>
+  )
+}
+```
+
+```text
+T+0     用户访问 → SSR 开始
+T+50    立即输出：<h1>Title</h1> + 两个 skeleton
+T+200   posts 数据到 → 流式输出 <ul>...</ul> 替换第一个 skeleton
+T+500   comments 数据到 → 流式输出第二个
+
+用户从 T+50 就开始看到内容！
+```
+
+### 与并行预取协同
+
+```tsx
+export default async function Page({ params }) {
+  // 并行启动（不 await）
+  const userPromise = fetchUser(params.id)
+  const postsPromise = fetchPosts(params.id)
+  const friendsPromise = fetchFriends(params.id)
+
+  return (
+    <>
+      <Suspense fallback={<UserSkeleton />}>
+        <UserCard promise={userPromise} />
+      </Suspense>
+      <Suspense fallback={<PostsSkeleton />}>
+        <PostsList promise={postsPromise} />
+      </Suspense>
+      <Suspense fallback={<FriendsSkeleton />}>
+        <Friends promise={friendsPromise} />
+      </Suspense>
+    </>
+  )
+}
+
+async function UserCard({ promise }) {
+  const user = await promise
+  return <div>{user.name}</div>
+}
+```
+
+三个请求并行，谁先到谁先渲染——总时间 ≈ max(各请求)，而非 sum。
+
+## 缓存
+
+### React 内置 cache
+
+```tsx
+import { cache } from 'react'
+
+const getUser = cache(async (id: string) => {
+  return await db.users.findUnique({ where: { id } })
+})
+
+// 同一次请求中多次调用，仅执行一次
+async function PageA() {
+  const user = await getUser('123')   // DB 查询
+}
+async function PageB() {
+  const user = await getUser('123')   // 缓存命中
+}
+```
+
+`cache` 仅在**单次请求**内去重——不跨请求。
+
+### Next.js fetch 缓存
+
+```tsx
+const res = await fetch('https://api.example.com/data', {
+  next: { revalidate: 60 }       // 60 秒缓存
+})
+```
+
+或：
+
+```tsx
+const res = await fetch(url, { cache: 'force-cache' })   // 静态化
+const res = await fetch(url, { cache: 'no-store' })      // 不缓存
+const res = await fetch(url, { next: { tags: ['posts'] } })  // 标签
+```
+
+详见 [SSR / SSG / ISR / PPR](/performance/react/ssr) 与 Next.js 文档。
+
+## 与 Client Component 的状态边界
+
+### 不能跨边界传函数
+
+```tsx
+// Server Component
+function Server() {
+  const handleClick = () => {}    // ❌ 函数无法序列化
+  return <Client onClick={handleClick} />
+}
+
+// 但 Server Action 可以
+async function handleClick() {
+  'use server'
+  // ...
+}
+return <Client onClick={handleClick} />   // ✅ Server Action 是特殊的可序列化引用
+```
+
+### 不能跨边界传类实例
+
+```tsx
+function Server() {
+  const date = new Date()         // ❌ Date 实例
+  return <Client date={date} />
+}
+
+function Server() {
+  const date = new Date().toISOString()  // ✅ 字符串
+  return <Client date={date} />
+}
+```
+
+可序列化的类型：number、string、boolean、null、undefined、Array、纯对象、Promise、Date（部分实现）、URL、Map / Set。
+
+不可序列化：函数（除 Server Action）、类实例、Symbol（除 well-known）。
+
+## 客户端中的数据获取
+
+虽然 RSC 让大部分数据在服务端获取，但客户端仍需要：
+
+- 用户交互后的请求（搜索、加购）
+- 实时数据（WebSocket）
+- 用户私有数据（避免每次都 SSR）
+
+继续用 TanStack Query / SWR：
+
+```tsx
+'use client'
+import { useQuery } from '@tanstack/react-query'
+
+function CartSummary() {
+  const { data } = useQuery({
+    queryKey: ['cart'],
+    queryFn: () => fetch('/api/cart').then(r => r.json())
+  })
+  // ...
+}
+```
+
+## RSC 的限制与权衡
+
+### 不适合的场景
+
+- **纯静态站**：用 SSG 即可，RSC 多余
+- **极简 SPA**：`/admin` 内部工具，没有 SEO 需求
+- **自定义渲染逻辑**：Canvas、WebGL、Three.js 主导的应用
+
+### 复杂度成本
+
+- 心智负担：开发者需理解"哪里运行"
+- 调试稍麻烦：错误可能跨越服务端 / 客户端
+- 部署：需要 Node.js 服务器（不能纯静态托管）
+
+### 框架强绑定
+
+RSC 当前只能在 Next.js / Waku 等框架内使用——React 本身没有"独立 RSC 运行时"。这是设计决定，但意味着选 RSC 等于选 Next.js（或类似）。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 顶层全局 use client | 失去 RSC 优势 | use client 下沉到叶子节点 |
+| Server Component 用 hooks | 报错 | 改 Client Component 或重构 |
+| Client Component import Server Component | 报错 | 用 children prop 传 |
+| 把数据库代码放 Shared Component | 客户端 bundle 漏服务端代码 | 强制服务端文件标记 server-only |
+| Server Action 不做权限检查 | 安全漏洞 | 视同 API 做鉴权 |
+| 用 useEffect + fetch | 数据瀑布 | Server Component 直接 await |
+| 顶层 await 阻塞流式 | 整页无法流式 | 用 Suspense 包裹慢部分 |
+| 跨边界传函数 / 类实例 | 序列化错误 | 仅传可序列化数据 |
+
+## 调试技巧
+
+### 看 RSC payload
+
+DevTools → Network → 找 RSC 请求（`?_rsc=...`）→ Response。
+
+### 区分 Server vs Client
+
+```tsx
+// 文件顶部加注释
+// @file: server-only
+
+// 或用 server-only / client-only 包
+import 'server-only'   // 这文件被客户端 import 时编译报错
+import 'client-only'   // 反过来
+```
+
+### React DevTools
+
+React DevTools 19+ 区分 Server / Client 组件——名字旁有标记。
+
+## 性能监控
+
+```tsx
+// 在 Server Component 中测量
+async function Page() {
+  const start = performance.now()
+  const data = await fetchData()
+  console.log('Server fetch:', performance.now() - start, 'ms')
+  return <div>...</div>
+}
+```
+
+服务端日志（Next.js）：
+
+```bash
+NEXT_PRIVATE_TIMING=1 next dev
+```
+
+输出每个 Server Component 的渲染耗时。
+
+## 小结
+
+- RSC 把组件渲染搬到服务端，让客户端只接收必要的 HTML 和"交互组件"，是 React 19 的核心架构变化；
+- `'use client'` 是进入客户端边界的入口——一个文件标记后，所有 import 都进入客户端 bundle；
+- 边界设计的黄金法则：use client 尽量靠近叶子节点，让父组件保留为 Server Component；
+- Client Component 不能 import Server Component，但可以**接收 Server Component 作为 children**；
+- Server Actions 让客户端可调用服务端函数，配合 form action 与 useOptimistic 实现现代表单；
+- 流式 RSC + 并行预取 = 解决数据瀑布的最优解，总时间 ≈ max(各请求) 而非 sum；
+- 跨边界只能传可序列化数据——函数（除 Server Action）、类实例都不行；
+- RSC 强绑定 Next.js / Waku 等框架，纯 SPA / 静态站可能不需要，需评估场景。

@@ -1,0 +1,350 @@
+---
+title: 模块
+description: CommonJS、ES Modules 与两者互操作
+---
+
+# 模块
+
+模块是组织 JavaScript 代码的基本单位。它将一组定义封装在独立作用域中，仅暴露显式导出的成员，避免全局命名污染。JavaScript 生态长期并存两套模块系统：
+
+- **CommonJS（CJS）**：Node.js 早期采用，同步加载，使用 `require` / `module.exports`
+- **ES Modules（ESM）**：ES2015 进入语言规范，静态结构，使用 `import` / `export`
+
+## ES Modules（ESM）
+
+### 基本导出
+
+```js
+// utils.mjs
+export const PI = 3.14159
+export function add(a, b) { return a + b }
+export class User {}
+
+// 默认导出（每个模块最多一个）
+export default function main() {}
+```
+
+### 基本导入
+
+```js
+import main, { PI, add, User } from './utils.mjs'
+
+// 重命名
+import { add as plus } from './utils.mjs'
+
+// 命名空间
+import * as utils from './utils.mjs'
+utils.add(1, 2)
+
+// 仅副作用（执行模块代码，不取值）
+import './polyfill.mjs'
+```
+
+### 重新导出
+
+```js
+// barrel.mjs：聚合多个模块
+export { add, sub } from './math.mjs'
+export * from './string.mjs'
+export { default as User } from './user.mjs'
+```
+
+### 静态结构
+
+ESM 的关键特性：**导入与导出语句必须在模块顶层**，且**导入的标识符在编译期可静态分析**。
+
+```js
+// ✗ 不允许：条件 import
+if (cond) import './a.mjs'
+
+// ✓ 动态导入：返回 Promise
+const mod = await import('./a.mjs')
+mod.default()
+```
+
+静态结构带来：
+
+- **Tree-shaking**：打包工具可在编译期删除未使用的导出；
+- **循环引用安全**：通过实时绑定（live binding）部分缓解；
+- **顶层 await**：模块图按依赖关系串行执行 `await`；
+- **更早的语法错误**：不存在 `runtime require missing` 这类问题。
+
+### Live Binding
+
+ESM 导入的是**绑定（binding）**，而非值的副本——源模块更新值，导入方立刻可见：
+
+```js
+// counter.mjs
+export let count = 0
+export function inc() { count++ }
+
+// app.mjs
+import { count, inc } from './counter.mjs'
+console.log(count)                            // → 0
+inc()
+console.log(count)                            // → 1   导入方读到最新值
+
+// 但导入方不能修改：
+count = 5                                     // ✗ TypeError: Assignment to constant variable
+```
+
+### 顶层 await（ES2022）
+
+```js
+// db.mjs
+const conn = await connect()
+export { conn }
+
+// 模块图中所有依赖 db.mjs 的模块都会等待该 await 完成
+```
+
+### 浏览器中的 ESM
+
+```html
+<script type="module" src="app.mjs"></script>
+<script type="module">
+  import { add } from './utils.mjs'
+  console.log(add(1, 2))
+</script>
+```
+
+特性：
+
+- 默认 `defer` 行为，HTML 解析完成后按依赖顺序执行；
+- `import` 路径必须包含扩展名 / 是合法 URL（开发服务器或导入映射可补全）；
+- 同一模块只解析一次，多次 `import` 共享单例；
+- CORS：跨域模块需服务器返回正确的 CORS 头。
+
+## CommonJS（CJS）
+
+Node.js 历史上的默认模块系统。
+
+### 导出与导入
+
+```js
+// math.js
+function add(a, b) { return a + b }
+module.exports = { add, PI: 3.14 }
+
+// 等价的简写
+exports.add = add
+exports.PI = 3.14
+// ⚠ 不能 exports = ...（会破坏 module.exports 的引用）
+```
+
+```js
+// app.js
+const { add, PI } = require('./math')
+console.log(add(1, 2))
+```
+
+### 工作机制
+
+`require('./math')` 的简化执行流程：
+
+1. 解析路径 → 绝对路径
+2. 检查缓存 `require.cache`：命中即返回
+3. 创建 `module = { exports: {}, ... }`
+4. 用 IIFE 包装模块代码：`(function (exports, require, module, __filename, __dirname) { ... })`
+5. 同步执行模块代码
+6. 缓存并返回 `module.exports`
+
+```js
+// 包装后的形态
+(function (exports, require, module, __filename, __dirname) {
+  // 模块代码
+})
+```
+
+每个模块拥有 `exports` / `require` / `module` / `__filename` / `__dirname` 作为局部变量，因此 CJS 中没有真正的全局变量逃逸问题。
+
+### 同步加载
+
+CJS `require` 是**同步阻塞**的：模块文件被立即读取并执行。这与服务器端文件系统快速访问的假设契合，但不适用于浏览器（异步加载是必需）。
+
+### 循环引用
+
+CJS 在循环引用时返回**部分初始化的 `exports`**：
+
+```js
+// a.js
+console.log('a start')
+exports.a = 1
+const b = require('./b')                      // b 中再 require a，得到此时的 exports
+console.log('a end, b.b =', b.b)
+exports.aDone = true
+
+// b.js
+console.log('b start')
+exports.b = 2
+const a = require('./a')
+console.log('b sees a:', a)                   // → { a: 1 }   不含 aDone
+exports.bDone = true
+
+// 入口
+require('./a')
+
+// 输出顺序：
+// a start
+// b start
+// b sees a: { a: 1 }
+// a end, b.b = 2
+```
+
+ESM 在同样场景下能更好地处理循环：导入是 live binding，访问尚未初始化的 binding 抛 `ReferenceError` 而非看到部分值。
+
+## ESM 与 CJS 互操作
+
+### 在 ESM 中导入 CJS
+
+```js
+// commonjs.cjs
+module.exports = { add: (a, b) => a + b }
+
+// esm.mjs
+import { add } from './commonjs.cjs'          // ✓ Node 支持命名导入分析
+import cjs from './commonjs.cjs'              // ✓ 默认导入即 module.exports
+```
+
+Node.js 静态分析 CJS 文件以推断命名导出；推断失败时只能默认导入。
+
+### 在 CJS 中导入 ESM
+
+由于 ESM 加载是异步的（顶层 await、动态依赖图），CJS 中**不能用 `require` 同步导入 ESM**（仅 Node 22+ 在受限条件下支持），传统做法是动态 `import()`：
+
+```js
+// CommonJS 文件
+async function load() {
+  const esm = await import('./module.mjs')
+  esm.default()
+}
+load()
+```
+
+### `package.json` 中的 type 与 exports
+
+```jsonc
+{
+  "type": "module",                           // .js 文件按 ESM 解析；不设置则按 CJS
+  "main": "./index.js",                       // 旧入口
+  "exports": {                                // 现代入口
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    },
+    "./utils": "./dist/utils.mjs"
+  }
+}
+```
+
+`exports` 字段比 `main` 更精细：
+
+- 区分不同消费者（ESM / CJS / 类型）
+- 支持子路径白名单（防止内部文件被外部直接导入）
+- 支持条件导出（开发 / 生产 / Browser / Node 等）
+
+### 文件扩展名约定
+
+| 扩展名 | 含义 |
+| ------ | ---- |
+| `.mjs` | 始终按 ESM 解析 |
+| `.cjs` | 始终按 CJS 解析 |
+| `.js` | 取决于最近的 `package.json` 的 `type` 字段 |
+| `.ts` / `.tsx` | 由 TypeScript 编译时决定 |
+
+## 模块作用域
+
+模块自身就是一个作用域：顶层 `var` / `let` / `const` / `function` 不会进入全局对象。
+
+```js
+// app.mjs
+let count = 0
+console.log(globalThis.count)                 // → undefined
+```
+
+模块的全局变量需通过 `globalThis` 显式挂载：
+
+```js
+globalThis.appConfig = { ... }
+```
+
+但应避免依赖全局变量；优先通过 `import` / `export` 显式连接模块。
+
+## 动态 `import()`
+
+```js
+const button = document.getElementById('charts')
+button.addEventListener('click', async () => {
+  const { renderChart } = await import('./chart.mjs')
+  renderChart()
+})
+```
+
+适用场景：
+
+- **代码分割（Code Splitting）**：按需加载，减小首屏体积
+- **条件加载**：根据运行时特性选择实现
+- **CJS 中加载 ESM**
+
+打包工具（Webpack、Vite、Rollup）会自动将 `import()` 调用切分为独立 chunk。
+
+## 模块设计原则
+
+### 1. 单一职责
+
+每个模块只做一件事，导出最小必要 API：
+
+```js
+// ✗
+// utils.mjs：囊括字符串、日期、网络、加密…
+
+// ✓
+// utils/string.mjs / utils/date.mjs / utils/http.mjs
+```
+
+### 2. 优先命名导出
+
+命名导出对 Tree-shaking、IDE 提示、refactor 都更友好：
+
+```js
+// ✓ 命名导出
+export function fetchUser(id) {}
+export function createUser(data) {}
+
+// ✗ 默认导出整个对象（失去 Tree-shaking）
+export default { fetchUser, createUser }
+```
+
+例外：组件库（React 组件、单页面）的默认导出是约定。
+
+### 3. Barrel 文件谨慎使用
+
+```js
+// index.mjs
+export * from './a.mjs'
+export * from './b.mjs'
+```
+
+barrel 让导入路径更整洁，但：
+
+- 引发不必要的副作用（导入 `./a` 也会执行 `./b` 的顶层代码）
+- 阻碍打包工具的 Tree-shaking（视具体配置）
+- 在循环依赖时更易出错
+
+仅在公共包入口使用，内部代码倾向直接路径导入。
+
+### 4. 避免循环依赖
+
+循环依赖虽然可工作，但增加心智负担。出现循环时通常是抽象划分有问题，可考虑：
+
+- 提取共同依赖到第三个模块
+- 将公共类型 / 接口移出实现模块
+- 使用依赖注入解除耦合
+
+## 小结
+
+- ESM 是规范化的、静态可分析的模块系统，应作为新代码的默认选择；
+- CJS 在 Node.js 生态中仍广泛存在；理解 `module.exports` / `require` 的同步加载与缓存机制对维护遗留代码与互操作至关重要；
+- `package.json` 的 `type` 与 `exports` 是现代 npm 包发布的核心配置；
+- Tree-shaking、代码分割、顶层 await 等高级特性建立在 ESM 的静态结构之上。

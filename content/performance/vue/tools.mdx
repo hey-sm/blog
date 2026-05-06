@@ -1,0 +1,712 @@
+---
+title: Vue 性能工具
+description: Vue DevTools Performance Timeline、内置 metrics、onRenderTracked、bundle 分析与生产监控
+---
+
+# Vue 性能工具
+
+> Vue 的性能调优工具链虽不如 React 那么"明星"，但功能同样完整——本章覆盖 Vue DevTools Timeline、组件级 onRenderTracked / Triggered、内置 perf API、bundle 分析、生产监控。
+
+## 工具地图
+
+```text
+┌─ 开发期排查 ──────────────────────────────────┐
+│  Vue DevTools             组件树 + 性能 Timeline │
+│  onRenderTracked/Triggered 渲染追踪日志          │
+│  Performance API           手动埋点               │
+└────────────────────────────────────────────────┘
+
+┌─ Bundle 分析 ─────────────────────────────────┐
+│  rollup-plugin-visualizer  Vite 构建产物       │
+│  vite-bundle-analyzer       Vite 专用           │
+│  source-map-explorer       任意构建产物          │
+└────────────────────────────────────────────────┘
+
+┌─ 内存与泄漏 ──────────────────────────────────┐
+│  Chrome DevTools Memory    Heap snapshot        │
+│  Performance + Memory      内存曲线 + 火焰图     │
+└────────────────────────────────────────────────┘
+
+┌─ 生产监控 ────────────────────────────────────┐
+│  web-vitals                Core Web Vitals      │
+│  Sentry / Datadog / 阿里 ARMS                   │
+│  Vue 错误处理（app.config.errorHandler）          │
+└────────────────────────────────────────────────┘
+```
+
+## Vue DevTools
+
+### 安装
+
+[Vue Devtools](https://devtools.vuejs.org/) Chrome / Firefox 扩展，或独立 Electron 应用。
+
+或在项目中直接使用：
+
+```bash
+npm install -D vite-plugin-vue-devtools
+```
+
+```ts
+// vite.config.ts
+import VueDevTools from 'vite-plugin-vue-devtools'
+
+export default {
+  plugins: [VueDevTools()]
+}
+```
+
+直接在浏览器中弹出独立面板——比 Chrome 扩展功能更丰富。
+
+### 主要面板
+
+#### Components
+
+组件树视图：
+
+- 实时显示组件层级
+- 选中组件查看 props / data / setup / computed
+- 实时编辑响应式数据
+- 组件间高亮跳转
+
+#### Timeline
+
+录制性能事件——比 React Profiler 更细：
+
+```text
+- Component init / mounted
+- Component update（含 trigger 来源）
+- Watch trigger
+- Computed evaluation
+- Pinia mutations
+- Vue Router navigations
+- 自定义事件
+```
+
+录制流程：
+
+1. Timeline 面板 → 选择要录制的事件类型
+2. 点击 Record → 操作页面 → Stop
+3. 看时间轴
+
+定位"哪次组件更新慢"或"哪个 watch 频繁触发"。
+
+#### Routes / Pinia
+
+- Routes：当前路由 + 历史 + meta
+- Pinia：所有 store + state + getters + actions 调用记录
+
+#### Inspector
+
+```text
+Custom Inspector：插件可注册自定义检视器
+  - 适合 Vuex / Pinia / 自定义 store
+  - 实时检视 + 历史回放
+```
+
+### Vue 3.x 专属
+
+```vue
+<script setup>
+defineOptions({
+  name: 'UserList'                              // 提供 name 让 DevTools 识别
+})
+</script>
+```
+
+或用 `unplugin-vue-define-options` 让 setup 可以 defineOptions。
+
+## onRenderTracked / onRenderTriggered
+
+Vue 3 内置的渲染调试钩子：
+
+```vue
+<script setup>
+import { onRenderTracked, onRenderTriggered } from 'vue'
+
+onRenderTracked((event) => {
+  // 组件每次渲染时触发，列出所有"被读"的响应式数据
+  console.log('TRACKED:', event)
+})
+
+onRenderTriggered((event) => {
+  // 组件因响应式数据变化要重新渲染时触发
+  console.log('TRIGGERED:', event.target, event.key)
+})
+</script>
+```
+
+### 输出示例
+
+```text
+TRACKED: { effect, target: { count: 0 }, type: 'get', key: 'count' }
+TRACKED: { effect, target: { name: 'A' }, type: 'get', key: 'name' }
+
+// 用户点击按钮 count++
+
+TRIGGERED: { effect, target: { count: 1 }, type: 'set', key: 'count', newValue: 1, oldValue: 0 }
+```
+
+直接看出"组件依赖了哪些数据"+"哪个数据变化触发了重渲染"。
+
+### 实战：定位"莫名重渲染"
+
+```vue
+<script setup>
+import { onRenderTriggered } from 'vue'
+
+onRenderTriggered((event) => {
+  console.log(
+    'rerender because:',
+    event.target,
+    event.key,
+    'changed from', event.oldValue,
+    'to', event.newValue
+  )
+})
+</script>
+```
+
+类似 React 的 "Why did this render"——指出每次重渲染的具体原因。
+
+⚠️ 仅开发模式有效——生产构建会被 tree-shake。
+
+## effect 的 onTrack / onTrigger
+
+`computed` / `watchEffect` 也支持类似钩子：
+
+```ts
+import { computed, watchEffect } from 'vue'
+
+const total = computed(() => state.items.reduce((s, x) => s + x.price, 0), {
+  onTrack(e) {
+    debugger                                    // 何时被追踪
+  },
+  onTrigger(e) {
+    debugger                                    // 何时被触发
+  }
+})
+
+watchEffect(
+  () => { /* ... */ },
+  {
+    onTrack(e) { console.log('TRACK:', e) },
+    onTrigger(e) { console.log('TRIGGER:', e) }
+  }
+)
+```
+
+适合排查"这个 computed 为什么频繁失效"。
+
+## Performance API
+
+### 测量组件挂载时间
+
+```vue
+<script setup>
+import { onBeforeMount, onMounted } from 'vue'
+
+onBeforeMount(() => {
+  performance.mark('comp-mount-start')
+})
+
+onMounted(() => {
+  performance.mark('comp-mount-end')
+  performance.measure('comp-mount', 'comp-mount-start', 'comp-mount-end')
+
+  const m = performance.getEntriesByName('comp-mount').pop()
+  console.log('Mount time:', m.duration, 'ms')
+})
+</script>
+```
+
+### 测量异步操作
+
+```ts
+async function loadData() {
+  performance.mark('load-start')
+  const data = await fetch('/api/big').then(r => r.json())
+  performance.mark('load-end')
+  performance.measure('load', 'load-start', 'load-end')
+  return data
+}
+```
+
+### 一次性 instrument
+
+```ts
+function profile(name, fn) {
+  return function(...args) {
+    performance.mark(`${name}-start`)
+    const result = fn.apply(this, args)
+    if (result instanceof Promise) {
+      return result.finally(() => {
+        performance.mark(`${name}-end`)
+        performance.measure(name, `${name}-start`, `${name}-end`)
+      })
+    }
+    performance.mark(`${name}-end`)
+    performance.measure(name, `${name}-start`, `${name}-end`)
+    return result
+  }
+}
+
+const heavyCalc = profile('heavyCalc', (data) => {
+  return data.reduce(...)
+})
+```
+
+## Vue 内置性能模式
+
+### app.config.performance
+
+```ts
+import { createApp } from 'vue'
+import App from './App.vue'
+
+const app = createApp(App)
+app.config.performance = true                   // 开发期开启
+
+app.mount('#app')
+```
+
+效果：在 DevTools Performance 面板录制时，看到每个组件的 init / mount 标记：
+
+```text
+Performance 面板（Chrome）：
+  vue-app-init
+  vue-Sidebar-init
+  vue-Sidebar-mount
+  vue-PostList-init
+  vue-PostList-mount
+  ...
+```
+
+定位"哪个组件最慢"。
+
+### 仅生产环境时禁用
+
+```ts
+app.config.performance = import.meta.env.DEV    // 仅开发期
+```
+
+## Bundle 分析
+
+### Vite + visualizer
+
+```bash
+npm install -D rollup-plugin-visualizer
+```
+
+```ts
+// vite.config.ts
+import { visualizer } from 'rollup-plugin-visualizer'
+
+export default {
+  plugins: [
+    visualizer({
+      open: true,
+      gzipSize: true,
+      brotliSize: true,
+      template: 'treemap'                       // 或 sunburst / network
+    })
+  ]
+}
+```
+
+构建后弹出可视化页面：
+
+```text
+┌─ vendor-abc.js (350 KB) ────────────────┐
+│ ┌─ vue (50 KB) ─┐ ┌─ vue-router (10) ─┐ │
+│ │              │ │                    │ │
+│ └──────────────┘ └────────────────────┘ │
+│ ┌─ pinia (8) ─┐ ┌─ @vueuse/core (40) ─┐ │
+│ └─────────────┘ └────────────────────┘  │
+│ ┌─ chart.js (180 KB)（!!!） ──────────┐ │
+│ └─────────────────────────────────────┘ │
+└──────────────────────────────────────────┘
+```
+
+发现"凶手"。
+
+### Nuxt Bundle Analyzer
+
+```bash
+npx nuxi analyze
+```
+
+显示 client + server bundle 构成。
+
+### source-map-explorer
+
+```bash
+npx source-map-explorer 'dist/assets/*.js'
+```
+
+不依赖构建配置，直接分析任何 .js + .map。
+
+## 内存定位
+
+### Heap Snapshot
+
+DevTools Memory：
+
+```text
+1. 操作前 → Take snapshot #1
+2. 进入新路由 / 打开模态 / 加载列表
+3. 退出 / 关闭 / 清空
+4. 强制 GC（垃圾桶按钮）
+5. Take snapshot #2
+6. Comparison 看 # Delta 正值的对象
+```
+
+例：
+
+```text
+Constructor          # New   # Deleted   # Delta
+HTMLDivElement        500       400        +100
+ComponentInternalIns  120        80        +40
+```
+
+正值表示内存累积——可能泄漏。
+
+### Vue 中的常见泄漏
+
+#### 1. 未清理的 watcher
+
+```vue
+<script setup>
+const stop = watch(source, fn)
+// 组件卸载时自动停止（在 setup 顶层创建）
+</script>
+```
+
+但**异步上下文**中创建的不会自动停止：
+
+```ts
+// ❌
+setTimeout(() => {
+  watch(source, fn)                             // 不绑定到组件，永不停止
+}, 1000)
+
+// ✅ 用 effectScope
+const scope = effectScope()
+
+setTimeout(() => {
+  scope.run(() => watch(source, fn))
+}, 1000)
+
+onUnmounted(() => scope.stop())
+```
+
+#### 2. 未清理的 listener / interval
+
+```vue
+<script setup>
+import { onMounted, onUnmounted } from 'vue'
+
+let timer
+onMounted(() => {
+  timer = setInterval(poll, 1000)
+})
+onUnmounted(() => clearInterval(timer))         // 必须清理
+</script>
+```
+
+或用 `useIntervalFn`（VueUse）：
+
+```ts
+import { useIntervalFn } from '@vueuse/core'
+useIntervalFn(poll, 1000)                       // 自动绑定生命周期
+```
+
+#### 3. 全局 store 持续增长
+
+```ts
+// store/messages.ts
+const messages = ref([])
+
+ws.onmessage = (e) => {
+  messages.value.push(JSON.parse(e.data))       // ❌ 永不清理
+}
+
+// 修复：滑窗
+ws.onmessage = (e) => {
+  messages.value = [...messages.value.slice(-1000), JSON.parse(e.data)]
+}
+```
+
+#### 4. KeepAlive 未控制 max
+
+```vue
+<KeepAlive>
+  <component :is="currentView" />
+</KeepAlive>
+
+<!-- ❌ 长会话内存爆炸 -->
+```
+
+```vue
+<KeepAlive :max="10">                           <!-- ✅ 限制 -->
+```
+
+详见 [KeepAlive 缓存](/performance/vue/keep-alive)。
+
+## 全局错误监控
+
+### app.config.errorHandler
+
+```ts
+import { createApp } from 'vue'
+import * as Sentry from '@sentry/vue'
+
+const app = createApp(App)
+
+app.config.errorHandler = (err, instance, info) => {
+  Sentry.captureException(err, {
+    tags: { vue_info: info },
+    contexts: { vue: { component: instance?.$options.name } }
+  })
+}
+
+app.config.warnHandler = (msg, instance, trace) => {
+  // 开发期警告捕获
+  if (import.meta.env.DEV) {
+    console.warn('Vue warn:', msg, trace)
+  }
+}
+```
+
+### Sentry 集成
+
+```ts
+import { createApp } from 'vue'
+import * as Sentry from '@sentry/vue'
+
+const app = createApp(App)
+
+Sentry.init({
+  app,
+  dsn: 'YOUR_DSN',
+  integrations: [
+    Sentry.browserTracingIntegration({ router }),
+    Sentry.replayIntegration()
+  ],
+  tracesSampleRate: 0.1,                        // 10% 采样
+  replaysOnErrorSampleRate: 1.0,
+  trackComponents: true,                        // 自动追踪组件渲染
+  hooks: ['mount', 'update', 'destroy']
+})
+
+app.mount('#app')
+```
+
+效果：
+
+- 错误 + 性能事件聚合
+- 组件渲染时间分布
+- 用户会话录像（错误时）
+
+## web-vitals 集成
+
+```ts
+// plugins/web-vitals.ts
+import { onLCP, onINP, onCLS, onTTFB, onFCP } from 'web-vitals'
+
+export default defineNuxtPlugin(() => {
+  function send(metric) {
+    navigator.sendBeacon('/track', JSON.stringify({
+      name: metric.name,
+      value: metric.value,
+      rating: metric.rating,
+      delta: metric.delta,
+      id: metric.id,
+      navigationType: metric.navigationType
+    }))
+  }
+
+  onLCP(send)
+  onINP(send)
+  onCLS(send)
+  onTTFB(send)
+  onFCP(send)
+})
+```
+
+或集成到组件错误处理：
+
+```ts
+import { onINP } from 'web-vitals'
+
+onINP(metric => {
+  if (metric.value > 200) {
+    Sentry.captureMessage('Slow INP', {
+      level: 'warning',
+      extra: metric
+    })
+  }
+})
+```
+
+详见通用章 [性能指标与预算](/performance/metrics)。
+
+## DevTools 自定义检视器
+
+为 Pinia / 自定义 store 注册检视器：
+
+```ts
+import { setupDevtoolsPlugin } from '@vue/devtools-api'
+
+const inspectorId = 'my-store'
+
+setupDevtoolsPlugin({
+  id: 'my-app',
+  label: 'My Store',
+  app
+}, (api) => {
+  api.addInspector({
+    id: inspectorId,
+    label: 'My Store',
+    icon: 'storage'
+  })
+
+  api.on.getInspectorTree((payload) => {
+    if (payload.inspectorId === inspectorId) {
+      payload.rootNodes = [
+        { id: 'state', label: 'State', children: [/* ... */] }
+      ]
+    }
+  })
+
+  api.on.getInspectorState((payload) => {
+    if (payload.inspectorId === inspectorId) {
+      payload.state = { /* ... */ }
+    }
+  })
+})
+```
+
+适合：自定义状态库、复杂业务模块的内省。
+
+## 性能预算与 CI
+
+### Lighthouse CI
+
+```yaml
+# .github/workflows/lhci.yml
+name: Lighthouse CI
+on: pull_request
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci && npm run build
+      - run: npm install -g @lhci/cli
+      - run: lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+```
+
+### size-limit
+
+```bash
+npm install -D size-limit @size-limit/preset-app
+```
+
+```json
+{
+  "size-limit": [
+    { "path": "dist/assets/*.js", "limit": "200 KB" }
+  ]
+}
+```
+
+CI 拦截 bundle 增长。详见通用章 [通用性能工具链](/performance/tools)。
+
+## 实战诊断流程
+
+### 场景：路由切换慢
+
+```text
+1. Vue DevTools → Timeline 录制路由切换
+2. 看：
+   ├─ 路由组件 init 耗时？──► bundle 大？
+   ├─ async setup 中 await？──► 数据请求慢？
+   └─ 多个 watch 触发？──► 副作用链问题？
+
+3. 对应优化：
+   ├─ defineAsyncComponent + lazy 路由
+   ├─ Promise.all 并行请求
+   └─ 重构 watch 为 computed
+```
+
+### 场景：列表滚动卡
+
+```text
+1. Performance 面板录制滚动 5 秒
+2. 主线程长任务？──► 渲染太频繁
+3. 检查：
+   ├─ 列表是否虚拟化？──► 见 [虚拟化]
+   ├─ 行组件依赖太多？──► v-memo
+   └─ shallowRef 数据？──► 见 [浅层优化]
+
+4. 优化后再次录制对比
+```
+
+### 场景：使用一段时间变慢
+
+```text
+1. Memory 面板 → 操作前后 Heap Snapshot Comparison
+2. 看 # Delta 大的 Constructor
+3. Retainers 看引用链
+4. 修复：
+   ├─ 未清理的 watcher / listener
+   ├─ store 持续增长（滑窗）
+   └─ KeepAlive 未限制 max
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 不开 app.config.performance | 看不到组件级耗时 | 开发期开启 |
+| 异步上下文创建 watch 不 stop | 内存泄漏 | effectScope |
+| 没接 errorHandler | 错误无监控 | Sentry / 自定义 |
+| Bundle 不分析 | 不知凶手 | visualizer |
+| 不接 web-vitals | 真实用户性能盲区 | 接入 RUM |
+| 全用 console.time | 异步不准 | Performance API |
+| 生产开 onRenderTracked | 性能损耗 | 仅 dev |
+| 不在 CI 拦回归 | 性能悄悄劣化 | LighthouseCI + size-limit |
+
+## 工具组合的"日常工作流"
+
+```text
+开发期（每个 PR）：
+  ├─ Vue DevTools 实时观察
+  ├─ onRenderTriggered 排查重渲染
+  └─ 上传前 visualizer 看 bundle
+
+提 PR 时：
+  ├─ Lighthouse CI 自动跑
+  ├─ size-limit 检查
+  └─ 性能相关 PR 附 DevTools Timeline 截图
+
+部署后：
+  ├─ web-vitals 上报 RUM
+  ├─ Sentry 追踪错误 + 性能
+  └─ 每周看 P75 趋势
+```
+
+## 小结
+
+- Vue DevTools 是 Vue 性能调优的核心工具——Timeline 面板能录制组件级 / watcher / Pinia 等多类事件；
+- onRenderTracked / onRenderTriggered 是组件级渲染追踪——直接定位"为什么重渲染"；
+- effect / computed / watch 的 onTrack / onTrigger 钩子可以排查响应式追踪问题；
+- app.config.performance = true 让 Chrome Performance 面板看到组件级 init / mount 标记；
+- Bundle 分析（visualizer / source-map-explorer）回答"为什么 bundle 大"；
+- 内存泄漏的常见根因：未清理的 watcher / listener / interval / KeepAlive 不限 max / store 持续增长；
+- 生产监控：app.config.errorHandler + Sentry + web-vitals 是标配组合；
+- 性能优化的工作流是测量 → 定位 → 优化 → 再次测量验证——任何步骤都不能跳过。

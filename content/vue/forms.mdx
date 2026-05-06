@@ -1,0 +1,185 @@
+---
+title: 表单处理
+description: Input Bindings、v-model 双向绑定、修饰符与表单验证
+---
+
+# 表单处理
+
+Vue 通过 `v-model` 实现表单元素的双向数据绑定。
+
+## 基础表单元素
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const text = ref('')
+const textarea = ref('')
+const checked = ref(false)
+const checkedNames = ref<string[]>([])
+const picked = ref('')
+const selected = ref('')
+const multiSelected = ref<string[]>([])
+</script>
+
+<template>
+  <!-- 文本输入 -->
+  <input v-model="text" placeholder="Enter text">
+  <p>{{ text }}</p>
+  
+  <!-- 多行文本 -->
+  <textarea v-model="textarea"></textarea>
+  
+  <!-- 单个复选框 -->
+  <input type="checkbox" v-model="checked" id="checkbox">
+  <label for="checkbox">{{ checked }}</label>
+  
+  <!-- 多个复选框 -->
+  <input type="checkbox" value="Alice" v-model="checkedNames">
+  <input type="checkbox" value="Bob" v-model="checkedNames">
+  <p>{{ checkedNames }}</p>
+  
+  <!-- 单选框 -->
+  <input type="radio" value="A" v-model="picked"> A
+  <input type="radio" value="B" v-model="picked"> B
+  
+  <!-- 下拉框 -->
+  <select v-model="selected">
+    <option disabled value="">Please select</option>
+    <option>A</option>
+    <option>B</option>
+  </select>
+  
+  <!-- 多选下拉框 -->
+  <select v-model="multiSelected" multiple>
+    <option>A</option>
+    <option>B</option>
+    <option>C</option>
+  </select>
+</template>
+```
+
+## v-model 修饰符
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const text = ref('')
+const number = ref(0)
+const trimmed = ref('')
+</script>
+
+<template>
+  <!-- .lazy：change 事件后同步 -->
+  <input v-model.lazy="text">
+  
+  <!-- .number：转为数字 -->
+  <input v-model.number="number" type="number">
+  
+  <!-- .trim：去除首尾空格 -->
+  <input v-model.trim="trimmed">
+  
+  <!-- 组合使用 -->
+  <input v-model.lazy.trim="text">
+</template>
+```
+
+## 动态值绑定
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const toggle = ref(false)
+const pick = ref('')
+const selected = ref('')
+</script>
+
+<template>
+  <!-- 复选框 -->
+  <input
+    type="checkbox"
+    v-model="toggle"
+    true-value="yes"
+    false-value="no"
+  >
+  
+  <!-- 单选框 -->
+  <input type="radio" v-model="pick" :value="{ id: 1 }">
+  
+  <!-- 下拉框 -->
+  <select v-model="selected">
+    <option :value="{ number: 123 }">123</option>
+  </select>
+</template>
+```
+
+## 表单验证示例
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const email = ref('')
+const password = ref('')
+const errors = ref<string[]>([])
+
+const isValidEmail = computed(() => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value)
+})
+
+const isValidPassword = computed(() => {
+  return password.value.length >= 8
+})
+
+function handleSubmit() {
+  errors.value = []
+  
+  if (!isValidEmail.value) {
+    errors.value.push('Invalid email')
+  }
+  
+  if (!isValidPassword.value) {
+    errors.value.push('Password must be at least 8 characters')
+  }
+  
+  if (errors.value.length === 0) {
+    console.log('Form submitted')
+  }
+}
+</script>
+
+<template>
+  <form @submit.prevent="handleSubmit">
+    <div>
+      <input v-model="email" type="email" placeholder="Email">
+      <span v-if="email && !isValidEmail" class="error">
+        Invalid email
+      </span>
+    </div>
+    
+    <div>
+      <input v-model="password" type="password" placeholder="Password">
+      <span v-if="password && !isValidPassword" class="error">
+        Password too short
+      </span>
+    </div>
+    
+    <button type="submit">Submit</button>
+    
+    <ul v-if="errors.length">
+      <li v-for="error in errors" :key="error">{{ error }}</li>
+    </ul>
+  </form>
+</template>
+
+<style scoped>
+.error {
+  color: red;
+  font-size: 12px;
+}
+</style>
+```
+
+下一章 [高级特性](/vue/advanced) 介绍异步组件、Teleport、Suspense 等。

@@ -1,0 +1,255 @@
+---
+title: ISR 与局部预渲染
+description: Incremental Static Regeneration、revalidate、PPR (Partial Prerendering)、use cache 指令
+---
+
+# ISR 与局部预渲染
+
+**ISR（Incremental Static Regeneration）**允许在运行时重建静态页面。**PPR（Partial Prerendering）** 更进一步——在同一页面内混合静态与动态内容。
+
+## ISR 基础
+
+两种设置 revalidate 的方式：
+
+### 1. 路由段级 `revalidate`
+
+```tsx filename="app/blog/page.tsx"
+export const revalidate = 3600   // 每小时重建一次
+
+export default async function BlogPage() {
+  const posts = await fetch('https://api.example.com/posts', {
+    next: { revalidate: 3600 },
+  }).then(r => r.json())
+
+  return <PostList posts={posts} />
+}
+```
+
+### 2. `fetch` 级 `revalidate`
+
+```tsx
+const posts = await fetch('https://api.example.com/posts', {
+  next: { revalidate: 60 },   // 仅此 fetch：60 秒内缓存有效
+}).then(r => r.json())
+```
+
+行为：
+
+```text
+┌───────────────────────────────────────────────────────┐
+│                    ISR 时间轴                          │
+│                                                        │
+│  build  → [HTML cached]                                │
+│  T + 5s → request → serve cached HTML (fast)           │
+│  T + 50s → request → serve cached (still fresh)        │
+│  T + 65s → request → serve stale (trigger regen)       │
+│           → background rebuild → new cached HTML        │
+│  T + 70s → request → serve cached (freshly rebuilt)    │
+└───────────────────────────────────────────────────────┘
+```
+
+ISR 是**stale-while-revalidate**：第一个超出 revalidate 窗口的请求触发重建，但立即返回旧值。后续请求拿到新值。
+
+## `revalidateTag` 与 `revalidatePath` —— 按需失效
+
+```tsx filename="app/posts/[slug]/page.tsx"
+export default async function PostPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await fetch(`https://api.example.com/posts/${slug}`, {
+    next: { tags: ['posts', `post-${slug}`] },
+  }).then(r => r.json())
+
+  return <article>{post.content}</article>
+}
+```
+
+在 Server Action 或 Route Handler 中按需失效：
+
+```tsx filename="app/admin/revalidate/route.ts"
+import { revalidateTag, revalidatePath } from 'next/cache'
+import { NextResponse } from 'next/server'
+
+export async function POST() {
+  revalidateTag('posts')                // 使所有带 posts 标签的缓存失效
+  revalidatePath('/blog')               // 使 /blog 路由及子路由的缓存失效
+  revalidatePath('/blog', 'layout')     // 仅失效 layout 部分
+  revalidatePath('/blog', 'page')       // 仅失效 page 部分（默认）
+  return NextResponse.json({ ok: true })
+}
+```
+
+## PPR (Partial Prerendering)
+
+PPR 允许**在同一页面内混合静态与动态内容**。静态部分在构建时预渲染，动态部分包裹在 `<Suspense>` 中，在请求时渲染。
+
+### 启用 PPR
+
+```ts filename="next.config.ts"
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  experimental: {
+    ppr: 'incremental',    // 逐页启用
+  },
+}
+
+export default nextConfig
+```
+
+### 使用 PPR
+
+```tsx filename="app/page.tsx"
+import { Suspense } from 'react'
+import { ProductList, ProductListSkeleton } from './ProductList'
+import { CartDisplay } from './CartDisplay'
+
+// 未包裹在 Suspense 中的组件在构建时静态预渲染
+export default function Home() {
+  return (
+    <div>
+      <h1>Welcome to our store</h1>      {/* ← 静态 */}
+
+      <Suspense fallback={<ProductListSkeleton />}>
+        <ProductList />                  {/* ← 动态（PPR：请求时渲染） */}
+      </Suspense>
+
+      <Suspense fallback={<CartSkeleton />}>
+        <CartDisplay />                  {/* ← 动态 */}
+      </Suspense>
+    </div>
+  )
+}
+```
+
+```tsx filename="app/ProductList.tsx"
+export async function ProductList() {
+  const products = await fetch('https://api.example.com/products', {
+    cache: 'no-store',                  // 动态 fetch
+  }).then(r => r.json())
+
+  return <Products products={products} />
+}
+```
+
+结果：
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│                    PPR 输出                              │
+│                                                          │
+│  静态 shell (<h1>, 导航等) → 构建时预渲染，缓存在 Edge   │
+│                                                          │
+│  <Suspense> 插槽                                          │
+│  ├─ ProductList → 请求时渲染 → 流式响应                  │
+│  └─ CartDisplay → 请求时渲染 → 流式响应                  │
+│                                                          │
+│  用户最先看到完整 shell → 动态区域逐步加载               │
+└─────────────────────────────────────────────────────────┘
+```
+
+## `use cache` (Next.js 16)
+
+Next.js 16 引入 `'use cache'` 指令，替代 `unstable_cache`：
+
+```tsx filename="lib/data.ts"
+import { db } from '@/lib/db'
+
+export async function getFeaturedPosts() {
+  'use cache'
+  // 此函数的结果会被缓存，直到手动失效
+
+  return db.post.findMany({
+    where: { featured: true },
+    take: 10,
+  })
+}
+```
+
+### 声明式缓存配置
+
+```tsx
+async function getUser(id: string) {
+  'use cache'
+
+  const user = await db.user.findUnique({
+    where: { id },
+    include: { posts: true },
+  })
+
+  return user
+}
+```
+
+### 缓存标签与失效
+
+```tsx filename="lib/data.ts"
+export async function getPost(slug: string) {
+  'use cache'
+  cacheTag('posts', `post-${slug}`)     // 与 revalidateTag 配合
+  cacheLife({ revalidate: 3600 })       // 或设置 revalidate 窗口
+
+  const post = await db.post.findUnique({ where: { slug } })
+  return post
+}
+```
+
+```tsx filename="app/admin/dashboard/page.tsx"
+import { revalidateAll } from 'next/cache'
+
+// Server Action 中失效所有 'use cache' 函数
+async function refreshData() {
+  'use server'
+  revalidateTag('posts')
+}
+```
+
+### `cacheLife` 配置
+
+```tsx
+'use cache'
+cacheLife('hours')        // 预定义配置
+cacheLife({ revalidate: 3600, expire: 86400 })
+```
+
+## 对比
+
+| 特性 | ISR | PPR | `use cache` |
+| ---- | --- | --- | ----------- |
+| 粒度 | 整页 | 组件级 | 函数级 |
+| 生效范围 | 路由 | 路由中 Suspense 内的组件 | 任意函数 |
+| 数据源 | 基于 time / tag 的 fetch | 动态 fetch | 任意异步数据 |
+| 缓存位置 | Server | Server + Edge (shell) | Server |
+| 启用 | 默认 + `revalidate` | `ppr: 'incremental'` | `'use cache'` 指令 |
+
+## 陷阱
+
+### ISR 中的 `generateStaticParams` {fallback}
+
+`dynamicParams = true`（默认）时，未在 `generateStaticParams` 中返回的动态段在首次请求时 SSR → 结果被缓存 → 行为类似 ISR（但有 revalidate 延迟）。首次请求慢，后续快。
+
+### PPR 中静态部分也会在动态 fetch 变化时重渲染
+
+PPR 的静态部分不是"永不更新"——它也是在构建时预渲染一次。如果上游数据变化了，静态部分还是旧数据，直到下次构建。
+
+### `revalidateTag` 与 `'use cache'` 的联动
+
+```
+revalidateTag('posts')
+```
+
+会失效所有调用了 `cacheTag('posts')` 的 `'use cache'` 函数——但**不**失效 `fetch` 中的 `next: { tags: ['posts'] }`。前者是 `'use cache'` 体系，后者是 fetch 缓存体系——它们**不共享**标签命名空间（尽管 Next.js 可能会统一这一点）。
+
+### 不要在 `'use cache'` 函数中读取 `cookies()` 或 `headers()`
+
+`'use cache'` 函数的结果是序列化后跨请求共享的，读取 cookies/headers 会把请求-scoped 数据混入全局缓存。
+
+## 小结
+
+- ISR 通过 `revalidate`（时间窗口）或 `revalidateTag` / `revalidatePath`（按需）在运行时重建静态页面；
+- PPR 混合静态 shell + 动态 content（包裹在 Suspense 中）；
+- `'use cache'`（Next.js 16）提供函数级缓存，通过 `cacheTag` + `cacheLife` 控制粒度；
+- 三种缓存体系（ISR / PPR / `use cache`）的标签命名空间当前不统一，注意区分。

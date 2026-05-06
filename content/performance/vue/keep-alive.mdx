@@ -1,0 +1,685 @@
+---
+title: KeepAlive 缓存
+description: KeepAlive 内部机制、include/exclude/max、activated/deactivated、动态组件与路由缓存
+---
+
+# KeepAlive 缓存
+
+> KeepAlive 是 Vue 独有的"组件级缓存"——React 没有内置等价物。
+
+`<KeepAlive>` 让组件在切换时**不被销毁**，保留 DOM 与状态。这对 Tab 切换、路由切换、表单状态保留至关重要——但用错也会引发内存泄漏与状态污染。本章详尽 KeepAlive 的内部机制、配置、生命周期钩子、与路由的协同。
+
+## KeepAlive 解决什么问题
+
+```vue
+<!-- 不用 KeepAlive：每次切 Tab 重建组件 -->
+<component :is="currentTab" />
+```
+
+问题：
+
+- Tab A 切到 B 时，A 被卸载（DOM 销毁、状态丢失）
+- 切回 A 时，A 重新创建（init 数据 + DOM 渲染）
+- 用户的输入、滚动位置全部丢失
+
+```vue
+<!-- 用 KeepAlive：组件被缓存 -->
+<KeepAlive>
+  <component :is="currentTab" />
+</KeepAlive>
+```
+
+效果：
+
+- A 切到 B 时，A 不被卸载，DOM 留在内存中
+- 切回 A 时，A 直接恢复，状态完整保留
+- 没有重建成本
+
+## KeepAlive 的内部机制
+
+```text
+KeepAlive 是一个虚拟组件 ──► 拦截子组件的挂载 / 卸载
+
+第一次渲染 A：
+  ├─ A 正常挂载，触发 mounted
+  └─ A 进入缓存
+
+切到 B：
+  ├─ A 被"deactivate"（不卸载，仅 DOM 移出文档）
+  ├─ 触发 A 的 deactivated 钩子
+  ├─ B 正常挂载（如果首次）或激活（如果缓存中）
+  └─ 触发 B 的 mounted / activated
+
+切回 A：
+  ├─ A 从缓存恢复（DOM 重新插入文档）
+  ├─ 触发 activated（不是 mounted）
+  └─ A 的状态完整保留
+```
+
+### activated / deactivated 钩子
+
+KeepAlive 内的组件有两个独有钩子：
+
+```vue
+<script setup>
+import { onActivated, onDeactivated } from 'vue'
+
+onActivated(() => {
+  console.log('组件被激活（重新可见）')
+  startPolling()
+})
+
+onDeactivated(() => {
+  console.log('组件被冻结（不可见）')
+  stopPolling()
+})
+</script>
+```
+
+| 钩子 | 时机 |
+| ---- | ---- |
+| `mounted` | 首次挂载（仅一次） |
+| `activated` | 每次激活（首次也会触发） |
+| `deactivated` | 每次冻结 |
+| `unmounted` | 真正卸载（如超过 max 被淘汰） |
+
+注意：
+
+- 切换 Tab 不触发 mounted / unmounted
+- activated / deactivated 是 KeepAlive 内的"伪生命周期"
+
+### 利用 activated / deactivated 优化资源
+
+```vue
+<script setup>
+import { ref, onActivated, onDeactivated } from 'vue'
+
+const data = ref([])
+let pollingId = null
+
+async function fetchData() {
+  data.value = await fetch('/api/data').then(r => r.json())
+}
+
+onActivated(() => {
+  fetchData()                                  // 激活时刷新
+  pollingId = setInterval(fetchData, 30_000)   // 每 30s 轮询
+})
+
+onDeactivated(() => {
+  clearInterval(pollingId)                     // 冻结时停止
+  pollingId = null
+})
+</script>
+```
+
+防止"被冻结的组件"还在跑定时器消耗资源。
+
+## include / exclude
+
+控制哪些组件被缓存：
+
+```vue
+<KeepAlive :include="['UserList', 'Profile']">
+  <component :is="currentView" />
+</KeepAlive>
+```
+
+```vue
+<KeepAlive :exclude="['Search', 'Login']">
+  <component :is="currentView" />
+</KeepAlive>
+```
+
+支持：
+
+- 字符串数组（精确匹配组件 name）
+- 正则 / 正则数组：`:include="/^Page/"`
+
+⚠️ 必须**给组件设置 name**：
+
+```vue
+<!-- 在 <script setup> 中需要单独 <script> 块 -->
+<script>
+export default { name: 'UserList' }
+</script>
+
+<script setup>
+// ...
+</script>
+```
+
+或用 [`unplugin-vue-define-options`](https://github.com/sxzz/unplugin-vue-define-options)：
+
+```vue
+<script setup>
+defineOptions({ name: 'UserList' })
+</script>
+```
+
+## max：限制缓存数量
+
+```vue
+<KeepAlive :max="10">
+  <component :is="currentView" />
+</KeepAlive>
+```
+
+LRU（最近最少使用）淘汰：超过 10 个时，最久未访问的会被真正卸载（触发 unmounted）。
+
+### 何时设 max
+
+- **用户可能访问几十/上百个动态视图**（如用户中心多 Tab）
+- **每个组件占用大量内存**（如富文本编辑器、地图）
+- **长会话使用**（不设 max 内存会无限增长）
+
+### max 多少合适？
+
+```text
+默认（不设 max）：无限缓存
+  ├─ 优点：体验最好，永远秒切
+  └─ 缺点：内存增长 + 可能 OOM
+
+max = 5-10：
+  ├─ 一般 Tab 切换 / 路由场景
+  └─ 平衡体验与内存
+
+max = 20-50：
+  └─ 用户访问路径深的应用
+```
+
+实际项目中常按经验值（10-20）起步，根据监控调整。
+
+## 路由级 KeepAlive
+
+最常见的应用场景——保留路由切换的状态：
+
+```vue
+<!-- App.vue -->
+<template>
+  <RouterView v-slot="{ Component, route }">
+    <KeepAlive :include="cachedRoutes">
+      <component :is="Component" :key="route.fullPath" />
+    </KeepAlive>
+  </RouterView>
+</template>
+
+<script setup>
+import { computed } from 'vue'
+
+const cachedRoutes = computed(() => ['UserList', 'Dashboard'])
+</script>
+```
+
+### key 的作用
+
+```vue
+<!-- ❌ 不加 key：不同路由的同一组件会复用 -->
+<KeepAlive>
+  <component :is="Component" />
+</KeepAlive>
+
+<!-- 例如：/posts/1 和 /posts/2 都用 PostDetail
+     默认 KeepAlive 把它们当同一个组件 → 状态错乱 -->
+
+<!-- ✅ 加 key：不同 URL 视为不同实例 -->
+<KeepAlive>
+  <component :is="Component" :key="$route.fullPath" />
+</KeepAlive>
+```
+
+### 路由元信息控制缓存
+
+```ts
+// router.ts
+const routes = [
+  { path: '/list', component: List, meta: { keepAlive: true } },
+  { path: '/detail/:id', component: Detail, meta: { keepAlive: false } },
+  { path: '/profile', component: Profile, meta: { keepAlive: true } }
+]
+```
+
+```vue
+<!-- App.vue -->
+<RouterView v-slot="{ Component, route }">
+  <KeepAlive>
+    <component
+      v-if="route.meta.keepAlive"
+      :is="Component"
+      :key="route.fullPath"
+    />
+  </KeepAlive>
+  <component
+    v-if="!route.meta.keepAlive"
+    :is="Component"
+    :key="route.fullPath"
+  />
+</RouterView>
+```
+
+灵活控制：列表页缓存（用户翻几次列表保留滚动位置），详情页不缓存（每次加载最新数据）。
+
+## 实战：电商列表 + 详情
+
+### 场景
+
+```text
+/products            ─ 商品列表（带筛选、滚动）
+  ↓ 点击商品
+/products/123        ─ 商品详情
+  ↓ 返回
+/products            ─ 用户希望保留之前的列表状态
+```
+
+### 方案
+
+```vue
+<!-- App.vue -->
+<RouterView v-slot="{ Component, route }">
+  <KeepAlive :include="['ProductList']">
+    <component :is="Component" :key="route.fullPath" />
+  </KeepAlive>
+</RouterView>
+```
+
+```vue
+<!-- ProductList.vue -->
+<script setup>
+defineOptions({ name: 'ProductList' })
+
+import { ref, onActivated } from 'vue'
+
+const products = shallowRef([])
+const filters = ref({ category: 'all' })
+
+// 首次加载
+async function load() {
+  products.value = await fetchProducts(filters.value)
+}
+load()
+
+// 每次激活时检查是否需要刷新（如用户在详情页改了商品状态）
+onActivated(() => {
+  if (shouldRefresh.value) load()
+})
+</script>
+```
+
+效果：
+
+- 用户翻列表、滚动到第 5 屏
+- 点击商品进入详情
+- 返回 → 列表恢复到第 5 屏，筛选条件保留
+
+## activated 与数据同步
+
+### 问题：缓存的列表内容陈旧
+
+```text
+T+0     用户访问 /list → 看到列表
+T+10    切到 /detail/1 → 编辑商品 1（成功保存）
+T+20    返回 /list → KeepAlive 恢复
+        ❓ 商品 1 的数据是旧的（编辑前）
+```
+
+### 方案 1：activated 时无条件重新加载
+
+```vue
+<script setup>
+onActivated(() => {
+  load()                                       // 每次激活都重新加载
+})
+</script>
+```
+
+简单但浪费——即使没变化也重新请求。
+
+### 方案 2：通过 store 同步
+
+```ts
+// store/products.ts (Pinia)
+export const useProductsStore = defineStore('products', () => {
+  const products = ref([])
+
+  function update(id, changes) {
+    const i = products.value.findIndex(p => p.id === id)
+    if (i >= 0) products.value[i] = { ...products.value[i], ...changes }
+  }
+
+  return { products, update }
+})
+```
+
+```vue
+<!-- ProductDetail.vue -->
+<script setup>
+async function save() {
+  await api.updateProduct(id, data)
+  productsStore.update(id, data)              // 同步到 store
+}
+</script>
+```
+
+```vue
+<!-- ProductList.vue -->
+<script setup>
+const productsStore = useProductsStore()
+const products = computed(() => productsStore.products)
+</script>
+```
+
+列表订阅 store——任何修改自动反映。
+
+### 方案 3：activated + dirty 标记
+
+```ts
+// 全局状态
+const productsListDirty = ref(false)
+
+// 详情页修改后标记
+function onProductSaved() {
+  productsListDirty.value = true
+}
+
+// 列表页激活时检查
+onActivated(() => {
+  if (productsListDirty.value) {
+    load()
+    productsListDirty.value = false
+  }
+})
+```
+
+按需刷新——只在真有变化时才重新请求。
+
+## 滚动位置保留
+
+KeepAlive 保留 DOM——意味着滚动位置自动保留：
+
+```text
+用户滚到第 5 屏
+切换到详情
+返回 → 列表的 DOM 还在 → scrollTop 仍是之前的值
+```
+
+但**虚拟滚动列表**（如 vue-virtual-scroller）需要手动保存：
+
+```vue
+<script setup>
+import { onActivated, onDeactivated, ref } from 'vue'
+
+const scroller = ref(null)
+const scrollTop = ref(0)
+
+onDeactivated(() => {
+  scrollTop.value = scroller.value.$el.scrollTop
+})
+
+onActivated(() => {
+  if (scroller.value) {
+    scroller.value.$el.scrollTop = scrollTop.value
+  }
+})
+</script>
+
+<template>
+  <RecycleScroller ref="scroller" :items="data" :item-size="50">
+    <template #default="{ item }"><Item :data="item" /></template>
+  </RecycleScroller>
+</template>
+```
+
+## KeepAlive 的限制
+
+### 1. 不能与 v-for 直接配合
+
+```vue
+<!-- ❌ 不允许 -->
+<KeepAlive>
+  <Component v-for="item in items" :key="item.id" />
+</KeepAlive>
+```
+
+KeepAlive 只能有一个直接子节点。如果需要"列表中的某些项保留状态"——这是另一个问题（通常用 store 或独立组件实现）。
+
+### 2. 不能与多根节点组件配合
+
+```vue
+<!-- 直接子组件必须单根 -->
+<KeepAlive>
+  <MultiRootComponent />            <!-- ❌ 多根 -->
+</KeepAlive>
+
+<!-- 包一层即可 -->
+<KeepAlive>
+  <div>
+    <MultiRootComponent />          <!-- ✅ 单根包装 -->
+  </div>
+</KeepAlive>
+```
+
+但单根是 Vue 3 的常见推荐——多根仅在 Fragment 必要时使用。
+
+### 3. SSR 中不工作
+
+KeepAlive 仅在客户端有意义——SSR 渲染时按普通组件处理。
+
+### 4. 与 Suspense 协同
+
+```vue
+<RouterView v-slot="{ Component }">
+  <KeepAlive>
+    <Suspense>
+      <component :is="Component" :key="$route.fullPath" />
+      <template #fallback><Skeleton /></template>
+    </Suspense>
+  </KeepAlive>
+</RouterView>
+```
+
+注意嵌套顺序：`KeepAlive > Suspense`。否则缓存的是 Suspense 的中间状态，不是组件本身。
+
+## 内存管理
+
+### 不缓存的组件 unmount 时
+
+```vue
+<script setup>
+import { onUnmounted } from 'vue'
+
+let timer
+onMounted(() => {
+  timer = setInterval(...)
+})
+
+onUnmounted(() => {
+  clearInterval(timer)                         // 必须清理
+})
+</script>
+```
+
+被缓存的组件 unmounted 在被 LRU 淘汰时才触发——`activated`/`deactivated` 才是常态。
+
+### 防止 KeepAlive 内的内存泄漏
+
+```vue
+<script setup>
+import { onActivated, onDeactivated, onUnmounted } from 'vue'
+
+let timer
+let observer
+
+onActivated(() => {
+  timer = setInterval(poll, 1000)
+  observer = new IntersectionObserver(...)
+  observer.observe(el.value)
+})
+
+onDeactivated(() => {
+  clearInterval(timer)                         // 冻结时清理
+  observer?.disconnect()
+})
+
+onUnmounted(() => {
+  // 真正卸载时（被 LRU 淘汰）
+  // 通常 deactivated 已经清干净了，但兜底
+  clearInterval(timer)
+  observer?.disconnect()
+})
+</script>
+```
+
+### 监控 KeepAlive 内存
+
+```ts
+// 简单监控：定期 log heap 使用
+setInterval(() => {
+  if (performance.memory) {
+    console.log('Heap:', performance.memory.usedJSHeapSize / 1024 / 1024, 'MB')
+  }
+}, 30_000)
+```
+
+DevTools Memory 面板看 Heap Snapshot——KeepAlive 缓存中的组件实例都会出现。
+
+## activated 中的常见模式
+
+### 1. 懒加载数据
+
+```vue
+<script setup>
+import { ref, onActivated } from 'vue'
+
+const data = ref(null)
+const loaded = ref(false)
+
+onActivated(async () => {
+  if (!loaded.value) {
+    data.value = await fetch('/api').then(r => r.json())
+    loaded.value = true
+  }
+})
+</script>
+```
+
+### 2. 同步 URL 状态
+
+```vue
+<script setup>
+import { useRoute } from 'vue-router'
+import { onActivated } from 'vue'
+
+const route = useRoute()
+
+onActivated(() => {
+  // 路由 query 变化时同步
+  syncFromQuery(route.query)
+})
+</script>
+```
+
+### 3. 重置临时状态
+
+```vue
+<script setup>
+import { onDeactivated } from 'vue'
+
+onDeactivated(() => {
+  showModal.value = false                      // 隐藏临时弹窗
+  selection.value = null                       // 清空选择
+})
+</script>
+```
+
+## 实战：移动 App Tab 导航
+
+```vue
+<!-- TabLayout.vue -->
+<template>
+  <main>
+    <KeepAlive>
+      <component :is="activeTabComponent" />
+    </KeepAlive>
+  </main>
+
+  <nav class="tab-bar">
+    <button v-for="tab in tabs" :key="tab.name" @click="active = tab.name">
+      <Icon :name="tab.icon" />
+      {{ tab.label }}
+    </button>
+  </nav>
+</template>
+
+<script setup>
+import { ref, computed, defineAsyncComponent } from 'vue'
+
+const tabs = [
+  { name: 'home', label: 'Home', icon: 'home' },
+  { name: 'discover', label: 'Discover', icon: 'compass' },
+  { name: 'profile', label: 'Profile', icon: 'user' }
+]
+
+const TabHome = defineAsyncComponent(() => import('./tabs/Home.vue'))
+const TabDiscover = defineAsyncComponent(() => import('./tabs/Discover.vue'))
+const TabProfile = defineAsyncComponent(() => import('./tabs/Profile.vue'))
+
+const components = { home: TabHome, discover: TabDiscover, profile: TabProfile }
+const active = ref('home')
+const activeTabComponent = computed(() => components[active.value])
+</script>
+```
+
+效果：
+
+- 三个 Tab 各自缓存
+- 切换瞬间响应（无加载）
+- 各 Tab 的滚动位置、表单状态都保留
+- 配合 lazy 让初次访问只下载首 Tab
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| KeepAlive 不设 max | 长会话内存爆炸 | 设 10-20 |
+| 组件没 name 用 include | 匹配失败 | defineOptions / 单独 script |
+| 不加 :key 缓存路由组件 | 不同 URL 复用同实例 | `:key="$route.fullPath"` |
+| KeepAlive 内 setInterval 不清理 | 即使冻结仍消耗 CPU | onDeactivated 清理 |
+| 期望 unmounted 在 Tab 切换时触发 | 不触发 | 用 deactivated |
+| 频繁更新数据但用 KeepAlive 缓存 | 显示陈旧 | activated 时刷新或 store 同步 |
+| KeepAlive 包多根组件 | 报错 | 单根包装 |
+| 移动端缓存十几个大组件 | OOM | 设 max + lazy 异步组件 |
+
+## 监控
+
+### Vue DevTools
+
+DevTools → Components → 切换 Tab 看组件树：
+
+- 缓存中的组件标记为"deactivated"
+- 选中组件可看其当前状态
+
+### 自定义日志
+
+```vue
+<script setup>
+import { onMounted, onActivated, onDeactivated, onUnmounted, getCurrentInstance } from 'vue'
+
+const name = getCurrentInstance().type.name
+
+onMounted(() => console.log(`[${name}] mounted`))
+onActivated(() => console.log(`[${name}] activated`))
+onDeactivated(() => console.log(`[${name}] deactivated`))
+onUnmounted(() => console.log(`[${name}] unmounted`))
+</script>
+```
+
+## 小结
+
+- KeepAlive 让 Vue 组件在切换时保留状态——是 Tab、路由切换的体验关键；
+- activated / deactivated 是 KeepAlive 内的伪生命周期，与 mounted / unmounted 不同；
+- include / exclude 控制哪些组件被缓存（精确 name 匹配或正则）；
+- max 是 LRU 淘汰阈值，长会话应用必设以防内存爆炸；
+- 路由级 KeepAlive 必须配 `:key="$route.fullPath"`，否则不同 URL 复用同实例；
+- 缓存组件中的副作用（timer、observer、listener）必须在 deactivated 中清理；
+- KeepAlive 内的数据同步：通过 Pinia store 共享，或 activated 时 dirty 检查刷新；
+- KeepAlive 与 Suspense 嵌套时 KeepAlive 在外，避免缓存 Suspense 的中间状态。

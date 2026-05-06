@@ -1,0 +1,341 @@
+---
+title: 计算属性与侦听器
+description: computed、watch、watchEffect 与响应式依赖追踪
+---
+
+# 计算属性与侦听器
+
+Vue 提供 `computed`、`watch`、`watchEffect` 三种响应式计算方式。
+
+## computed：计算属性
+
+### 基础用法
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const firstName = ref('John')
+const lastName = ref('Doe')
+
+const fullName = computed(() => {
+  return `${firstName.value} ${lastName.value}`
+})
+</script>
+
+<template>
+  <p>{{ fullName }}</p>
+</template>
+```
+
+### 可写计算属性
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const firstName = ref('John')
+const lastName = ref('Doe')
+
+const fullName = computed({
+  get() {
+    return `${firstName.value} ${lastName.value}`
+  },
+  set(value) {
+    [firstName.value, lastName.value] = value.split(' ')
+  }
+})
+</script>
+
+<template>
+  <input v-model="fullName">
+</template>
+```
+
+### 计算属性缓存
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const count = ref(0)
+
+// ✅ 计算属性：有缓存
+const double = computed(() => {
+  console.log('computed')
+  return count.value * 2
+})
+
+// ❌ 方法：无缓存
+function doubleMethod() {
+  console.log('method')
+  return count.value * 2
+}
+</script>
+
+<template>
+  <!-- 多次访问只计算一次 -->
+  <p>{{ double }}</p>
+  <p>{{ double }}</p>
+  
+  <!-- 每次访问都计算 -->
+  <p>{{ doubleMethod() }}</p>
+  <p>{{ doubleMethod() }}</p>
+</template>
+```
+
+## watch：侦听器
+
+### 侦听单个源
+
+```vue
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+
+watch(count, (newValue, oldValue) => {
+  console.log(`count changed from ${oldValue} to ${newValue}`)
+})
+</script>
+```
+
+### 侦听多个源
+
+```vue
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const x = ref(0)
+const y = ref(0)
+
+watch([x, y], ([newX, newY], [oldX, oldY]) => {
+  console.log(`x: ${oldX} -> ${newX}, y: ${oldY} -> ${newY}`)
+})
+</script>
+```
+
+### 侦听响应式对象
+
+```vue
+<script setup lang="ts">
+import { reactive, watch } from 'vue'
+
+const state = reactive({ count: 0, name: 'Alice' })
+
+// ✅ 深度侦听
+watch(state, (newValue) => {
+  console.log('state changed:', newValue)
+}, { deep: true })
+
+// ✅ 侦听对象属性
+watch(() => state.count, (newValue) => {
+  console.log('count changed:', newValue)
+})
+</script>
+```
+
+### 立即执行
+
+```vue
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+
+watch(count, (value) => {
+  console.log('count:', value)
+}, { immediate: true })  // 立即执行一次
+</script>
+```
+
+### 停止侦听
+
+```vue
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+
+const stop = watch(count, (value) => {
+  console.log('count:', value)
+  
+  if (value >= 10) {
+    stop()  // 停止侦听
+  }
+})
+</script>
+```
+
+## watchEffect：自动依赖追踪
+
+```vue
+<script setup lang="ts">
+import { ref, watchEffect } from 'vue'
+
+const count = ref(0)
+const name = ref('Alice')
+
+watchEffect(() => {
+  // 自动追踪 count 和 name
+  console.log(`${name.value}: ${count.value}`)
+})
+</script>
+```
+
+### watch vs watchEffect
+
+| 特性 | watch | watchEffect |
+| ---- | ----- | ----------- |
+| 依赖追踪 | 手动指定 | 自动追踪 |
+| 访问旧值 | 支持 | 不支持 |
+| 执行时机 | 惰性（默认） | 立即执行 |
+| 适用场景 | 明确的数据源 | 副作用逻辑 |
+
+```vue
+<script setup lang="ts">
+import { ref, watch, watchEffect } from 'vue'
+
+const count = ref(0)
+
+// ✅ watch：需要旧值
+watch(count, (newVal, oldVal) => {
+  console.log(`${oldVal} -> ${newVal}`)
+})
+
+// ✅ watchEffect：自动追踪多个依赖
+watchEffect(() => {
+  console.log(count.value)
+  // 自动追踪 count
+})
+</script>
+```
+
+## 副作用清理
+
+```vue
+<script setup lang="ts">
+import { ref, watchEffect } from 'vue'
+
+const id = ref(1)
+
+watchEffect((onCleanup) => {
+  const controller = new AbortController()
+  
+  fetch(`/api/user/${id.value}`, { signal: controller.signal })
+    .then(res => res.json())
+    .then(data => console.log(data))
+  
+  // 清理函数
+  onCleanup(() => {
+    controller.abort()
+  })
+})
+</script>
+```
+
+## 执行时机
+
+### flush 选项
+
+```vue
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+
+// pre（默认）：组件更新前
+watch(count, () => {
+  console.log('pre')
+}, { flush: 'pre' })
+
+// post：组件更新后
+watch(count, () => {
+  console.log('post')
+}, { flush: 'post' })
+
+// sync：同步执行
+watch(count, () => {
+  console.log('sync')
+}, { flush: 'sync' })
+</script>
+```
+
+### watchPostEffect / watchSyncEffect
+
+```vue
+<script setup lang="ts">
+import { ref, watchPostEffect, watchSyncEffect } from 'vue'
+
+const count = ref(0)
+
+// 等价于 watchEffect(..., { flush: 'post' })
+watchPostEffect(() => {
+  console.log('DOM updated')
+})
+
+// 等价于 watchEffect(..., { flush: 'sync' })
+watchSyncEffect(() => {
+  console.log('sync')
+})
+</script>
+```
+
+## 最佳实践
+
+### ✅ 优先使用 computed
+
+```vue
+<!-- ❌ 使用 watch 计算派生值 -->
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+const double = ref(0)
+
+watch(count, (val) => {
+  double.value = val * 2
+})
+</script>
+
+<!-- ✅ 使用 computed -->
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+
+const count = ref(0)
+const double = computed(() => count.value * 2)
+</script>
+```
+
+### ✅ 避免在 watch 中修改被侦听的值
+
+```vue
+<!-- ❌ 可能导致无限循环 -->
+<script setup lang="ts">
+import { ref, watch } from 'vue'
+
+const count = ref(0)
+
+watch(count, (val) => {
+  count.value = val + 1  // ❌ 无限循环
+})
+</script>
+```
+
+### ✅ 使用 watchEffect 处理副作用
+
+```vue
+<script setup lang="ts">
+import { ref, watchEffect } from 'vue'
+
+const userId = ref(1)
+
+watchEffect(async () => {
+  const response = await fetch(`/api/user/${userId.value}`)
+  const data = await response.json()
+  console.log(data)
+})
+</script>
+```
+
+下一章 [API 风格](/vue/api-styles) 对比 Options API 和 Composition API。

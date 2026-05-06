@@ -1,0 +1,475 @@
+---
+title: 其他布局
+description: 流式布局、浮动、多列、object-fit、表格、列表与图像滤镜
+---
+
+# 其他布局
+
+Flex 与 Grid 之外，CSS 仍保留了若干"前现代"的布局模型。其中部分（如多列、`object-fit`）在特定场景仍是最优解；另一些（浮动）已被 Flex / Grid 替代但偶尔需要维护遗留代码。
+
+## 流式布局（Normal Flow）
+
+CSS 的默认布局模式：
+
+- **块元素**自上而下垂直堆叠
+- **行内元素**水平流动，在行末换行
+- 内容超出容器边界时溢出（受 `overflow` 控制）
+
+```html
+<p>Flow lays out elements top to bottom.</p>
+<p>Inline elements <em>flow</em> like text.</p>
+```
+
+#### `overflow`
+
+```css
+.container {
+  overflow: visible;                          /* 默认：溢出可见 */
+  overflow: hidden;                           /* 裁切（不可滚动） */
+  overflow: scroll;                           /* 始终显示滚动条 */
+  overflow: auto;                             /* 需要时显示滚动条 */
+  overflow: clip;                             /* 严格裁切（不创建 BFC，不允许编程滚动） */
+}
+
+.container {
+  overflow-x: auto;
+  overflow-y: hidden;
+  overflow: hidden auto;                      /* x / y 简写 */
+}
+```
+
+`clip` 是 2023 后广泛支持的现代值——比 `hidden` 更轻量，不创建 BFC、不参与滚动链。适合纯视觉裁切。
+
+#### 滚动行为
+
+```css
+.container {
+  scroll-behavior: smooth;                     /* 平滑滚动（点击锚点也会平滑） */
+  scrollbar-width: thin;                        /* 标准属性，部分浏览器支持 */
+  scrollbar-color: gray transparent;
+  scrollbar-gutter: stable;                     /* 始终保留滚动条空间，避免内容跳动 */
+}
+```
+
+#### 隐藏滚动条但保留滚动
+
+```css
+.scroll {
+  overflow: auto;
+  scrollbar-width: none;                       /* Firefox */
+  -ms-overflow-style: none;                    /* 旧 Edge */
+}
+.scroll::-webkit-scrollbar { display: none; }   /* Chrome / Safari */
+```
+
+#### Tailwind
+
+```html
+<div class="overflow-hidden">裁切</div>
+<div class="overflow-y-auto">垂直滚动</div>
+<div class="overflow-x-auto whitespace-nowrap">横向滚动栏（菜单 / 标签）</div>
+<div class="scroll-smooth">平滑</div>
+```
+
+## 浮动（Float）
+
+历史上的列布局工具，**已不推荐用于布局**——Flex / Grid 全面替代。仍有一个原生用例：**让文字环绕图像**。
+
+```css
+.figure {
+  float: left;
+  margin: 0 16px 16px 0;
+}
+```
+
+```html
+<article>
+  <img class="figure" src="..." />
+  <p>Long text that wraps around the image...</p>
+</article>
+```
+
+#### 清除浮动（仅维护遗留代码时用）
+
+```css
+.clearfix::after {
+  content: '';
+  display: block;
+  clear: both;
+}
+
+/* 现代等价：父元素加 display: flow-root */
+.parent { display: flow-root; }
+```
+
+#### Tailwind
+
+```html
+<img class="float-left mr-4 mb-4" src="..." />
+<div class="clear-both"></div>
+```
+
+## 多列布局（CSS Multi-column）
+
+让长内容自动分到多列，模拟报纸排版：
+
+```css
+.article {
+  column-count: 3;
+  column-gap: 32px;
+  column-rule: 1px solid #ddd;
+}
+
+.article {
+  column-width: 280px;                         /* 自动按宽度决定列数 */
+  column-gap: 32px;
+}
+```
+
+#### `break-inside`
+
+避免段落 / 图片被切到两列：
+
+```css
+img, h2 { break-inside: avoid; }
+```
+
+#### Tailwind
+
+```html
+<div class="columns-3 gap-8">
+  <p>...</p>
+</div>
+
+<div class="columns-[280px] gap-8">自适应列数</div>
+
+<img class="break-inside-avoid" />
+```
+
+## `object-fit` 与 `object-position`
+
+控制 `<img>` / `<video>` 在容器内的填充方式（类似 `background-size` / `background-position`）：
+
+```css
+.thumbnail {
+  width: 200px;
+  height: 200px;
+  object-fit: cover;                           /* 覆盖容器，可能裁切 */
+  object-position: center;
+}
+```
+
+| 值 | 行为 |
+| -- | ---- |
+| `fill` | 默认，拉伸到完全填满（变形） |
+| `contain` | 等比缩放，完整可见，可能留白 |
+| `cover` | 等比缩放，覆盖容器，可能裁切 |
+| `none` | 原始尺寸 |
+| `scale-down` | 取 `none` 与 `contain` 中的较小者 |
+
+#### Tailwind
+
+```html
+<img class="w-48 h-48 object-cover object-center" src="..." />
+<img class="object-contain" src="..." />
+```
+
+## 表格
+
+```html
+<table>
+  <thead>
+    <tr><th>Name</th><th>Age</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>js</td><td>20</td></tr>
+  </tbody>
+</table>
+```
+
+```css
+table {
+  border-collapse: collapse;                   /* 相邻边框合并 */
+  width: 100%;
+}
+th, td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+tbody tr:nth-child(odd) { background: #f9f9f9; }
+tbody tr:hover { background: #f3f4f6; }
+```
+
+#### `table-layout`
+
+```css
+table { table-layout: auto; }                  /* 默认：根据内容决定列宽 */
+table { table-layout: fixed; }                 /* 固定：按首行 + 显式宽度，性能更好 */
+```
+
+大表格用 `fixed` 大幅提升渲染性能。
+
+#### 粘性表头
+
+```css
+table { border-collapse: separate; border-spacing: 0; }
+thead th {
+  position: sticky;
+  top: 0;
+  background: white;
+  z-index: 1;
+}
+```
+
+#### 用 Grid 替代 table 布局
+
+非数据型"表格状"布局应用 Grid：
+
+```html
+<div class="grid grid-cols-[120px_1fr] gap-x-4 gap-y-2">
+  <dt>Name</dt><dd>js</dd>
+  <dt>Age</dt><dd>20</dd>
+</div>
+```
+
+`<table>` 只用于"真正的二维数据"（含语义价值）。
+
+## 列表样式
+
+```css
+ul { list-style-type: disc; }                  /* 实心圆 */
+ul { list-style-type: circle; }                /* 空心圆 */
+ul { list-style-type: square; }
+ol { list-style-type: decimal; }               /* 1, 2, 3 */
+ol { list-style-type: lower-alpha; }           /* a, b, c */
+ol { list-style-type: upper-roman; }           /* I, II, III */
+ol { list-style-type: simp-chinese-informal; } /* 一, 二, 三 */
+
+ul { list-style-position: inside; }            /* 标记符在内边距内 */
+ul { list-style-image: url('icon.svg'); }      /* 自定义图标（推荐用 ::marker） */
+```
+
+#### 自定义标记
+
+```css
+ul { list-style: none; padding: 0; }
+li::before {
+  content: '→';
+  display: inline-block;
+  width: 1em;
+  color: blue;
+}
+
+/* 现代：::marker */
+li::marker {
+  color: blue;
+  content: '→ ';
+}
+```
+
+#### Tailwind
+
+```html
+<ul class="list-disc pl-5">默认</ul>
+<ol class="list-decimal pl-5">编号</ol>
+<ul class="list-none">无</ul>
+```
+
+## 图像滤镜
+
+详见 [颜色与背景](/css/colors-backgrounds#滤镜)。
+
+```css
+img:hover { filter: brightness(1.1) saturate(1.1); }
+img.preview { filter: blur(8px); }
+.glass { backdrop-filter: blur(10px); }
+```
+
+`backdrop-filter` 性能开销较大，避免用在大量元素上。
+
+## 混合模式（mix-blend-mode）
+
+让元素与下层混合：
+
+```css
+.overlay {
+  mix-blend-mode: multiply;                    /* 像 Photoshop 的"正片叠底" */
+}
+```
+
+| 值 | 用途 |
+| -- | ---- |
+| `multiply` | 暗化叠加（保留深色） |
+| `screen` | 亮化叠加（保留浅色） |
+| `overlay` | 增强对比 |
+| `difference` | 反相 |
+
+```css
+h1 {
+  mix-blend-mode: difference;
+  color: white;
+}
+/* 文字在浅背景上自动变深，深背景上自动变浅 */
+```
+
+## 形状外裁（clip-path）
+
+```css
+.x { clip-path: circle(50% at center); }
+.x { clip-path: ellipse(40% 30%); }
+.x { clip-path: polygon(0 0, 100% 0, 100% 75%, 50% 100%, 0 75%); }
+.x { clip-path: inset(10% 20%); }
+.x { clip-path: path('M 10 10 ... '); }
+```
+
+```css
+/* 渐变文字（裁切到文字形状 + 渐变背景） */
+.gradient-text {
+  background: linear-gradient(to right, #1d4ed8, #db2777);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+```
+
+```html
+<h1 class="bg-gradient-to-r from-blue-600 to-pink-600 bg-clip-text text-transparent">
+  渐变文字
+</h1>
+```
+
+## 形状（shape-outside）
+
+让浮动元素旁的文字以非矩形形状环绕：
+
+```css
+.figure {
+  float: left;
+  width: 200px;
+  height: 200px;
+  shape-outside: circle(50%);
+  margin: 0 16px 16px 0;
+}
+```
+
+文字会环绕成圆形而非方形——杂志风排版的稀缺工具。仅在浮动元素上生效。
+
+## CSS Containment
+
+```css
+.widget {
+  contain: layout;                             /* 内部布局变化不影响外部 */
+  contain: paint;                              /* 内容不溢出绘制 */
+  contain: style;                              /* 计数器 / 引用不泄漏 */
+  contain: size;                               /* 尺寸独立于内容 */
+  contain: content;                            /* 上面四个的子集（推荐起点） */
+}
+```
+
+`contain` 让浏览器知道"这个元素的变化不会影响外部"，可大幅优化重渲染。配合 `content-visibility: auto` 是长列表 / 长文档优化的核心：
+
+```css
+.long-section {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 500px;           /* 占位高度 */
+}
+```
+
+## 实战配方
+
+### 1. 横向滚动菜单
+
+```css
+.scroll-x {
+  display: flex;
+  overflow-x: auto;
+  gap: 12px;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+.scroll-x > * {
+  scroll-snap-align: start;
+  flex: none;
+}
+```
+
+```html
+<div class="flex overflow-x-auto gap-3 snap-x snap-mandatory">
+  <div class="snap-start flex-none">A</div>
+  <div class="snap-start flex-none">B</div>
+</div>
+```
+
+`scroll-snap` 让滚动停在每个项目对齐位置——卡片轮播 / Story 风格滑动的核心 API。
+
+### 2. 等比图片
+
+```css
+.thumbnail {
+  aspect-ratio: 4 / 3;
+  width: 100%;
+  object-fit: cover;
+}
+```
+
+### 3. 渐隐边缘的横向滚动
+
+```css
+.fade-scroll {
+  display: flex;
+  overflow-x: auto;
+  mask-image: linear-gradient(to right, transparent, black 16px, black calc(100% - 16px), transparent);
+}
+```
+
+`mask-image` 用渐变让滚动条边缘渐隐——视觉提示"还有更多内容"。
+
+### 4. 文字环绕图像
+
+```css
+img.figure {
+  float: left;
+  shape-outside: circle(50%);
+  shape-margin: 1rem;
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  margin: 0 1rem 1rem 0;
+}
+```
+
+### 5. 不规则裁切
+
+```css
+.banner {
+  clip-path: polygon(0 0, 100% 0, 100% 90%, 50% 100%, 0 90%);
+}
+```
+
+底部不平整切口——典型的"营销页 hero"装饰。
+
+### 6. 长列表性能优化
+
+```css
+.feed-item {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 200px;
+}
+```
+
+```html
+<div class="content-visibility-auto [contain-intrinsic-size:1px_200px]">...</div>
+```
+
+或在 React 中按页虚拟化（[`@tanstack/react-virtual`](https://tanstack.com/virtual)）。
+
+## 小结
+
+- 流式布局是 CSS 默认的"自上而下、行内流动"模式，所有其他布局都建立在其上；
+- 浮动已不再用于布局，仅在"图文环绕"场景仍有原生用途；
+- 多列适合长内容自动分栏（文章、术语表），用 `column-width` 自适应；
+- `object-fit: cover` + `aspect-ratio` 让等比图片占位标准化；
+- 表格仅用于真正的二维数据，"表格状"布局用 Grid；
+- `clip-path` / `mask-image` / `mix-blend-mode` 让纯 CSS 实现复杂视觉效果；
+- `content-visibility: auto` + `contain` 是长内容性能优化的现代方案。

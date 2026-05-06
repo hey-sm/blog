@@ -1,0 +1,314 @@
+---
+title: 命名空间
+description: TypeScript 命名空间 Namespaces：模块增强、全局增强、三斜线指令、命名空间 vs 模块的抉择
+---
+
+# 命名空间
+
+命名空间（Namespace）是一种在内部组织代码的方式。在现代 TypeScript 中，ES Modules 通常是更好的选择，但命名空间在某些场景下仍然有用。
+
+## namespace 基础
+
+### 声明命名空间
+
+```ts
+namespace Validation {
+  export interface StringValidator {
+    isValid(s: string): boolean
+  }
+
+  const lettersRegexp = /^[A-Za-z]+$/
+
+  export class LettersOnlyValidator implements StringValidator {
+    isValid(s: string) {
+      return lettersRegexp.test(s)
+    }
+  }
+}
+
+// 外部使用
+const validator: Validation.StringValidator = new Validation.LettersOnlyValidator()
+validator.isValid('Hello')  // true
+```
+
+### 嵌套命名空间
+
+```ts
+namespace App {
+  export namespace Services {
+    export class AuthService {
+      login(email: string, password: string) { /* ... */ }
+    }
+  }
+
+  export namespace Models {
+    export interface User {
+      id: number
+      name: string
+    }
+  }
+}
+
+const authService = new App.Services.AuthService()
+const user: App.Models.User = { id: 1, name: 'Alice' }
+```
+
+### 跨文件合并
+
+```ts filename="validation.ts"
+namespace Validation {
+  export interface StringValidator {
+    isValid(s: string): boolean
+  }
+}
+```
+
+```ts filename="letters-validator.ts"
+/// <reference path="validation.ts" />
+
+namespace Validation {
+  export class LettersOnlyValidator implements StringValidator {
+    isValid(s: string) {
+      return /^[A-Za-z]+$/.test(s)
+    }
+  }
+}
+```
+
+## 三斜线指令
+
+`/// <reference />` 指令用于声明文件之间的依赖关系：
+
+```ts
+// ✅ 引用类型声明文件
+/// <reference types="node" />
+
+// ✅ 引用路径
+/// <reference path="./validation.ts" />
+
+// ✅ 引用库
+/// <reference lib="es2017.string" />
+```
+
+**实际使用场景**：
+
+```ts filename="src/types/global.d.ts"
+/// <reference types="vite/client" />
+/// <reference types="vitest/globals" />
+
+// 此文件会自动包含所有三斜线引用的类型
+```
+
+## declare 与模块增强
+
+### declare module（模块增强）
+
+```ts
+// ✅ 扩展已有模块的类型
+declare module 'express-session' {
+  interface SessionData {
+    userId: number
+    role: string
+    lastLoginAt: Date
+  }
+}
+
+// ✅ 声明纯 JS 模块的类型
+declare module 'untyped-js-lib' {
+  export function doSomething(value: string): number
+  export const VERSION: string
+}
+
+// ✅ 使用通配符声明匹配多个模块
+declare module '*.graphql' {
+  const content: string
+  export default content
+}
+```
+
+### declare global（全局增强）
+
+```ts
+// ✅ 扩展全局作用域
+declare global {
+  interface Window {
+    __INITIAL_STATE__: Record<string, unknown>
+  }
+
+  interface Array<T> {
+    last(): T | undefined
+  }
+
+  const IS_PRODUCTION: boolean
+}
+
+export {}  // 确保这是模块增强而非全局脚本
+```
+
+### declare namespace
+
+```ts
+// ✅ 声明第三方库的命名空间类型
+declare namespace JQuery {
+  interface AjaxSettings {
+    url: string
+    method?: 'GET' | 'POST'
+    data?: Record<string, unknown>
+  }
+
+  function ajax(settings: AjaxSettings): Promise<unknown>
+}
+
+// 使用
+JQuery.ajax({ url: '/api/data', method: 'GET' })
+```
+
+## 模块增强实战
+
+### React 场景——增强第三方组件
+
+```tsx filename="src/types/react-table.d.ts"
+import 'react-table'
+
+declare module 'react-table' {
+  export interface TableOptions<D extends Record<string, unknown>>
+    extends UseExpandedOptions<D>,
+      UseFiltersOptions<D>,
+      UseSortByOptions<D> {}
+
+  export interface Hooks<D extends Record<string, unknown>>
+    extends UseExpandedHooks<D>,
+      UseFiltersHooks<D>,
+      UseSortByHooks<D> {}
+}
+```
+
+### Next.js 场景——增强 Page 类型
+
+```ts filename="src/types/next.d.ts"
+declare module 'next' {
+  interface PageProps {
+    _nextI18Next?: {
+      initialLocale: string
+    }
+  }
+}
+```
+
+### 增强 Nuxt/Vue 场景
+
+```ts filename="src/types/vue.d.ts"
+export {}
+
+declare module '#app' {
+  interface NuxtApp {
+    $analytics: {
+      track: (event: string, data?: Record<string, unknown>) => void
+    }
+  }
+}
+
+declare module '@vue/runtime-core' {
+  interface ComponentCustomProperties {
+    $analytics: {
+      track: (event: string, data?: Record<string, unknown>) => void
+    }
+  }
+}
+```
+
+## namespace vs module
+
+| 特性 | namespace | module (ES Modules) |
+|------|-----------|---------------------|
+| 作用域 | 全局 Script | 文件级隔离 |
+| 加载方式 | 依赖 `<reference>` 或手动引用 | 标准 import/export |
+| 运行环境 | 浏览器 `<script>` | 现代运行时 + 打包工具 |
+| 代码拆分 | 需手动管理 | 原生支持 |
+| 推荐度 | 不推荐新项目 | ✅ 推荐 |
+
+**现代 TypeScript 中 namespace 的两大用途**：
+1. 类型声明文件的内部组织
+2. 声明合并与模块/全局增强
+
+## 陷阱
+
+### 1. namespace 不能与 import 混用
+
+```ts
+// ❌ 错误
+import { something } from 'module'
+namespace MyNamespace {  // import 与 namespace 不能在同一文件
+  export function helper() {}
+}
+
+// ✅ 分离到不同文件，或改用 module
+```
+
+### 2. 三斜线指令容易被遗忘
+
+```ts
+// ❌ 如果删除了 /// <reference /> 但保留了 namespace，
+// 类型合并可能悄无声息地失败
+```
+
+### 3. declare namespace 与 declare module 的区别
+
+```ts
+// ⚠️ declare namespace：声明全局命名空间（旧式）
+declare namespace MyLib {
+  function doWork(): void
+}
+
+// ✅ declare module：声明模块类型（新式、推荐）
+declare module 'my-lib' {
+  function doWork(): void
+}
+```
+
+## 最佳实践
+
+### ✅ 新项目使用 ES Modules
+
+```ts
+// ✅ 使用标准模块系统
+export interface Validator {
+  isValid(value: unknown): boolean
+}
+
+export class EmailValidator implements Validator {
+  isValid(value: unknown): boolean {
+    return typeof value === 'string' && value.includes('@')
+  }
+}
+```
+
+### ✅ namespace 仅用于类型声明文件的内部结构
+
+```ts
+// ✅ .d.ts 内部可以用 namespace 组织
+declare namespace MyLib {
+  namespace Internal {
+    interface CacheEntry<T> {
+      key: string
+      value: T
+    }
+  }
+
+  function get<T>(key: string): T | undefined
+}
+```
+
+### ✅ 使用 declare module 增强第三方库
+
+```ts
+// ✅ 无需修改 node_modules 即可补充类型
+declare module 'socket.io' {
+  interface Socket {
+    userId?: string
+    joinRoom(room: string): void
+  }
+}
+```
+
+下一章 [React + TypeScript 基础](/ts/react-typescript) 介绍 React 项目中 TypeScript 的类型标注方法。

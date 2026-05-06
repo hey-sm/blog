@@ -1,0 +1,20 @@
+export default {
+  index: '导读',
+  introduction: '语言介绍',
+  variables: '变量',
+  'data-types': '数据类型',
+  'type-casting': '类型转换',
+  'data-structures': '数据结构',
+  equality: '相等性比较',
+  operators: '表达式与运算符',
+  'control-flow': '控制流',
+  loops: '循环与迭代',
+  functions: '函数',
+  this: 'this 关键字',
+  async: '异步',
+  modules: '模块',
+  'iterators-classes': '迭代器、类与 API',
+  memory: '内存管理',
+  devtools: '开发者工具',
+  'strict-mode': '严格模式'
+}

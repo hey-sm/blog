@@ -1,0 +1,570 @@
+---
+title: 最佳实践
+description: 性能、无障碍、调试与可维护性
+---
+
+# 最佳实践
+
+本章覆盖 CSS 工程的三大维度：**性能**（让浏览器渲染更快）、**无障碍**（让所有用户能用）、**调试与维护**（让团队能持续协作）。
+
+## 性能
+
+### 渲染流水线
+
+```text
+JS / 用户交互
+    ↓
+Style 计算            ← 谁的样式变了？
+    ↓
+Layout（重排）         ← 几何位置 / 尺寸变了？
+    ↓
+Paint（重绘）          ← 颜色 / 阴影变了？
+    ↓
+Composite（合成）       ← 合成层位置 / 透明度变了？
+    ↓
+显示帧
+```
+
+每一步都比上一步代价低。**改 transform / opacity** 只触发 Composite——最便宜；**改 width / height / top** 触发 Layout——最贵。
+
+#### 黄金法则
+
+| 改 | 触发 | 性能 |
+| -- | ---- | ---- |
+| `transform` | composite | 最快（GPU） |
+| `opacity` | composite | 最快 |
+| `filter` | composite | 快 |
+| `background-color` | paint | 中 |
+| `box-shadow` | paint | 中 |
+| `border-radius` | paint | 中 |
+| `width` / `height` | layout | 慢 |
+| `padding` / `margin` | layout | 慢 |
+| `top` / `left` | layout | 慢 |
+| `font-size` | layout | 慢 |
+| `display` | layout | 慢 |
+
+**动画只用 transform 与 opacity**——这条规则远比"加 will-change"更重要。
+
+### 避免 layout thrashing
+
+```js
+// ✗ 强制同步布局：循环中读 → 写 → 读
+elements.forEach(el => {
+  const w = el.offsetWidth                    // 读：触发 layout
+  el.style.width = w * 2 + 'px'                // 写
+  console.log(el.offsetHeight)                 // 读：再次触发 layout
+})
+
+// ✓ 批读 + 批写
+const widths = elements.map(el => el.offsetWidth)
+elements.forEach((el, i) => el.style.width = widths[i] * 2 + 'px')
+```
+
+### `content-visibility`
+
+```css
+.section {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 500px;
+}
+```
+
+让浏览器**跳过屏幕外内容的 layout / paint**——长文章 / 长列表性能巨大提升。
+
+测量数据：在 1 万项的列表上启用 `content-visibility: auto`，初次渲染时间从 2300ms 降到 60ms。
+
+### `contain`
+
+```css
+.widget {
+  contain: layout paint;                       /* 内部变化不影响外部 */
+}
+```
+
+适合"独立的自给自足组件"——通知、卡片、tooltip。
+
+### `will-change`
+
+```css
+.draggable { will-change: transform; }
+```
+
+提示浏览器预留合成层。但：
+
+- **不要在静态元素上使用**——浪费内存
+- 动画结束后及时移除
+- 多数情况下不需要——浏览器会自动处理 `transition` / `animation` 中的属性
+
+```js
+btn.addEventListener('mouseenter', () => btn.style.willChange = 'transform')
+btn.addEventListener('animationend', () => btn.style.willChange = '')
+```
+
+### CSS 体积优化
+
+#### 1. 移除未使用的 CSS
+
+```bash
+# Vite 内置 Lightning CSS 已处理
+# 第三方库残留：用 PurgeCSS / Tailwind 自带的 JIT
+```
+
+Tailwind 4 的 JIT 模式**只生成实际用到的类**——上手即享受树摇优化。
+
+#### 2. 关键 CSS 内联
+
+把首屏所需的少量 CSS 直接内联到 `<head>`，非关键 CSS 异步加载：
+
+```html
+<head>
+  <style>/* 关键 CSS：首屏所需 */</style>
+  <link rel="preload" href="/styles/main.css" as="style" onload="this.rel='stylesheet'">
+</head>
+```
+
+工具：[critters](https://github.com/GoogleChromeLabs/critters)、[critical](https://github.com/addyosmani/critical)。Next.js 内置该优化。
+
+#### 3. 字体优化
+
+- **`font-display: swap`**：fallback 立即可见，避免 FOIT
+- **预加载关键字体**：`<link rel="preload" as="font">`
+- **子集化**：只加载需要的字符（中文字体专用工具：[fontmin](https://github.com/ecomfe/fontmin)）
+- **可变字体**：一个文件覆盖所有字重
+
+#### 4. 避免 `@import` 在 CSS 内
+
+```css
+/* ✗ 串行加载，阻塞 */
+@import 'a.css';
+@import 'b.css';
+```
+
+改为构建期合并（webpack / Vite 自动处理）或 `<link rel="stylesheet">` 并发加载。
+
+### 选择器性能
+
+浏览器从右向左匹配选择器：
+
+```css
+.menu li a { ... }
+/* 匹配过程：先找所有 a → 检查父链是否含 li → 再含 .menu */
+```
+
+对**绝大多数应用**，选择器性能差异在毫秒级，不必过度优化。仅在以下场景留意：
+
+- 数千 DOM 节点
+- 频繁全局重绘（如主题切换）
+- 浮动 / 动画元素与复杂选择器配合
+
+### 实战：优化清单
+
+#### 首屏
+
+- ✅ 关键 CSS 内联
+- ✅ 字体预加载 + `font-display: swap`
+- ✅ 减少阻塞的 `<link rel="stylesheet">`
+- ✅ 长内容用 `content-visibility: auto`
+
+#### 交互
+
+- ✅ 动画只用 `transform` / `opacity`
+- ✅ 避免在事件回调中频繁读取布局信息
+- ✅ `will-change` 仅用于即将动画的元素
+- ✅ 大量元素的 hover 用 CSS-only（避免 JS 监听）
+
+#### 包大小
+
+- ✅ Tailwind JIT 或 PurgeCSS
+- ✅ 移除未用的第三方组件库
+- ✅ 子集化字体
+
+## 无障碍（A11y）
+
+### 颜色对比度
+
+WCAG 2.1 要求：
+
+| 级别 | 普通文字 | 大文字（≥18pt） |
+| ---- | -------- | --------------- |
+| AA | 4.5:1 | 3:1 |
+| AAA | 7:1 | 4.5:1 |
+
+#### 工具
+
+- Chrome DevTools 的 Issues / Lighthouse / [WebAIM Contrast Checker](https://webaim.org/resources/contrastchecker/)
+- VS Code 插件 `Color Highlight`、`vscode-contrast`
+- Figma 插件 [Stark](https://www.getstark.co/)
+
+#### `currentColor` + 系统色
+
+```css
+button {
+  border: 2px solid currentColor;
+  /* 强制颜色模式（Windows 高对比）下：currentColor 是 ButtonText */
+}
+
+@media (forced-colors: active) {
+  button {
+    border: 2px solid CanvasText;
+  }
+}
+```
+
+### 焦点指示
+
+```css
+/* ✗ 移除焦点指示——破坏键盘可访问性 */
+*:focus { outline: none; }
+
+/* ✓ 区分鼠标与键盘 */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;                              /* 鼠标点击不显示 outline */
+}
+```
+
+或使用 Tailwind 的 `focus-visible:ring-2`。
+
+### 减少动画偏好
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+```
+
+```html
+<div class="transition motion-reduce:transition-none">...</div>
+<div class="animate-spin motion-reduce:animate-none">...</div>
+```
+
+避免对前庭系统敏感人群造成不适——禁不动画也比强行播放好。
+
+### 屏幕阅读器友好
+
+#### 视觉隐藏但可读
+
+```css
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+```
+
+```html
+<button>
+  <Icon />
+  <span class="sr-only">Close</span>
+</button>
+```
+
+#### `display: none` vs `visibility: hidden` vs `aria-hidden`
+
+| 方式 | 屏幕阅读器 | 视觉 | 占位 |
+| ---- | ---------- | ---- | ---- |
+| `display: none` | ❌ | ❌ | ❌ |
+| `visibility: hidden` | ❌ | ❌ | ✅ |
+| `aria-hidden="true"` | ❌ | ✅ | ✅ |
+| `.sr-only` | ✅ | ❌ | 几乎无 |
+
+### 触摸目标尺寸
+
+WCAG 2.5.5：交互目标至少 **44 × 44 CSS 像素**：
+
+```css
+.btn {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+@media (pointer: coarse) {                    /* 触屏 */
+  .btn { min-height: 48px; }
+}
+```
+
+```html
+<button class="min-h-11 min-w-11">...</button>
+```
+
+### 字体单位
+
+```css
+:root { font-size: 100%; }                    /* 尊重用户偏好（默认 16px） */
+```
+
+不要写 `font-size: 14px` 锁死字号——让用户能放大。
+
+#### 媒体查询用 em 而非 px
+
+```css
+@media (min-width: 48em) { ... }              /* 正确 */
+@media (min-width: 768px) { ... }             /* 用户调大字号后断点不变 */
+```
+
+### 文本对比度与字重
+
+```css
+/* ✗ 浅色字 + 浅色背景 */
+.subtle { color: #999; background: #f5f5f5; }
+
+/* ✓ 至少 4.5:1 对比度 */
+.subtle { color: #595959; background: #f5f5f5; }
+```
+
+避免 `font-weight: 100~300` 配低对比度——薄字本身可读性差。
+
+### 表单可访问性
+
+```html
+<!-- ✗ 仅 placeholder 当 label -->
+<input placeholder="Email" />
+
+<!-- ✓ 显式 label -->
+<label for="email">Email</label>
+<input id="email" type="email" />
+
+<!-- 或视觉隐藏的 label -->
+<label for="search" class="sr-only">Search</label>
+<input id="search" type="search" placeholder="Search…" />
+```
+
+### 颜色不是唯一信息载体
+
+```html
+<!-- ✗ 仅靠红色表示错误 -->
+<input style="border-color: red" />
+
+<!-- ✓ 红色 + 图标 + 文字 -->
+<input class="border-red-500" aria-invalid="true" aria-describedby="err" />
+<p id="err"><Icon /> Email is invalid</p>
+```
+
+色盲 / 低对比环境下，颜色是不可靠的唯一信号。
+
+## 调试
+
+### Chrome DevTools
+
+#### Elements 面板
+
+- 选中元素 → 右侧 Styles / Computed
+- 右键行号 → 切换属性、复制规则
+- `:hov` 按钮强制状态（hover / focus / active）
+- Layout 面板：Flex / Grid 可视化（叠加网格线、轴线）
+
+#### Performance 面板
+
+录制交互 → 火焰图找 long task：
+
+- **Style 阶段**：选择器复杂度
+- **Layout 阶段**：哪些元素被重排
+- **Paint 阶段**：哪些区域被重绘
+
+底部 "Layout shifts" 直接显示 CLS（Cumulative Layout Shift）发生位置。
+
+#### Rendering 面板
+
+`Cmd + Shift + P` → "Show Rendering"。勾选：
+
+- **Paint flashing**：高亮被重绘的区域
+- **Layout shift regions**：高亮发生 CLS 的区域
+- **Frame rendering stats**：实时 FPS 与 GPU 内存
+- **CSS Overview**：项目 CSS 健康度概览
+
+### CSS 调试技巧
+
+#### 1. 临时 outline 全部元素
+
+```css
+* { outline: 1px solid red; }
+```
+
+或 [`pesticide.css`](https://github.com/mrmrs/pesticide)——一行调试整页布局。
+
+#### 2. 高亮当前元素的所有 stacking context
+
+```js
+// DevTools Console
+$0.style.outline = '2px solid lime'
+```
+
+#### 3. Tab 顺序检查
+
+DevTools Issues 面板显示焦点陷阱、tab 顺序错误。
+
+#### 4. CSS Variables 断点
+
+Sources 面板 → 在 `:root` 上断点，单步看变量赋值过程。
+
+### 字体加载调试
+
+```js
+document.fonts.ready.then(() => {
+  console.log('All fonts loaded')
+})
+
+document.fonts.forEach(font => console.log(font.family, font.status))
+```
+
+### 视口相关 bug
+
+iOS Safari 的视口高度变化是高频 bug：
+
+```css
+/* ✗ 使用 100vh：地址栏隐藏时页面下沉 */
+.hero { height: 100vh; }
+
+/* ✓ 使用 100dvh */
+.hero { height: 100dvh; }
+```
+
+## 可维护性
+
+### 1. 一致的命名
+
+无论选哪种约定（BEM / kebab-case / camelCase），团队内统一。
+
+### 2. 抽离令牌
+
+颜色、间距、字号在 `@theme` 集中——避免散落硬编码。
+
+```css
+/* ✗ 散落 */
+.btn { padding: 8px 16px; }
+.input { padding: 8px 12px; }
+.card { padding: 16px; }
+
+/* ✓ 令牌 */
+@theme {
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+}
+.btn { padding: var(--space-2) var(--space-4); }
+```
+
+### 3. 限制嵌套深度
+
+≤ 3 层。深嵌套：
+
+- 提高特异性，难以覆盖
+- 与 DOM 强耦合，重构困难
+- 选择器性能下降
+
+### 4. 单一职责
+
+```css
+/* ✗ 大杂烩 */
+.card-with-icon-and-action-and-meta {
+  display: flex;
+  padding: 16px;
+  background: white;
+  border: 1px solid;
+  ...
+}
+
+/* ✓ 拆分 */
+.card { padding: 16px; background: white; border: 1px solid; }
+.card-icon { ... }
+.card-meta { ... }
+```
+
+### 5. 不要给 utility 加业务逻辑
+
+```css
+/* ✗ */
+.text-error { color: red; font-size: 14px; margin-top: 8px; }
+
+/* ✓ */
+.text-error { color: red; }                   /* utility 单一职责 */
+.form-error { color: red; font-size: 14px; margin-top: 8px; }  /* 业务组件 */
+```
+
+### 6. 用注释解释"为什么"，不解释"是什么"
+
+```css
+/* ✗ */
+.x { width: 100%; }                            /* 设置宽度为 100% */
+
+/* ✓ */
+.x {
+  width: 100%;
+  /* iOS Safari 会缩放 < 16px 的 input 字体，强制设大避免触发 */
+  font-size: 16px;
+}
+```
+
+### 7. 每次改样式问"会不会破坏其他地方？"
+
+- 全局选择器 `*` / `body` / `:root` 的修改影响最大
+- 通用类 `.btn` / `.card` 的修改可能波及多组件
+- 工具或脚本（DevTools "Find by selector"）查找所有引用
+
+## 度量
+
+### Web Vitals 与样式相关
+
+| 指标 | 含义 | 与 CSS 关系 |
+| ---- | ---- | ----------- |
+| **LCP** (Largest Contentful Paint) | 最大内容绘制 | 字体加载、关键 CSS、图像优化 |
+| **INP** (Interaction to Next Paint) | 交互响应 | 避免重排、长任务 |
+| **CLS** (Cumulative Layout Shift) | 布局偏移 | 图像 / 字体 / 动画引发的跳动 |
+
+### 减少 CLS
+
+- **图像 / 视频留 width/height** 或 `aspect-ratio`
+- **字体加载用 `size-adjust`** 减少 FOUT 闪烁
+- **避免动态插入内容**（顶部广告 / 横幅）
+- **`min-height` 占位** 给异步加载内容
+
+```html
+<img src="..." width="800" height="600" />     <!-- 浏览器预留空间 -->
+<div class="aspect-video"><iframe ... /></div>
+```
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter.woff2') format('woff2');
+  font-display: swap;
+  size-adjust: 105%;                          /* 让 Inter 与 fallback 高度匹配 */
+}
+```
+
+## 工具链
+
+| 工具 | 用途 |
+| ---- | ---- |
+| **Stylelint** | CSS Linter |
+| **Prettier** | 格式化 |
+| **Lighthouse** | 性能 / 无障碍审计 |
+| **axe DevTools** | 无障碍专项检测 |
+| **PurgeCSS** | 移除未用 CSS |
+| **PostCSS Sorting** | 属性顺序 |
+| **CSS Stats** | 项目 CSS 体积 / 复杂度统计 |
+
+## 小结
+
+- 性能金字塔：transform / opacity（最快）→ paint 属性（中）→ layout 属性（最慢）；
+- 长内容用 `content-visibility: auto` + `contain-intrinsic-size`；
+- 无障碍优先级：对比度 ≥ 4.5:1、可见焦点指示、`prefers-reduced-motion`、`min-height: 44px` 触摸目标；
+- `:focus-visible` 替代 `:focus`，兼顾键盘与鼠标体验；
+- 调试三件套：Elements / Performance / Rendering 面板；
+- 可维护性靠：一致命名、令牌集中、限制嵌套、单一职责、解释"为什么"的注释；
+- Web Vitals（LCP / INP / CLS）是 CSS 工程的最终度量——优化任何细节都应能反映在这三项指标上。

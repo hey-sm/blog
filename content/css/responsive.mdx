@@ -1,0 +1,548 @@
+---
+title: 响应式
+description: Media Queries、Container Queries、Fluid Typography 与现代响应式策略
+---
+
+# 响应式
+
+响应式设计（Responsive Design）让同一份代码适配从手机到桌面到 4K 屏的全部尺寸。CSS 提供三个层次的工具：
+
+1. **Media Queries**：基于**视口尺寸 / 设备特性**调整样式
+2. **Container Queries**：基于**容器尺寸**调整样式（组件级）
+3. **流式 / 自适应技术**：让单个值随尺寸平滑变化（无断点）
+
+现代项目应**优先用流式技术 + 容器查询**，仅在确实需要"页面级布局重排"时使用 Media Queries。
+
+## Media Queries
+
+### 基本语法
+
+```css
+@media (min-width: 768px) {
+  .container { padding: 32px; }
+}
+
+@media (max-width: 767px) {
+  .nav { display: none; }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  /* 仅在 768~1023 之间 */
+}
+
+@media (orientation: landscape) {
+  /* 横屏 */
+}
+
+@media (prefers-color-scheme: dark) {
+  body { background: black; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; }
+}
+```
+
+### 媒体特性
+
+| 特性 | 含义 |
+| ---- | ---- |
+| `min-width` / `max-width` | 视口宽度 |
+| `min-height` / `max-height` | 视口高度 |
+| `aspect-ratio` | 视口宽高比 |
+| `orientation` | `portrait` / `landscape` |
+| `resolution` | 屏幕 DPI（`min-resolution: 2dppx` 检测高 DPI） |
+| `hover` | `hover` / `none`（设备能否悬停） |
+| `pointer` | `coarse`（触屏）/ `fine`（鼠标） |
+| `prefers-color-scheme` | `light` / `dark` |
+| `prefers-reduced-motion` | `no-preference` / `reduce` |
+| `prefers-contrast` | 用户对比度偏好 |
+| `prefers-reduced-transparency` | 减少透明度偏好 |
+| `forced-colors` | 强制颜色模式（Windows 高对比度） |
+
+#### 检测触屏 vs 鼠标
+
+```css
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover { background: blue; }              /* 仅在鼠标设备显示 hover 效果 */
+}
+
+@media (pointer: coarse) {
+  .btn { min-height: 44px; }                    /* 触屏：增大点击区 */
+}
+```
+
+避免 hover 状态在触屏上"卡住"——因为触屏的 hover 持续到下次点击。
+
+### 范围语法（Media Queries Level 4）
+
+```css
+/* 旧 */
+@media (min-width: 768px) and (max-width: 1023px) { ... }
+
+/* 新（更直观） */
+@media (768px <= width <= 1023px) { ... }
+@media (width >= 768px) { ... }
+```
+
+现代浏览器（2023+）全部支持。
+
+### 断点策略
+
+#### 移动优先（Mobile First）
+
+```css
+/* 默认：手机样式 */
+.container { padding: 16px; }
+
+/* 平板及以上 */
+@media (min-width: 768px) {
+  .container { padding: 24px; }
+}
+
+/* 桌面 */
+@media (min-width: 1024px) {
+  .container { padding: 32px; }
+}
+```
+
+为什么移动优先：
+
+- 默认样式最简——基础属性最少
+- `min-width` 累加比 `max-width` 减法更直观
+- 移动用户量更大，先保证基础体验
+
+#### 桌面优先（不推荐新项目）
+
+```css
+.container { padding: 32px; }
+
+@media (max-width: 1023px) {
+  .container { padding: 24px; }
+}
+
+@media (max-width: 767px) {
+  .container { padding: 16px; }
+}
+```
+
+仅在维护遗留项目时按其约定处理。
+
+### Tailwind 断点
+
+```css
+@theme {
+  --breakpoint-sm: 40rem;                      /* 640px */
+  --breakpoint-md: 48rem;                      /* 768px */
+  --breakpoint-lg: 64rem;                      /* 1024px */
+  --breakpoint-xl: 80rem;                      /* 1280px */
+  --breakpoint-2xl: 96rem;                     /* 1536px */
+}
+```
+
+```html
+<div class="
+  p-4
+  md:p-6
+  lg:p-8
+">...</div>
+```
+
+注意：Tailwind 是**移动优先**——`md:p-6` 等价于 `@media (min-width: 768px) { padding: 1.5rem; }`，不是固定生效在 md 范围内。
+
+#### 任意断点
+
+```html
+<div class="min-[900px]:flex">在 ≥ 900px 时变 flex</div>
+<div class="max-md:hidden">在小于 md 时隐藏</div>
+```
+
+#### 用户偏好变体
+
+```html
+<div class="dark:bg-gray-900 dark:text-white">暗色</div>
+<div class="motion-reduce:transition-none">尊重减少动画偏好</div>
+<div class="forced-colors:border-[ButtonText]">高对比度</div>
+```
+
+## Container Queries
+
+> 容器查询是 2023 年 CSS 最重要的新增——它让组件**基于自身容器尺寸**而非视口尺寸响应。
+
+### 启用
+
+```css
+.card-container {
+  container-type: inline-size;                  /* 监听容器内联尺寸（宽度） */
+  container-name: card;                          /* 可选命名 */
+}
+```
+
+### 查询
+
+```css
+@container card (min-width: 400px) {
+  .card { display: grid; grid-template-columns: 120px 1fr; }
+}
+
+@container card (min-width: 600px) {
+  .card { grid-template-columns: 200px 1fr; }
+  .card-body { font-size: 1.125rem; }
+}
+```
+
+#### 工作原理
+
+```html
+<div class="card-container">
+  <div class="card">
+    <img />
+    <div class="card-body">...</div>
+  </div>
+</div>
+```
+
+无论这个 `.card-container` 出现在侧边栏（窄）还是主内容区（宽），`.card` 都会**根据自身容器宽度**自动切换布局——同一组件在不同上下文表现一致的"容器内响应"。
+
+### 容器查询单位
+
+```css
+.card-body {
+  font-size: 4cqi;                              /* 容器内联尺寸的 4% */
+  padding: 2cqb;                                /* 容器块尺寸的 2% */
+}
+```
+
+让组件内部数值跟随容器线性变化——无需断点。
+
+### 与 Media Queries 的对比
+
+```text
+Media Query：基于视口
+  ┌─────────────────────────────────────┐
+  │  Sidebar（窄）   |   Main（宽）       │
+  │  ┌─────────┐   |   ┌──────────────┐ │
+  │  │  Card   │   |   │     Card     │ │
+  │  └─────────┘   |   └──────────────┘ │
+  └─────────────────────────────────────┘
+  两个 Card 都按"视口大"的样式渲染——sidebar 中的 Card 被挤变形
+
+Container Query：基于容器
+  ┌─────────────────────────────────────┐
+  │  Sidebar       |   Main             │
+  │  ┌─────────┐   |   ┌──────────────┐ │
+  │  │ Stack   │   |   │  Side-by-     │
+  │  │ image + │   |   │  side image + │
+  │  │ text    │   |   │  text         │
+  │  └─────────┘   |   └──────────────┘ │
+  └─────────────────────────────────────┘
+  Card 根据自身容器自动选择布局
+```
+
+容器查询是**组件化设计**的关键工具——组件不再依赖"我在哪"，而是"我有多大"。
+
+### Tailwind 容器查询
+
+```html
+<div class="@container">
+  <div class="@md:flex @md:gap-4">
+    <img class="@md:w-32" />
+    <div>...</div>
+  </div>
+</div>
+```
+
+| Tailwind | CSS |
+| -------- | --- |
+| `@container` | `container-type: inline-size` |
+| `@md:`、`@lg:` | `@container (min-width: ...)` |
+| `@sm:` 默认 24rem / `@md:` 28rem ... | 可在 `@theme` 自定义 |
+
+### 风格查询（@container style）
+
+```css
+.card { container-name: card; container-type: normal; }
+@property --variant {
+  syntax: '<custom-ident>';
+  initial-value: default;
+  inherits: true;
+}
+
+@container card style(--variant: primary) {
+  .btn { background: blue; }
+}
+```
+
+风格查询基于**容器的 CSS 变量值**而非尺寸。仍在普及中，可关注 [caniuse](https://caniuse.com/?search=container-style) 进度。
+
+## 流式排版（Fluid Typography）
+
+无需断点，让字号 / 间距随视口平滑变化：
+
+```css
+h1 {
+  font-size: clamp(1.75rem, 1rem + 4vw, 3.5rem);
+}
+
+.section {
+  padding-block: clamp(2rem, 1rem + 5vw, 6rem);
+}
+```
+
+### 使用 Utopia 生成
+
+[Utopia](https://utopia.fyi/) 是流式排版令牌生成器：输入"小屏字号 / 大屏字号 / 视口范围"，生成 CSS 变量。
+
+```css
+@theme {
+  --text-step--2: clamp(0.6944rem, 0.66rem + 0.1729vw, 0.8rem);
+  --text-step--1: clamp(0.8333rem, 0.7826rem + 0.2536vw, 1rem);
+  --text-step-0:  clamp(1rem, 0.9275rem + 0.3623vw, 1.25rem);
+  --text-step-1:  clamp(1.2rem, 1.0986rem + 0.5072vw, 1.5625rem);
+  --text-step-2:  clamp(1.44rem, 1.3007rem + 0.6964vw, 1.9531rem);
+}
+```
+
+```html
+<h1 style="font-size: var(--text-step-2)">流式标题</h1>
+```
+
+## 响应式图像
+
+### 不同分辨率（同图片）
+
+```html
+<img
+  src="photo-800.jpg"
+  srcset="photo-400.jpg 400w, photo-800.jpg 800w, photo-1600.jpg 1600w"
+  sizes="(max-width: 768px) 100vw, 50vw"
+  alt=""
+/>
+```
+
+`srcset` 提供多种尺寸的图片，`sizes` 告诉浏览器"该图在不同视口下占多大"。浏览器据此选择最合适的版本下载。
+
+### 不同比例（艺术指导）
+
+```html
+<picture>
+  <source media="(min-width: 768px)" srcset="hero-wide.jpg" />
+  <source media="(max-width: 767px)" srcset="hero-tall.jpg" />
+  <img src="hero-default.jpg" alt="" />
+</picture>
+```
+
+桌面用横版、移动用竖版——不同设备给不同图片。
+
+### 现代格式
+
+```html
+<picture>
+  <source type="image/avif" srcset="photo.avif" />
+  <source type="image/webp" srcset="photo.webp" />
+  <img src="photo.jpg" alt="" />
+</picture>
+```
+
+AVIF / WebP 文件比 JPG 小 30-50%；浏览器不支持时回退。
+
+#### Tailwind / Next.js
+
+```tsx
+import Image from 'next/image'
+
+<Image src="/photo.jpg" width={1200} height={600} alt="" />
+```
+
+`next/image` 自动生成 `srcset` / `sizes` / 现代格式，开箱即用响应式图像。
+
+## 响应式策略
+
+### 1. 移动优先 + 渐进增强
+
+默认是移动版，逐级加层：
+
+```css
+.layout { display: block; }                   /* 默认堆叠 */
+@media (min-width: 768px) {
+  .layout { display: grid; grid-template-columns: 240px 1fr; }
+}
+```
+
+### 2. 内容驱动断点
+
+不要依赖"iPhone 是 375px / iPad 是 768px"——用**内容溢出 / 排版破坏**作为断点判据。
+
+工作流：
+
+1. 拉宽浏览器到桌面尺寸
+2. 慢慢缩小，直到布局看起来不舒服
+3. 在那个宽度加断点
+
+这种"内容驱动"的断点比固定的设备尺寸更鲁棒——避免新设备出现就要新加断点。
+
+### 3. 用流式 + 容器查询消除断点
+
+```css
+.hero {
+  container-type: inline-size;
+  padding: clamp(2rem, 5cqi, 6rem);
+}
+
+.hero-title {
+  font-size: clamp(1.5rem, 6cqi, 4rem);
+}
+```
+
+视口变化时，hero 的 padding 与字号都平滑过渡——无需写媒体查询。
+
+### 4. 整体约束 + 局部弹性
+
+```css
+.container {
+  width: min(100% - 2rem, 1200px);             /* 永远留 2rem 边距，最大 1200px */
+  margin-inline: auto;
+}
+```
+
+### 5. 自适应卡片网格
+
+```css
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+}
+```
+
+`auto-fit + minmax` 是无断点响应的杀手锏——视口窄时是 1 列，宽时几列自动算。
+
+```html
+<div class="grid gap-6 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
+  <Card />
+</div>
+```
+
+## 实战配方
+
+### 暗色模式
+
+```css
+:root {
+  color-scheme: light dark;
+  --bg: white;
+  --text: #111;
+}
+
+[data-theme='dark'] {
+  --bg: #111;
+  --text: #f5f5f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #111;
+    --text: #f5f5f5;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+```
+
+或用 `light-dark()`：
+
+```css
+body {
+  background: light-dark(white, #111);
+  color: light-dark(#111, white);
+}
+```
+
+#### Tailwind 4 暗色
+
+```css
+@import 'tailwindcss';
+
+/* 默认基于 prefers-color-scheme */
+/* 或通过 class 触发 */
+@variant dark (&:where(.dark, .dark *));
+```
+
+```html
+<html class="dark">
+  <body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-white">
+```
+
+### 响应式导航
+
+```html
+<nav class="
+  flex items-center justify-between
+  px-4 py-3
+  md:px-8
+">
+  <Logo />
+
+  <!-- 桌面菜单 -->
+  <ul class="hidden md:flex gap-6">
+    <li>...</li>
+  </ul>
+
+  <!-- 移动汉堡按钮 -->
+  <button class="md:hidden">☰</button>
+</nav>
+```
+
+### 流式间距 + 字号系统
+
+```css
+@theme {
+  /* 字号 */
+  --text-base:  clamp(1rem, 0.95rem + 0.25vw, 1.125rem);
+  --text-lg:    clamp(1.125rem, 1.05rem + 0.375vw, 1.25rem);
+  --text-2xl:   clamp(1.5rem, 1.3rem + 1vw, 2rem);
+  --text-4xl:   clamp(2rem, 1.5rem + 2.5vw, 3rem);
+
+  /* 间距 */
+  --space-s: clamp(1rem, 0.875rem + 0.625vw, 1.5rem);
+  --space-m: clamp(1.5rem, 1.25rem + 1.25vw, 2.5rem);
+  --space-l: clamp(2rem, 1.5rem + 2.5vw, 4rem);
+}
+```
+
+### Hero + 卡片网格
+
+```html
+<section class="py-[clamp(3rem,5vw,6rem)]">
+  <h1 class="text-[clamp(2rem,5vw,4rem)] font-bold leading-tight">
+    Welcome
+  </h1>
+  <p class="mt-4 text-[clamp(1rem,1vw+0.5rem,1.25rem)]">
+    流式排版示例
+  </p>
+</section>
+
+<section class="grid gap-6 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
+  <article>...</article>
+</section>
+```
+
+## 测试响应式
+
+- **Chrome DevTools Device Toolbar**（`Cmd/Ctrl + Shift + M`）模拟尺寸 / 设备 / 网络
+- 真机测试不可省——模拟器无法重现触屏延迟、字体渲染、相机噪点等
+- 测试键盘可访问性——响应式不只是视觉，还包括交互
+- 用 `prefers-reduced-motion` / `prefers-color-scheme` 切换浏览器偏好测试
+
+## 小结
+
+- 响应式三层工具：Media Queries / Container Queries / 流式技术；
+- 优先**容器查询 + 流式排版**，仅在页面级布局重排时用 Media Queries；
+- 移动优先 + 内容驱动断点比"设备名断点"更鲁棒；
+- `auto-fit + minmax` 是无断点响应式网格的最简公式；
+- 用户偏好（暗色 / 减少动画 / 高对比度）在 Tailwind 中都有内置变体；
+- `next/image` / `<picture>` / `srcset` 是响应式图像的现代标准；
+- Tailwind 是移动优先：`md:` 表示"≥ 768px"，不是"仅在 md 范围"。

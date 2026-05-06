@@ -1,0 +1,781 @@
+---
+title: 响应式系统
+description: Proxy / Ref / Reactive、依赖收集、effect 调度与 Vue 2 vs Vue 3 的本质差异
+---
+
+# 响应式系统
+
+Vue 性能问题的 70% 出在响应式追踪上。理解 Vue 3 响应式系统的工作原理，是写出高性能 Vue 代码的前提——不理解它，连 `ref` 与 `reactive` 该用哪个都难以判断。本章从原理到实战，覆盖 Proxy 拦截、依赖收集、调度器、Vue 2 vs 3 的本质差异，以及响应式追踪的真实成本。
+
+## 响应式的本质
+
+> **响应式 = 数据变化时，依赖该数据的"地方"自动更新。**
+
+对于"地方"是什么，Vue / React 给出截然不同的答案：
+
+```text
+React 模型：
+  state 变化 → 整个组件函数重新执行 → diff Virtual DOM
+  细粒度：组件级（粗）
+  心智：防止"组件重渲染太多"
+
+Vue 模型：
+  state 变化 → 只触发依赖该 state 的 effect 重新执行
+  细粒度：effect 级（细）—— 一个组件可能有多个 effect
+  心智：防止"响应式追踪过度"
+```
+
+Vue 3 的响应式由两个核心概念组成：
+
+```text
+┌─ Proxy / Ref（响应式数据）───────┐
+│   set 时触发 trigger             │
+│   get 时执行 track（依赖收集）    │
+└──────────────────────────────────┘
+              ↕
+┌─ Effect（副作用）────────────────┐
+│   副作用函数（render / watch /   │
+│   computed / watchEffect）         │
+│   依赖会自动收集                  │
+└──────────────────────────────────┘
+```
+
+## ref vs reactive
+
+### ref：包装"任意值"
+
+```ts
+import { ref } from 'vue'
+
+const count = ref(0)              // 数字 ref
+const user = ref({ name: 'A' })   // 对象 ref
+const arr = ref([1, 2, 3])        // 数组 ref
+
+// 访问值
+console.log(count.value)          // 必须 .value
+console.log(user.value.name)
+
+// 修改
+count.value++
+user.value.name = 'B'             // 内部仍然响应式（reactive 转换）
+```
+
+### reactive：把对象变成响应式
+
+```ts
+import { reactive } from 'vue'
+
+const state = reactive({ count: 0, user: { name: 'A' } })
+
+// 访问无需 .value
+console.log(state.count)
+console.log(state.user.name)
+
+// 修改触发响应
+state.count++
+state.user.name = 'B'
+```
+
+### 选择哪个？
+
+```text
+推荐：默认用 ref
+  ├─ API 一致（任何类型都是 .value）
+  ├─ 在函数间传递不丢失响应（reactive 解构后失去响应）
+  └─ 易于重构（基本类型 → 对象时无需改 API）
+
+reactive 适合：
+  ├─ 表单数据（一组相关字段）
+  ├─ 类似 React useReducer 的状态对象
+  └─ 团队习惯 Options API 的 data() 风格
+```
+
+```ts
+// ref 在函数间传递保持响应
+function useCounter() {
+  const count = ref(0)
+  return { count }                         // ✅ 仍可响应
+}
+
+const { count } = useCounter()
+count.value++                              // 触发响应
+
+// reactive 解构丢失响应
+function useCounter() {
+  const state = reactive({ count: 0 })
+  return state                             // 调用方拿到 reactive
+}
+
+const { count } = useCounter()             // ❌ 解构后 count 是普通 number，丢失响应
+```
+
+详见 [shallow-optimization](/performance/vue/shallow-optimization) 中的解构与 `toRefs`。
+
+## Proxy 是怎么工作的
+
+Vue 3 用 ES6 `Proxy` 拦截对象的读写：
+
+```ts
+function reactive(target) {
+  return new Proxy(target, {
+    get(target, key, receiver) {
+      track(target, key)                   // 1. 收集"谁在读"
+      const value = Reflect.get(target, key, receiver)
+      return isObject(value) ? reactive(value) : value   // 2. 嵌套对象递归
+    },
+    set(target, key, value, receiver) {
+      const oldValue = target[key]
+      Reflect.set(target, key, value, receiver)
+      if (oldValue !== value) {
+        trigger(target, key)               // 3. 通知"依赖此 key 的 effect"
+      }
+      return true
+    }
+  })
+}
+```
+
+### 嵌套对象的代理
+
+```ts
+const state = reactive({
+  user: {
+    profile: {
+      name: 'A'
+    }
+  }
+})
+
+// 访问 state.user.profile.name 时：
+//   1. state.user 触发 get → 返回新的 Proxy（包装 user）
+//   2. .profile 触发 get → 返回新的 Proxy（包装 profile）
+//   3. .name 触发 get → 返回字符串 'A'
+//
+// 每一层都是按需代理 + 缓存
+```
+
+**性能含义**：访问深嵌套属性比 React 慢——多了 Proxy trap。
+
+```ts
+// 高频访问深嵌套属性
+for (let i = 0; i < 10000; i++) {
+  console.log(state.user.profile.name)     // 每次 3 层 Proxy trap
+}
+
+// 优化：先取值
+const name = state.user.profile.name       // 一次 trap
+for (let i = 0; i < 10000; i++) {
+  console.log(name)
+}
+```
+
+或用 `shallowReactive` / `markRaw` 跳过部分追踪——详见下章。
+
+## 依赖收集
+
+### track 与 trigger
+
+```ts
+// 简化的依赖图
+const targetMap = new WeakMap()
+//   target → keyMap (Map)
+//                  key → effects (Set)
+
+let activeEffect = null
+
+function track(target, key) {
+  if (!activeEffect) return
+  let keyMap = targetMap.get(target)
+  if (!keyMap) targetMap.set(target, keyMap = new Map())
+  let effects = keyMap.get(key)
+  if (!effects) keyMap.set(key, effects = new Set())
+  effects.add(activeEffect)
+  activeEffect.deps.push(effects)          // 双向引用，便于清理
+}
+
+function trigger(target, key) {
+  const keyMap = targetMap.get(target)
+  if (!keyMap) return
+  const effects = keyMap.get(key)
+  if (effects) {
+    for (const effect of [...effects]) {
+      effect.scheduler ? effect.scheduler() : effect.run()
+    }
+  }
+}
+```
+
+### Effect 的工作流
+
+```ts
+function effect(fn, options = {}) {
+  const eff = {
+    fn,
+    deps: [],
+    scheduler: options.scheduler,
+    run() {
+      cleanup(eff)                         // 清理上次的依赖
+      activeEffect = eff
+      try {
+        return fn()
+      } finally {
+        activeEffect = null
+      }
+    }
+  }
+  eff.run()                                // 首次运行收集依赖
+  return eff
+}
+
+// 用法
+const state = reactive({ count: 0 })
+effect(() => {
+  console.log('count:', state.count)
+})
+// → 输出 'count: 0'，并把当前 effect 注册到 state.count 的依赖列表
+
+state.count++
+// → 输出 'count: 1'
+```
+
+### 组件渲染就是一个 effect
+
+```vue
+<template>
+  <div>{{ user.name }}</div>
+</template>
+```
+
+编译后等价于：
+
+```ts
+effect(() => {
+  // 渲染函数
+  return h('div', user.value.name)
+})
+```
+
+`user.value.name` 被读 → 收集依赖 → 这个 effect 加入到 user.name 的订阅者列表。
+
+`user.name` 改变 → 触发 effect 重新运行 → 重新生成 vnode → patch DOM。
+
+### 这就是 "Vue 默认就快" 的原因
+
+```vue
+<template>
+  <div>
+    <h1>{{ a }}</h1>          <!-- effect A: 依赖 a -->
+    <p>{{ b }}</p>            <!-- effect B: 依赖 b -->
+  </div>
+</template>
+```
+
+实际上整个组件是**一个 render effect**——但配合编译时 PatchFlag 与 Block Tree，Vue 知道"a 变化只需 patch h1"。
+
+详见 [编译时优化](/performance/vue/compilation)。
+
+## 调度器（Scheduler）
+
+### 同步 vs 异步触发
+
+```ts
+const count = ref(0)
+
+watchEffect(() => {
+  console.log('count:', count.value)
+})
+
+count.value++
+count.value++
+count.value++
+
+// 输出？
+// 同步：count: 1, count: 2, count: 3
+// 异步（默认）：count: 0, count: 3
+```
+
+Vue 3 默认**异步批处理**：
+
+```text
+T+0   count.value++ → 触发 effect → 但 scheduler 把它加入队列
+T+0   count.value++ → 已在队列中，跳过
+T+0   count.value++ → 已在队列中
+T+0   微任务队列：执行所有 scheduled effects（一次）
+```
+
+类似 React 的 batching——多次更新合并为一次重渲染。
+
+### flush 时机
+
+```ts
+watch(source, callback, {
+  flush: 'pre' | 'post' | 'sync'
+})
+```
+
+| 值 | 含义 |
+| -- | ---- |
+| `'pre'`（默认） | DOM 更新**前** |
+| `'post'` | DOM 更新**后**（如果回调需要读最新 DOM） |
+| `'sync'` | 同步触发（每次变化立即调用，慎用） |
+
+```ts
+// post：访问最新 DOM
+watch(items, async (newItems) => {
+  await nextTick()
+  list.value.scrollTop = list.value.scrollHeight   // 滚到底
+}, { flush: 'post' })
+```
+
+### nextTick
+
+```ts
+import { nextTick } from 'vue'
+
+count.value++
+console.log(document.body.innerText)              // 看到旧值（DOM 还没更新）
+
+await nextTick()
+console.log(document.body.innerText)              // 看到新值
+```
+
+类似 React 的 `flushSync` 反向——nextTick 是"等批处理完成"。
+
+## Vue 2 vs Vue 3 响应式
+
+### Vue 2：Object.defineProperty
+
+```js
+function defineReactive(obj, key, val) {
+  Object.defineProperty(obj, key, {
+    get() {
+      track(obj, key)
+      return val
+    },
+    set(newVal) {
+      val = newVal
+      trigger(obj, key)
+    }
+  })
+}
+
+function reactive(target) {
+  for (const key in target) {
+    defineReactive(target, key, target[key])
+  }
+  return target
+}
+```
+
+**根本限制**：`Object.defineProperty` 只能拦截**已存在的属性**：
+
+```js
+const state = reactive({ a: 1 })
+state.b = 2          // ❌ 不响应（Vue 2 需要用 Vue.set）
+
+const arr = reactive([1, 2, 3])
+arr[0] = 99          // ❌ 不响应（必须用 splice）
+arr.length = 0       // ❌ 不响应
+```
+
+Vue 2 的临时方案：`Vue.set(state, 'b', 2)` 或 `arr.splice(0, 1, 99)`——丑陋且易错。
+
+### Vue 3：Proxy
+
+```ts
+function reactive(target) {
+  return new Proxy(target, handlers)
+}
+```
+
+Proxy 拦截**任何操作**：
+
+```ts
+const state = reactive({ a: 1 })
+state.b = 2          // ✅ 响应
+
+const arr = reactive([1, 2, 3])
+arr[0] = 99          // ✅ 响应
+arr.length = 0       // ✅ 响应
+delete state.a       // ✅ 响应
+```
+
+### 性能对比
+
+```text
+Vue 2 初始化：遍历对象的所有属性，给每个加 getter/setter
+  → 大对象初始化慢
+  → 必须遍历所有可能用到的字段
+
+Vue 3 初始化：仅创建 Proxy（O(1)）
+  → 极快
+  → 只在真正访问时才追踪
+```
+
+实测：1000 字段的对象初始化：
+
+| 框架 | 时间 |
+| ---- | ---- |
+| Vue 2 reactive | ~ 30 ms |
+| Vue 3 reactive | < 0.1 ms |
+
+Vue 3 的"懒追踪"是巨大性能优势。
+
+### 数组的特殊处理
+
+数组在 Vue 3 中是**完全响应**的——但仍要注意性能：
+
+```ts
+const list = reactive(largeArray)            // ❌ 大数组深度代理
+const list = shallowReactive(largeArray)     // ✅ 仅顶层响应
+const list = ref(largeArray)                 // ❌ ref 内部仍是 reactive
+const list = shallowRef(largeArray)          // ✅ 整个值响应（替换才触发）
+```
+
+详见 [shallow-optimization](/performance/vue/shallow-optimization)。
+
+## ref 内部如何工作
+
+```ts
+class RefImpl {
+  private _value
+  public dep = new Set()
+
+  constructor(value) {
+    this._value = isObject(value) ? reactive(value) : value
+  }
+
+  get value() {
+    track(this, 'value')
+    return this._value
+  }
+
+  set value(newValue) {
+    if (newValue !== this._value) {
+      this._value = isObject(newValue) ? reactive(newValue) : newValue
+      trigger(this, 'value')
+    }
+  }
+}
+
+function ref(value) {
+  return new RefImpl(value)
+}
+```
+
+关键点：
+
+- `ref` 把对象自动转 `reactive`
+- 替换整个 value 触发响应
+- 修改对象内部属性也触发响应（因为内部是 reactive）
+
+```ts
+const user = ref({ name: 'A' })
+
+user.value.name = 'B'                 // ✅ 响应（内部 reactive）
+user.value = { name: 'C' }            // ✅ 响应（替换 .value）
+```
+
+### 模板中的自动解包
+
+```vue
+<script setup>
+const count = ref(0)
+</script>
+
+<template>
+  {{ count }}                  <!-- 自动 .value -->
+  <button @click="count++">    <!-- count++ 等价于 count.value++ -->
+    +
+  </button>
+</template>
+```
+
+但**只在顶层**自动解包：
+
+```vue
+<template>
+  <p>{{ obj.count }}</p>          <!-- ❌ 如果 obj 是普通对象，里面的 count 是 ref -->
+                                   <!--    需要 obj.count.value -->
+</template>
+
+<script setup>
+const count = ref(0)
+const obj = { count }              // ❌ obj 不是 reactive
+</script>
+```
+
+放进 reactive 中会自动解包：
+
+```vue
+<script setup>
+const count = ref(0)
+const state = reactive({ count })   // 自动解包
+// state.count 等价于 count.value
+</script>
+```
+
+## 响应式 API 全景
+
+### 数据创建
+
+| API | 用途 |
+| --- | ---- |
+| `ref(value)` | 任意值的响应式包装 |
+| `reactive(obj)` | 对象的响应式代理 |
+| `shallowRef(value)` | 仅 .value 响应（内部不递归） |
+| `shallowReactive(obj)` | 仅顶层响应 |
+| `readonly(obj)` | 只读响应式 |
+| `shallowReadonly(obj)` | 仅顶层只读 |
+
+### 转换
+
+| API | 用途 |
+| --- | ---- |
+| `toRef(obj, key)` | 把 reactive 的某属性转为 ref |
+| `toRefs(obj)` | 整个对象转为 refs（解构友好） |
+| `toRaw(proxy)` | 拿到原始对象 |
+| `markRaw(obj)` | 标记对象永不响应 |
+
+### 派生
+
+| API | 用途 |
+| --- | ---- |
+| `computed(getter)` | 派生 ref（带缓存） |
+| `computed({ get, set })` | 可写 computed |
+
+### 副作用
+
+| API | 用途 |
+| --- | ---- |
+| `watchEffect(fn)` | 自动追踪依赖的 effect |
+| `watch(source, cb)` | 监听特定来源 |
+| `watchPostEffect(fn)` | flush: 'post' 的 watchEffect |
+| `watchSyncEffect(fn)` | flush: 'sync' 的 watchEffect |
+
+详见 [computed/watch 调优](/performance/vue/computed-watch)。
+
+### 工具
+
+| API | 用途 |
+| --- | ---- |
+| `isRef(x)` | 是否 ref |
+| `isReactive(x)` | 是否 reactive |
+| `isReadonly(x)` | 是否 readonly |
+| `unref(x)` | x 是 ref 取 .value，否则返回原值 |
+
+## 响应式追踪的成本
+
+### 每次 get / set 都有开销
+
+```ts
+const state = reactive({ count: 0 })
+
+// 普通对象：每次访问 ~ 5 ns
+plain.count
+
+// reactive：每次访问 ~ 50-100 ns（10-20 倍）
+state.count
+```
+
+对于偶尔访问无影响——但**热路径上会显现**：
+
+```ts
+// ❌ 高频循环中重复访问深嵌套
+for (let i = 0; i < 100000; i++) {
+  total += state.user.profile.scores[i]    // 每次 3 层 Proxy
+}
+
+// ✅ 取出本地变量
+const scores = state.user.profile.scores    // 一次 trap
+for (let i = 0; i < 100000; i++) {
+  total += scores[i]
+}
+```
+
+或用 `toRaw`：
+
+```ts
+import { toRaw } from 'vue'
+
+const rawState = toRaw(state)              // 拿到原始对象（无追踪）
+for (let i = 0; i < 100000; i++) {
+  total += rawState.user.profile.scores[i]
+}
+```
+
+### 大数据集的代价
+
+```ts
+// 10000 个对象的数组
+const data = await fetch('/api/big').then(r => r.json())
+
+const list = reactive(data)         // ❌ 每个对象都被深度代理
+                                     //    内存占用翻倍 + 初始化慢
+```
+
+修复：
+
+```ts
+const list = shallowRef(data)              // 整体响应（替换才触发）
+const list = markRaw(data)                 // 完全不响应（如果不需要）
+```
+
+详见 [shallow-optimization](/performance/vue/shallow-optimization)。
+
+## 常见误区
+
+### 误区 1："reactive 全用 = Vue"
+
+```ts
+// ❌ 把所有数据塞 reactive 是反模式
+const everything = reactive({
+  users: [...],         // 几千用户
+  posts: [...],         // 几千文章
+  largeMap: new Map([...]),
+  ...
+})
+```
+
+修复：分类用合适的 API：
+
+```ts
+const filters = reactive({ category: 'all', sort: 'date' })   // 小且常变
+const users = shallowRef([])              // 大集合，整体替换
+const utils = markRaw(SomeClass)          // 类实例，不需响应
+```
+
+### 误区 2："ref.value 太丑，全用 reactive"
+
+ref 的 .value 看似冗余，但它带来：
+
+- 在函数间传递不丢响应
+- 类型推断更精确
+- 解构友好
+
+很多团队的最佳实践：**默认 ref，组件内的多字段表单状态用 reactive**。
+
+### 误区 3："watch 比 computed 简单"
+
+```ts
+// ❌ 用 watch 写派生数据
+const fullName = ref('')
+watch([first, last], ([f, l]) => {
+  fullName.value = `${f} ${l}`
+})
+
+// ✅ 用 computed
+const fullName = computed(() => `${first.value} ${last.value}`)
+```
+
+computed 自动缓存 + 自动追踪 + 自动调度——比 watch 简单且更优。
+
+详见 [computed/watch 调优](/performance/vue/computed-watch)。
+
+## 调试响应式
+
+### Vue DevTools
+
+DevTools → Components → 选组件 → 看右侧：
+
+- `data` / `setup` 字段
+- `computed` 派生
+- `watchers`
+
+每个值旁有"图眼"——点击高亮该值的依赖与依赖者。
+
+### 自定义日志
+
+```ts
+import { effect, ref } from 'vue'
+
+const count = ref(0)
+
+effect(
+  () => console.log('count:', count.value),
+  {
+    onTrack(e) {
+      // 当 count.value 被访问（追踪）时
+      console.log('TRACKED:', e)
+    },
+    onTrigger(e) {
+      // 当 count.value 改变（触发）时
+      console.log('TRIGGERED:', e)
+    }
+  }
+)
+```
+
+或在组件中用 `onRenderTracked` / `onRenderTriggered`（见 [Vue 性能工具](/performance/vue/tools)）。
+
+## 实战诊断
+
+### 场景：表单输入卡顿
+
+```vue
+<script setup>
+const formData = reactive({
+  /* 100 个字段 */
+})
+</script>
+
+<template>
+  <input v-model="formData.field1" />
+  <!-- ... 99 个 input ... -->
+</template>
+```
+
+可能原因：
+
+1. **某个 computed 依赖整个 formData** → 任何字段变都触发它
+
+```ts
+// ❌ 依赖整个对象
+const summary = computed(() => JSON.stringify(formData))
+
+// ✅ 仅在需要时计算
+function getSummary() {
+  return JSON.stringify(formData)
+}
+```
+
+2. **过度深嵌套**：100 字段嵌 5 层 → 每个字段访问都 5 次 trap
+
+修复：扁平化或用 `shallowReactive`。
+
+3. **watch 链**：每个字段 watch → 引发其它字段更新 → 雪崩
+
+详见 [实战场景方案](/performance/vue/case-studies)。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 大数组用 reactive | 深度代理 + 内存翻倍 | shallowRef / markRaw |
+| 高频热路径访问深嵌套 | 多次 Proxy trap | toRaw 或局部变量 |
+| 把类实例 / 第三方库对象响应化 | trap 频繁 + 可能错乱 | markRaw |
+| reactive 解构后直接用 | 丢失响应 | toRefs |
+| 用 watch 写派生 | 复杂、易出错 | computed |
+| 全用 reactive，避开 ref | 解构 / 传递问题 | 默认 ref |
+| 在 effect 中改 effect 自身依赖 | 死循环 | 拆分逻辑 |
+
+## 性能特征对比表
+
+| 维度 | React 19 | Vue 3 |
+| ---- | -------- | ----- |
+| 渲染粒度 | 组件级 | effect 级 |
+| 默认行为 | 父变 → 子变 | 仅依赖变才触发 |
+| 心智 | "防止过度渲染" | "防止过度追踪" |
+| 大对象成本 | 低（不追踪） | 高（每属性代理） |
+| 优化基础 | memo / useMemo | shallowRef / markRaw |
+| 编译优化 | React Compiler（新） | 一直是核心 |
+
+## 小结
+
+- Vue 3 用 Proxy 实现响应式，相比 Vue 2 的 Object.defineProperty 性能更好且能拦截任意操作；
+- ref 是带 .value 的响应式包装，reactive 是对象的代理——推荐默认用 ref，组件级多字段用 reactive；
+- 响应式追踪是有成本的——大对象、热路径、深嵌套都需要谨慎使用；
+- 调度器把多次更新合并到一次微任务——类似 React 18 的 batching；
+- watchEffect / watch / computed 都是 effect 的不同包装，computed 带缓存，是派生数据的首选；
+- Vue 性能问题 70% 出在响应式追踪上——下一章 [浅层与只读优化](/performance/vue/shallow-optimization) 是日常优化的核心；
+- "Vue 默认就快"是因为 effect 级粒度 + 编译时 PatchFlag——但用错 API 一样会变慢。

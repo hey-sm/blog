@@ -1,0 +1,355 @@
+---
+title: 网络层基础
+description: HTTP 协议演进、HTTPS、请求合并、GZIP/Brotli 压缩与避免 404
+---
+
+# 网络层基础
+
+网络层是用户与你的服务器之间的物理"距离"。在这层做对的事情，回报巨大；做错的事情，再多前端优化也补不回来。本章覆盖 HTTP 协议演进、HTTPS、请求数量与压缩——这些都是"上线即生效"的优化项。
+
+## HTTP 协议演进
+
+不同 HTTP 版本对前端性能的影响差异巨大。优化策略必须建立在你**实际使用的版本**之上。
+
+### 版本对比
+
+| 版本 | 发布 | 关键特性 | 对前端的影响 |
+| ---- | ---- | -------- | ------------ |
+| HTTP/1.1 | 1997 | 持久连接、管道化（实践失败） | 单 TCP 单请求，需要域名分片 |
+| HTTP/2 | 2015 | 二进制分帧、多路复用、Server Push、首部压缩 HPACK | 同域请求并发不再是瓶颈 |
+| HTTP/3 | 2022 | 基于 QUIC（UDP）、0-RTT、连接迁移 | 弱网与高丢包场景显著更优 |
+
+### 多路复用（Multiplexing）
+
+HTTP/1.1 的瓶颈：浏览器对同一域名最多并发 6 个 TCP 连接，超出的请求必须排队。
+
+```text
+HTTP/1.1（同一域名）：
+请求 1 ──────►
+请求 2 ──────►
+请求 3 ──────►
+请求 4 ──────►
+请求 5 ──────►
+请求 6 ──────►
+请求 7        █████ 等待中 █████
+请求 8        █████ 等待中 █████
+
+HTTP/2（同一连接，并行）：
+所有请求 ─┬─►
+          ├─►
+          ├─►
+          └─►
+```
+
+### HTTP/1.1 时代的"反优化"现在是负担
+
+以下技巧在 HTTP/1.1 是优化，到 HTTP/2 后**反而变成劣化**：
+
+- **域名分片（Domain Sharding）**：HTTP/1.1 时把资源拆到 `cdn1.x.com` / `cdn2.x.com` 提高并发。HTTP/2 下每个域名都要新建 TLS，反而慢。
+- **CSS Sprite 雪碧图**：HTTP/1.1 时合并多张小图减少请求。HTTP/2 多路复用让单图请求成本几乎为零。
+- **JS / CSS Concatenation**：把所有文件打成一个大包。HTTP/2 下应该按路由拆分，让缓存命中率更高（详见 [JavaScript 优化](/performance/javascript)）。
+
+```text
+判断你站点的协议版本：
+DevTools → Network → 添加 "Protocol" 列
+- h2     → HTTP/2
+- h3     → HTTP/3
+- http/1.1 → 还在 1.1
+```
+
+### 启用 HTTP/2 / HTTP/3
+
+服务端配置示例（Nginx）：
+
+```nginx
+server {
+  listen 443 ssl http2;                # HTTP/2
+  listen 443 quic reuseport;           # HTTP/3 (Nginx 1.25+)
+  http3 on;
+  add_header Alt-Svc 'h3=":443"; ma=86400';  # 通告 H3 端点
+
+  ssl_certificate     /path/to/fullchain.pem;
+  ssl_certificate_key /path/to/privkey.pem;
+  ssl_protocols       TLSv1.2 TLSv1.3;
+}
+```
+
+CDN 用户通常只需打开开关——Cloudflare、Fastly、AWS CloudFront 都默认支持 H2/H3。
+
+## HTTPS 不仅是安全
+
+HTTPS 在 2024 年早已不是"可选项"。它对性能的影响也常被误解：
+
+| 误解 | 真相 |
+| ---- | ---- |
+| HTTPS 比 HTTP 慢 | TLS 1.3 + 0-RTT 与 HTTP 性能差距可忽略 |
+| HTTPS 浪费 CPU | 现代 CPU AES-NI 加速，TLS 开销 < 2% |
+| HTTPS 不适合大文件 | 反而更适合，HTTP/2/3 必须 HTTPS |
+
+### HTTP/2 / 3 强依赖 HTTPS
+
+主流浏览器明确要求 HTTP/2 / HTTP/3 必须运行在 TLS 之上。这意味着：**不上 HTTPS = 永远停留在 HTTP/1.1 = 性能损失**。
+
+### HSTS
+
+避免每次访问都先 `http://` → `301` → `https://` 的冗余跳转：
+
+```http
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+```
+
+设置后，浏览器会在 `max-age` 期间直接走 HTTPS，节省一次重定向（通常 100–500 ms）。
+
+### HTTPS 性能优化清单
+
+```nginx
+ssl_protocols       TLSv1.2 TLSv1.3;          # 关闭 TLS 1.0/1.1
+ssl_session_cache   shared:SSL:50m;            # 会话缓存
+ssl_session_tickets on;                        # Session Ticket
+ssl_session_timeout 1d;
+ssl_stapling        on;                        # OCSP Stapling
+ssl_stapling_verify on;
+```
+
+`OCSP Stapling` 让服务器代理证书状态查询，节省客户端 100–300 ms。
+
+## 减少 HTTP 请求数
+
+每个请求都有固定开销：DNS（如有） → TCP（如有） → TLS（如有） → Request → Response。即使在 HTTP/2 下，**请求总数仍是首屏关键路径长度的关键变量**。
+
+### 请求来源审计
+
+在 DevTools Network 面板，按类型聚合：
+
+| 类型 | 优化方向 |
+| ---- | -------- |
+| Document | 通常 1 个，无需优化 |
+| Stylesheet | 合并到 2-3 个（main + 路由级） |
+| Script | 按路由拆，避免单页 30+ JS chunk |
+| Image | 用 [响应式图片](/performance/image-responsive) 与懒加载 |
+| Font | 单一字体族 1-2 个 woff2 即可 |
+| XHR/Fetch | 合并、防抖、批处理 |
+| Other | 检查冗余的 favicon、tracking pixel |
+
+### 避免重定向链
+
+```text
+www.example.com  → example.com  → m.example.com
+        301              301
+```
+
+每个 301 都是一次完整的 RTT。优化目标是**最多 1 次重定向**：
+
+- 把 `www` ↔ 主域之间的跳转配置在 CDN / 边缘
+- 用 `vary: User-Agent` 或客户端 hint 直接路由到正确页面，避免服务端重定向
+- HSTS preload 消除 HTTP → HTTPS 跳转
+
+### 内联与拆分的平衡
+
+对**关键资源**（如首屏的小段 CSS / JS），内联到 HTML 减少一次请求是有价值的：
+
+```html
+<!-- 关键 CSS 内联（< 14 KB，1 个 TCP 拥塞窗口） -->
+<style>
+  body { font-family: system-ui; margin: 0 }
+  .hero { height: 100vh; background: #000 }
+</style>
+
+<!-- 非关键 CSS 异步加载 -->
+<link rel="preload" href="/main.css" as="style"
+      onload="this.onload=null;this.rel='stylesheet'">
+```
+
+但**不要**把所有内容都内联——内联资源无法被缓存，每次访问都要重新下载。
+
+详细决策见 [CSS 优化 § Critical CSS](/performance/css#critical-css)。
+
+## 压缩传输
+
+文本类资源（HTML、CSS、JS、SVG、JSON、字体的 metadata）可以在传输时被高效压缩。
+
+### GZIP vs Brotli vs Zstandard
+
+| 算法 | 浏览器支持 | 压缩率 | 压缩 / 解压速度 |
+| ---- | ---------- | ------ | --------------- |
+| GZIP | 100%（universal） | 基线 | 快 / 极快 |
+| Brotli | 96%+（IE 不支持） | 比 GZIP 高 15–25% | 较慢 / 极快 |
+| Zstandard | 部分 CDN（实验） | 与 Brotli 接近 | 极快 / 极快 |
+
+**现代项目的标准配置**：同时启用 GZIP 与 Brotli，浏览器通过 `Accept-Encoding` 协商：
+
+```http
+Accept-Encoding: gzip, deflate, br, zstd
+↓
+Content-Encoding: br
+```
+
+### Nginx 配置
+
+```nginx
+# GZIP
+gzip              on;
+gzip_vary         on;
+gzip_min_length   1024;
+gzip_comp_level   6;
+gzip_types        text/plain text/css application/json
+                  application/javascript text/xml application/xml
+                  application/xml+rss text/javascript
+                  image/svg+xml application/wasm;
+
+# Brotli（需要 ngx_brotli 模块）
+brotli            on;
+brotli_comp_level 6;
+brotli_types      text/plain text/css application/json
+                  application/javascript image/svg+xml
+                  application/wasm;
+```
+
+### 静态预压缩 vs 动态压缩
+
+| 方式 | 适用场景 | CPU 成本 | 压缩率 |
+| ---- | -------- | -------- | ------ |
+| 动态压缩 | 服务端渲染、API JSON | 高（每请求一次） | 中（快速档位） |
+| 静态预压缩 | 构建产物 / 静态资源 | 仅构建时 | 高（最高档位） |
+
+构建期生成 `.gz` 与 `.br`：
+
+```js
+// vite.config.js
+import compression from 'vite-plugin-compression'
+
+export default {
+  plugins: [
+    compression({ algorithm: 'gzip',     ext: '.gz' }),
+    compression({ algorithm: 'brotliCompress', ext: '.br' })
+  ]
+}
+```
+
+Nginx 直接读静态压缩文件：
+
+```nginx
+gzip_static  on;
+brotli_static on;
+```
+
+### 不要重复压缩已压缩的内容
+
+| 资源 | 是否再压缩 |
+| ---- | ---------- |
+| HTML / CSS / JS / SVG / JSON | ✅ 必须 |
+| WOFF2 字体 | ❌（自身已压缩） |
+| PNG / JPEG / WebP / AVIF | ❌（自身已压缩） |
+| MP4 / WebM | ❌（自身已压缩） |
+
+强制再压缩这些资源会浪费 CPU 同时几乎没有体积收益。
+
+## 协议一致性
+
+> "Serve files from the same protocol."
+
+页面是 HTTPS，但引用了 `http://` 资源时：
+
+- **混合内容（Mixed Content）**：现代浏览器会**直接拒绝**加载，导致功能失效；
+- **降级提示**：地址栏小锁丢失，影响用户信任；
+- **被动内容（图片）**：可能被自动升级为 HTTPS（取决于 [`upgrade-insecure-requests`](https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Headers/Content-Security-Policy/upgrade-insecure-requests)）。
+
+最佳实践：使用**协议相对 URL** 或直接 HTTPS：
+
+```html
+<!-- ❌ 协议不一致 -->
+<script src="http://cdn.example.com/lib.js"></script>
+
+<!-- ⚠️ 协议相对（已不推荐，HTTPS 普及后失去意义） -->
+<script src="//cdn.example.com/lib.js"></script>
+
+<!-- ✅ 显式 HTTPS -->
+<script src="https://cdn.example.com/lib.js"></script>
+```
+
+通过 CSP 强制升级所有子资源：
+
+```http
+Content-Security-Policy: upgrade-insecure-requests
+```
+
+## 避免 404 / 501
+
+> "Avoid requesting unreachable files (404)."
+
+每个 404 都浪费一次 RTT，并占用浏览器并发槽。常见来源：
+
+| 来源 | 优化 |
+| ---- | ---- |
+| `favicon.ico` 缺失 | 显式声明 `<link rel="icon" href="...">` |
+| 字体子集化后旧路径残留 | 构建期清理引用 |
+| Service Worker 注册的旧 manifest | 上线时同步更新 |
+| 第三方脚本指向已下线服务 | 定期审计第三方依赖 |
+| 旧 `source-map` 暴露在生产 | 关闭或上传到错误监控平台 |
+
+```js
+// 监控 404 资源
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.responseStatus === 404) {
+      console.warn('404:', entry.name)
+    }
+  }
+}).observe({ type: 'resource', buffered: true })
+```
+
+注意：`responseStatus` 是相对较新的属性（Chrome 109+），跨域资源需要服务端发送 `Timing-Allow-Origin: *` 才能读取。
+
+## Service Worker 与离线优先
+
+Service Worker 是介于网络和浏览器缓存之间的可编程代理。它可以：
+
+- 把首屏资源缓存到本地，二次访问 0 网络请求
+- 在弱网下提供降级页面
+- 后台同步、推送
+
+最简的"应用外壳"模式：
+
+```js
+// sw.js
+const CACHE = 'app-shell-v1'
+const ASSETS = ['/', '/index.html', '/main.css', '/main.js']
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)))
+})
+
+self.addEventListener('fetch', (e) => {
+  e.respondWith(
+    caches.match(e.request).then(r => r || fetch(e.request))
+  )
+})
+```
+
+详见 [缓存策略 § Service Worker](/performance/caching#service-worker)。
+
+## 关键渲染路径
+
+把上面的优化串起来，关键渲染路径（Critical Rendering Path）的目标是：**让 LCP 元素以最少的 RTT 出现**。
+
+```text
+T=0     用户输入 URL
+T+0     DNS（如未缓存） →  preconnect/dns-prefetch 可消除
+T+RTT   TCP+TLS（如未复用）→  HTTP/2 复用消除
+T+2RTT  发送 GET / 收到 HTML
+T+3RTT  解析 HTML → 发现 CSS/JS → 再发请求 → 渲染
+                                  ↑
+                            这里是优化重点：
+                            preload / 内联 critical CSS
+                            defer / async 非关键 JS
+```
+
+每减少一次 RTT，对慢网络用户都是几百 ms 的体感提升。
+
+## 小结
+
+- HTTP/2 / HTTP/3 是当代基础设施——所有针对 HTTP/1.1 的"反并发优化"（域名分片、雪碧图、超大 bundle）在 HTTP/2 下应被淘汰；
+- HTTPS 不再是性能负担，而是 H2/H3 的入场券，启用 HSTS preload 与 OCSP Stapling 可进一步消除握手开销；
+- 减少请求数的目标不是绝对最少，而是消除"无效请求"——重定向链、404、协议混合首先要清；
+- 文本类资源必须开启 GZIP 与 Brotli，且对静态资源走构建期预压缩；
+- Service Worker 是"网络层的最后一公里"，把首屏关键资源前置到本地是首屏 LCP 的杀手锏。

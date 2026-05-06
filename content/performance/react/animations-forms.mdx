@@ -1,0 +1,851 @@
+---
+title: 动画与表单
+description: Framer Motion / View Transitions、受控 vs 非受控表单、防抖节流与 react-hook-form
+---
+
+# 动画与表单
+
+动画与表单是 React 应用中**两个最容易踩性能坑的高频场景**：
+
+- **动画**：每帧需要 16.67 ms 完成，错用一个 CSS 属性可能让 FPS 降到 20
+- **表单**：每个字符输入都触发渲染——不优化时一个搜索框就能让整个 App 卡顿
+
+本章覆盖 React 19 时代的动画方案、视图过渡 API、受控 vs 非受控的取舍、`react-hook-form` 的零渲染输入、防抖节流。
+
+## 动画的性能基础
+
+### 浏览器渲染管线
+
+```text
+JavaScript ─► Style ─► Layout ─► Paint ─► Composite
+              ▲          ▲         ▲          ▲
+           计算样式   计算位置/尺寸  绘制像素   GPU 合成
+
+每帧 16.67 ms（60 FPS）必须走完。
+任何一步超时 → 掉帧
+```
+
+### 动画属性的代价
+
+| 属性 | 触发 | 成本 |
+| ---- | ---- | ---- |
+| `transform` / `opacity` | 仅 Composite | 极低（GPU） |
+| `color` / `background-color` | Paint | 中 |
+| `width` / `height` / `left` / `top` | Layout + Paint | 高 |
+| `box-shadow` | Paint（重绘） | 高 |
+
+**黄金法则**：**动画属性只用 `transform` 与 `opacity`**。其它属性能避就避。
+
+```css
+/* ❌ 引发 layout，每帧重新计算位置 */
+@keyframes slideIn {
+  from { left: -100% }
+  to   { left: 0 }
+}
+
+/* ✅ 仅 composite，GPU 加速 */
+@keyframes slideIn {
+  from { transform: translateX(-100%) }
+  to   { transform: translateX(0) }
+}
+```
+
+### will-change 与 contain
+
+```css
+/* 预先提升到合成层 */
+.animated {
+  will-change: transform;
+}
+
+/* 隔离布局 / 绘制 */
+.card {
+  contain: layout style paint;
+}
+```
+
+详见 [CSS 优化 § 渲染性能](/performance/css#渲染性能运行时)。
+
+## CSS 动画 vs JS 动画
+
+### CSS 动画
+
+```jsx
+// 简单进入动画
+function Modal({ open, children }) {
+  return (
+    <div className={`modal ${open ? 'modal-open' : ''}`}>
+      {children}
+    </div>
+  )
+}
+
+// CSS
+.modal {
+  transform: translateY(20px);
+  opacity: 0;
+  transition: opacity 0.3s, transform 0.3s;
+}
+.modal-open {
+  transform: translateY(0);
+  opacity: 1;
+}
+```
+
+优势：
+
+- 浏览器原生（合成线程）
+- 零 JS 运行时
+- DevTools 调试方便
+
+劣势：
+
+- 不能基于动态值
+- 无法精确控制（如序列、暂停、反向）
+- 进入 / 离开动画需要复杂的 class 切换
+
+### JS 动画
+
+```jsx
+import { useEffect, useState } from 'react'
+
+function Counter({ to }) {
+  const [value, setValue] = useState(0)
+  useEffect(() => {
+    let raf
+    const start = performance.now()
+    const animate = (now) => {
+      const progress = Math.min((now - start) / 1000, 1)
+      setValue(Math.floor(to * progress))
+      if (progress < 1) raf = requestAnimationFrame(animate)
+    }
+    raf = requestAnimationFrame(animate)
+    return () => cancelAnimationFrame(raf)
+  }, [to])
+  return <div>{value}</div>
+}
+```
+
+何时需要 JS：
+
+- 动态目标值（如根据滚动位置）
+- 复杂序列 / 交错
+- 物理模拟（弹簧、阻尼）
+
+## Framer Motion / motion
+
+[Framer Motion](https://www.framer.com/motion/)（现已重构为 [`motion`](https://motion.dev/)）是 React 生态最流行的动画库：
+
+```jsx
+import { motion } from 'motion/react'
+
+function Card() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.3, ease: 'easeOut' }}
+    >
+      Hello
+    </motion.div>
+  )
+}
+```
+
+### AnimatePresence：进入 / 离开
+
+```jsx
+import { AnimatePresence, motion } from 'motion/react'
+
+function Modal({ open }) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.95 }}
+        >
+          Modal content
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+```
+
+`AnimatePresence` 处理"组件即将卸载"——延迟卸载直到 exit 动画完成。
+
+### Layout 动画
+
+自动从"布局 A → 布局 B"过渡：
+
+```jsx
+<motion.div layout>
+  {/* 内容变化导致尺寸变化时，自动平滑过渡 */}
+</motion.div>
+```
+
+底层用 FLIP（First Last Invert Play）技术——测量前后位置，用 transform 模拟过渡。
+
+### 性能特征
+
+```text
+Framer Motion 默认走 transform / opacity 路径
+  ├─ 大部分动画零 JS 帧（CSS animation）
+  ├─ 复杂 layout 动画用 FLIP（仍 GPU 加速）
+  └─ Bundle ~ 50 KB（gzip）
+```
+
+### 优化技巧
+
+#### 1. layout 动画 vs 普通动画
+
+```jsx
+// ❌ layout 动画对每帧测量
+<motion.div layout>
+  <Item />
+</motion.div>
+
+// ✅ 用 transform 替代
+<motion.div animate={{ x: 100 }}>
+  <Item />
+</motion.div>
+```
+
+`layout` 动画虽然方便，但底层需测量 DOM——比纯 transform 慢。
+
+#### 2. 不必要的 motion 组件
+
+```jsx
+// ❌ 不需要动画的元素也包成 motion
+<motion.div>
+  <motion.h1>Title</motion.h1>     {/* 没动画 */}
+  <motion.p>Static text</motion.p> {/* 没动画 */}
+</motion.div>
+
+// ✅ 只对真正动画的元素用 motion
+<div>
+  <h1>Title</h1>
+  <p>Static text</p>
+</div>
+```
+
+每个 `motion.X` 都有 hook 与 ref——能省就省。
+
+#### 3. 列表动画的虚拟化冲突
+
+虚拟化列表中的动画很复杂——库自身会卸载视口外的项，与 AnimatePresence 冲突。慎用。
+
+```jsx
+// 通常做法：禁用列表动画，仅在固定数量的项上动画
+```
+
+## React 19 View Transitions API
+
+> 浏览器原生的过渡 API，比 Framer Motion 更原生、零 JS 运行时。
+
+```jsx
+// React 19 的 unstable_addTransitionType（开发中）
+import { unstable_ViewTransition as ViewTransition } from 'react'
+
+function App() {
+  const [page, setPage] = useState('home')
+  return (
+    <ViewTransition>
+      {page === 'home' ? <Home /> : <About />}
+    </ViewTransition>
+  )
+}
+```
+
+或直接用浏览器 API：
+
+```jsx
+async function navigate(next) {
+  if (!document.startViewTransition) {
+    setPage(next)
+    return
+  }
+
+  document.startViewTransition(() => {
+    setPage(next)
+  })
+}
+```
+
+CSS：
+
+```css
+/* 默认整页过渡 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.3s;
+}
+
+/* 命名元素的独立过渡 */
+.hero {
+  view-transition-name: hero;
+}
+```
+
+### 浏览器支持
+
+Chrome 111+ / Edge 111+。Firefox / Safari 跟进中（2024 年部分支持）。
+
+需要 polyfill 或与 Framer Motion 并存。
+
+### 何时用
+
+- 原生导航过渡（页面切换、模态打开）
+- 共享元素动画（A 页面的图片"飞"到 B 页面）
+- 简单 fade / slide 效果
+
+不适合：复杂手势、物理动画、列表交错。
+
+## react-spring
+
+[react-spring](https://react-spring.dev/) 是基于物理模拟的动画库：
+
+```jsx
+import { useSpring, animated } from '@react-spring/web'
+
+function Card() {
+  const styles = useSpring({
+    from: { opacity: 0, y: 20 },
+    to: { opacity: 1, y: 0 },
+    config: { mass: 1, tension: 200, friction: 20 }
+  })
+
+  return <animated.div style={styles}>Hello</animated.div>
+}
+```
+
+特点：
+
+- 弹簧模拟（更自然的动画）
+- 命令式控制（refImperativeApi）
+- Bundle 比 Framer Motion 大
+
+## 表单的性能挑战
+
+### 受控表单的成本
+
+```jsx
+function Form() {
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [age, setAge] = useState('')
+
+  return (
+    <form>
+      <input value={name} onChange={e => setName(e.target.value)} />
+      <input value={email} onChange={e => setEmail(e.target.value)} />
+      <input value={age} onChange={e => setAge(e.target.value)} />
+    </form>
+  )
+}
+```
+
+每次输入：
+
+- React 调度一次渲染
+- 整个 Form 组件函数被调用
+- 三个 input 都重新渲染（即使只改一个）
+
+10 个字段时：每个字符 = 10 个组件被检查 + 大量 props 浅比较。
+
+### 输入卡顿的征兆
+
+- 移动端键盘的输入"延迟显示"
+- 字符之间感觉"跳跃"
+- DevTools 长任务
+
+## 非受控表单：react-hook-form
+
+[`react-hook-form`](https://react-hook-form.com/) 是 React 表单的事实标准——基于 ref 的非受控模式：
+
+```jsx
+import { useForm } from 'react-hook-form'
+
+function Form() {
+  const { register, handleSubmit, formState: { errors } } = useForm()
+
+  return (
+    <form onSubmit={handleSubmit(data => console.log(data))}>
+      <input {...register('name', { required: true, minLength: 2 })} />
+      {errors.name && <p>Name is required</p>}
+
+      <input {...register('email', { pattern: /^\S+@\S+$/ })} />
+      {errors.email && <p>Email invalid</p>}
+
+      <input type="number" {...register('age', { min: 18, max: 100 })} />
+
+      <button>Submit</button>
+    </form>
+  )
+}
+```
+
+### 性能特征
+
+```text
+传统受控表单：每次输入 → 整个表单重渲染
+react-hook-form：每次输入 → 0 次组件渲染
+                  仅在 submit / 错误状态变化时渲染
+```
+
+实测：10 个字段的表单，输入 100 个字符：
+
+| 方案 | 总渲染次数 |
+| ---- | ---------- |
+| 受控 useState | 1000+ |
+| useReducer | 1000+ |
+| Formik（受控） | 1000+ |
+| **react-hook-form** | < 10 |
+
+差距是数量级的。
+
+### 工作原理
+
+```jsx
+register('name')
+// 等价于：
+{
+  name: 'name',
+  ref: (el) => formStore.setRef('name', el),     // 注册 ref
+  onChange: (e) => formStore.setValue('name', e.target.value),
+  onBlur: (e) => formStore.markTouched('name')
+}
+```
+
+值不进入 React state——存在 `formStore` 内部 Map。组件不渲染就读不到值，但提交时通过 ref 直接读 DOM。
+
+### 何时仍要重渲染
+
+某些场景必须重渲染：
+
+```jsx
+// watch 一个字段：该字段变化时重渲染
+const name = watch('name')
+
+// formState：错误显示
+const { errors } = formState
+```
+
+react-hook-form 用**字段级订阅**——只有真正用 `watch` / `formState` 的组件才重渲染。
+
+### 与 UI 库集成
+
+#### 控件需要受控（如 react-select）
+
+```jsx
+import { Controller } from 'react-hook-form'
+import Select from 'react-select'
+
+<Controller
+  name="city"
+  control={control}
+  render={({ field }) => <Select {...field} options={cities} />}
+/>
+```
+
+`Controller` 包装让该字段变受控——其它字段仍非受控。
+
+#### Zod / Yup 校验
+
+```jsx
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+
+const schema = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  age: z.number().min(18)
+})
+
+const { register, handleSubmit } = useForm({
+  resolver: zodResolver(schema)
+})
+```
+
+类型安全 + 校验逻辑分离。
+
+## TanStack Form
+
+[`@tanstack/react-form`](https://tanstack.com/form) 是 TanStack 团队的新表单库：
+
+```jsx
+import { useForm } from '@tanstack/react-form'
+
+function Form() {
+  const form = useForm({
+    defaultValues: { name: '', email: '' },
+    onSubmit: async ({ value }) => { /* ... */ }
+  })
+
+  return (
+    <form onSubmit={(e) => {
+      e.preventDefault()
+      form.handleSubmit()
+    }}>
+      <form.Field name="name">
+        {(field) => (
+          <input
+            value={field.state.value}
+            onChange={(e) => field.handleChange(e.target.value)}
+          />
+        )}
+      </form.Field>
+      <button>Submit</button>
+    </form>
+  )
+}
+```
+
+特点：
+
+- TypeScript 优先
+- 字段级订阅（与 hook-form 类似）
+- 异步校验内建支持
+- Bundle 较小
+
+## React 19 useFormStatus / useOptimistic
+
+新的表单原语，与 Server Actions 配合：
+
+```jsx
+'use client'
+import { useFormStatus } from 'react-dom'
+
+function SubmitButton() {
+  const { pending } = useFormStatus()
+  return <button disabled={pending}>{pending ? 'Saving...' : 'Save'}</button>
+}
+
+// 父组件
+<form action={createPost}>
+  <input name="title" />
+  <SubmitButton />
+</form>
+```
+
+详见 [Server Components § Server Actions](/performance/react/server-components#server-actions)。
+
+## 防抖与节流
+
+### 经典场景：搜索输入
+
+```jsx
+import { useState, useEffect } from 'react'
+import debounce from 'lodash/debounce'
+
+function SearchBox() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState([])
+
+  // ❌ 每次输入都搜索
+  useEffect(() => {
+    fetch(`/api/search?q=${query}`).then(r => r.json()).then(setResults)
+  }, [query])
+
+  // ✅ 防抖：停止输入 300 ms 后搜索
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      fetch(`/api/search?q=${query}`).then(r => r.json()).then(setResults)
+    }, 300)
+    return () => clearTimeout(handler)
+  }, [query])
+
+  return <input value={query} onChange={e => setQuery(e.target.value)} />
+}
+```
+
+### useDebounce 自定义 Hook
+
+```jsx
+function useDebounce(value, delay = 300) {
+  const [debounced, setDebounced] = useState(value)
+
+  useEffect(() => {
+    const handler = setTimeout(() => setDebounced(value), delay)
+    return () => clearTimeout(handler)
+  }, [value, delay])
+
+  return debounced
+}
+
+// 使用
+function SearchBox() {
+  const [query, setQuery] = useState('')
+  const debouncedQuery = useDebounce(query, 300)
+
+  useEffect(() => {
+    if (debouncedQuery) search(debouncedQuery).then(setResults)
+  }, [debouncedQuery])
+}
+```
+
+### 用 useDeferredValue 替代防抖
+
+很多场景下 `useDeferredValue` 更优雅：
+
+```jsx
+function SearchBox() {
+  const [query, setQuery] = useState('')
+  const deferred = useDeferredValue(query)
+
+  // 立即响应输入框，列表"自动延迟"
+  return (
+    <>
+      <input value={query} onChange={e => setQuery(e.target.value)} />
+      <Results query={deferred} />
+    </>
+  )
+}
+```
+
+详见 [并发特性 § useDeferredValue](/performance/react/concurrent#usedeferredvalue)。
+
+差异：
+
+- `useDebounce`：延迟所有处理（包括 UI 显示）
+- `useDeferredValue`：立即更新 UI，仅延迟下游消费者
+
+### 节流（Throttle）
+
+适用：高频事件采样（滚动、resize、mousemove）
+
+```jsx
+import throttle from 'lodash/throttle'
+
+function ScrollAware() {
+  const [scrollY, setScrollY] = useState(0)
+
+  useEffect(() => {
+    const handler = throttle(() => setScrollY(window.scrollY), 100)
+    window.addEventListener('scroll', handler, { passive: true })
+    return () => window.removeEventListener('scroll', handler)
+  }, [])
+
+  return <div>Scroll: {scrollY}</div>
+}
+```
+
+`{ passive: true }` 让浏览器知道不会 preventDefault → 滚动不被 JS 阻塞。
+
+### requestAnimationFrame 节流
+
+更精确：每帧采样一次：
+
+```jsx
+useEffect(() => {
+  let raf
+  function onScroll() {
+    cancelAnimationFrame(raf)
+    raf = requestAnimationFrame(() => setScrollY(window.scrollY))
+  }
+  window.addEventListener('scroll', onScroll, { passive: true })
+  return () => {
+    cancelAnimationFrame(raf)
+    window.removeEventListener('scroll', onScroll)
+  }
+}, [])
+```
+
+## 实战：表单 + 实时校验 + 异步提交
+
+```jsx
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+
+const schema = z.object({
+  username: z.string().min(3).max(20),
+  email: z.string().email(),
+  password: z.string().min(8).regex(/[A-Z]/, 'Need uppercase')
+})
+
+function SignupForm() {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting }
+  } = useForm({
+    resolver: zodResolver(schema),
+    mode: 'onBlur'                          // 失焦才校验（避免输入时打扰）
+  })
+
+  async function onSubmit(data) {
+    try {
+      await api.signup(data)
+    } catch (e) {
+      // 错误处理
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      <input {...register('username')} />
+      {errors.username && <p>{errors.username.message}</p>}
+
+      <input {...register('email')} />
+      {errors.email && <p>{errors.email.message}</p>}
+
+      <input type="password" {...register('password')} />
+      {errors.password && <p>{errors.password.message}</p>}
+
+      <button disabled={isSubmitting}>
+        {isSubmitting ? 'Creating...' : 'Sign up'}
+      </button>
+    </form>
+  )
+}
+```
+
+整个组件**输入期间一次也不重渲染**——直到 onBlur 触发校验或 submit。
+
+## 选择器 + 大数据表单
+
+100 字段的表单（如年度审计、医疗问诊）：
+
+### react-hook-form + 字段级订阅
+
+```jsx
+import { useFormContext } from 'react-hook-form'
+
+function Field({ name }) {
+  const { register, formState: { errors } } = useFormContext()
+  return (
+    <>
+      <input {...register(name)} />
+      {errors[name] && <span>{errors[name].message}</span>}
+    </>
+  )
+}
+
+function HugeForm() {
+  const methods = useForm()
+  return (
+    <FormProvider {...methods}>
+      <form onSubmit={methods.handleSubmit(onSubmit)}>
+        <Field name="q1" />
+        <Field name="q2" />
+        {/* ... 100 个 ... */}
+      </form>
+    </FormProvider>
+  )
+}
+```
+
+每个 Field 独立订阅自己的 errors——某字段错误不影响其他字段渲染。
+
+### 分步表单（Wizard）
+
+```jsx
+function Wizard() {
+  const [step, setStep] = useState(1)
+  const methods = useForm()
+  return (
+    <FormProvider {...methods}>
+      {step === 1 && <Step1 onNext={() => setStep(2)} />}
+      {step === 2 && <Step2 onNext={() => setStep(3)} />}
+      {step === 3 && <Step3 onSubmit={methods.handleSubmit(onSubmit)} />}
+    </FormProvider>
+  )
+}
+```
+
+只渲染当前步骤——其它步骤不在 DOM 中，0 渲染。
+
+## 滚动优化
+
+```jsx
+// 滚动监听用 passive
+useEffect(() => {
+  function onScroll() { /* ... */ }
+  window.addEventListener('scroll', onScroll, { passive: true })
+  return () => window.removeEventListener('scroll', onScroll)
+}, [])
+
+// 用 IntersectionObserver 替代 scroll 监听
+useEffect(() => {
+  const io = new IntersectionObserver(([entry]) => {
+    if (entry.isIntersecting) loadMore()
+  })
+  io.observe(sentinelRef.current)
+  return () => io.disconnect()
+}, [])
+```
+
+详见 [图片懒加载 § IntersectionObserver](/performance/image-lazy#intersectionobserver-自定义方案)。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 用 left/top 做动画 | 触发 layout | 改 transform |
+| 受控表单管所有 input | 输入卡顿 | react-hook-form |
+| 每次输入立即搜索 | 过多请求 | 防抖 + AbortController |
+| scroll 监听不 passive | 滚动卡顿 | `{ passive: true }` |
+| Framer Motion 包所有元素 | bundle 浪费 | 仅对动画元素 |
+| `will-change: *` 全局 | 显存爆炸 | 仅交互前后切换 |
+| 表单顶层 setState 校验 | 整表单重渲 | 字段级订阅 |
+| onChange 调 expensive 函数 | 每字符卡 | 防抖或并发降级 |
+| 100+ 字段在一个组件 | 渲染慢 | Wizard / 字段级订阅 |
+| 滚动用 onScroll setState | 60+ FPS 失败 | rAF + IntersectionObserver |
+
+## 监控
+
+### 帧率监控
+
+```jsx
+function useFPS(onLowFps) {
+  useEffect(() => {
+    let last = performance.now()
+    let count = 0
+    let raf
+
+    function tick(now) {
+      count++
+      if (now - last >= 1000) {
+        if (count < 50) onLowFps?.(count)
+        count = 0
+        last = now
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [onLowFps])
+}
+```
+
+### 输入延迟
+
+```jsx
+function MeasureInput() {
+  return (
+    <input
+      onInput={(e) => {
+        const start = performance.now()
+        setTimeout(() => {
+          console.log('Input latency:', performance.now() - start)
+        }, 0)
+      }}
+    />
+  )
+}
+```
+
+## 小结
+
+- 动画属性只用 `transform` 与 `opacity`——其它属性触发 layout / paint，无法保证 60 FPS；
+- Framer Motion 是 React 动画的事实标准，AnimatePresence / layout 动画解决日常需求；
+- View Transitions API 是浏览器原生方案，简单过渡更优——但兼容性仍在跟进；
+- 受控表单不适合大表单——每次输入触发整表渲染；
+- react-hook-form 用 ref 实现"零渲染输入"，是 React 表单性能的最佳实践；
+- TanStack Form 是 TS 优先的新方案，与 react-hook-form 性能特征类似；
+- 防抖适合"等用户停下再处理"，节流适合"高频采样"，useDeferredValue 是 React 18+ 的更优替代；
+- scroll 监听用 `passive: true` + rAF / IntersectionObserver，避免阻塞滚动。

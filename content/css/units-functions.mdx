@@ -1,0 +1,431 @@
+---
+title: 单位与函数
+description: 绝对单位、相对单位、视口单位、容器单位与 calc / clamp / min / max 函数
+---
+
+# 单位与函数
+
+CSS 单位决定**数值的物理意义**。错误的单位选择会让响应式失效、可访问性变差、用户字号偏好被忽视。本章按"何时用什么"组织。
+
+## 绝对单位
+
+| 单位 | 含义 | 备注 |
+| ---- | ---- | ---- |
+| `px` | CSS 像素（不一定等于物理像素） | 最常见，但**不响应用户字号偏好** |
+| `pt` | 点 = 1/72 inch | 仅打印 |
+| `cm` / `mm` | 厘米 / 毫米 | 仅打印 |
+| `in` | 英寸 | 仅打印 |
+
+### `px` 的争议
+
+`px` 是 CSS 中的"参考像素"——在普通 96dpi 屏幕上是 1 物理像素，但在高 DPI（Retina）屏幕上是多个。它**不代表硬件像素**，仅是参考。
+
+`px` 的主要问题：**不尊重用户的字号偏好**。用户在浏览器设置中把默认字号调成 20px 时：
+
+- 用 `px` 写的内容仍是固定大小
+- 用 `rem` / `em` 写的内容会自动放大
+
+无障碍优先项目应**避免在字体相关属性上使用 `px`**。
+
+## 相对单位
+
+### `em`
+
+相对**当前元素**的 `font-size`。
+
+```css
+.parent { font-size: 16px; }
+.child {
+  font-size: 1.5em;                           /* = 16 × 1.5 = 24px */
+  padding: 1em;                               /* = 24 × 1 = 24px（基于 child 的 font-size） */
+}
+```
+
+注意：`em` 在嵌套时会**复合放大**——三层嵌套 `em: 1.2` 后实际是 `1.728` 倍：
+
+```html
+<div style="font-size: 1.2em">          <!-- 1.2 -->
+  <div style="font-size: 1.2em">        <!-- 1.44 -->
+    <div style="font-size: 1.2em">      <!-- 1.728 -->
+```
+
+### `rem`
+
+相对**根元素**的 `font-size`（`<html>`，默认 16px）：
+
+```css
+:root { font-size: 16px; }                    /* 根字号 */
+.x { font-size: 1.5rem; }                     /* 始终 = 24px，不嵌套累积 */
+```
+
+`rem` 是字号 / 间距 / 圆角等的**首选单位**——可缩放、可主题化、不嵌套累积。
+
+#### 字号缩放策略
+
+```css
+:root {
+  font-size: 100%;                            /* 尊重用户偏好（默认 16px） */
+}
+```
+
+或用 `clamp`：
+
+```css
+:root {
+  font-size: clamp(14px, 1rem + 0.5vw, 18px); /* 视口适应 */
+}
+```
+
+### Tailwind 间距单位
+
+Tailwind 的间距 / 字号单位**默认是 rem**：
+
+```css
+/* p-4 编译为 */
+.p-4 { padding: 1rem; }                       /* 实际 = 16px（默认） */
+```
+
+间距刻度：`p-1 = 0.25rem` / `p-4 = 1rem` / `p-8 = 2rem`，每单位 4px（在 16px 根字号下）。
+
+可在 `@theme` 自定义：
+
+```css
+@theme {
+  --spacing: 0.25rem;                         /* 默认值，可改 */
+}
+```
+
+或具体定制：
+
+```css
+@theme {
+  --spacing-72: 18rem;
+  --spacing-84: 21rem;
+}
+```
+
+### `%`
+
+相对父元素**对应属性**：
+
+```css
+.x {
+  width: 50%;                                 /* 父 width 的一半 */
+  padding: 5%;                                /* 父 width 的 5%（注意：上下也基于 width） */
+  font-size: 50%;                             /* 父 font-size 的一半 */
+}
+```
+
+`padding` / `margin` 的百分比始终基于**父元素 width**，即使写在 `padding-top` 上——这是 padding-bottom hack 实现宽高比的原理（`padding-bottom: 56.25%` = 9/16）。现已被 `aspect-ratio` 取代。
+
+### 视口单位
+
+```css
+.hero {
+  width: 100vw;                               /* 视口宽度 */
+  height: 100vh;                              /* 视口高度 */
+}
+
+.footer {
+  font-size: 4vmin;                           /* 视口较小边的 4% */
+  margin: 2vmax;                              /* 视口较大边的 2% */
+}
+```
+
+| 单位 | 含义 |
+| ---- | ---- |
+| `vw` / `vh` | 视口宽 / 高的 1% |
+| `vmin` / `vmax` | 视口较小 / 较大边的 1% |
+
+#### 移动端视口高度陷阱
+
+```css
+.hero { height: 100vh; }
+```
+
+iOS Safari / Android Chrome 在地址栏显示 / 隐藏时，`100vh` 不会动态变化——会出现"页面比视口高一截"的滚动残影。
+
+CSS Values Level 4 引入：
+
+| 单位 | 含义 |
+| ---- | ---- |
+| `svh` | 小视口高度（最小，地址栏全显示） |
+| `lvh` | 大视口高度（最大，地址栏隐藏） |
+| `dvh` | 动态视口高度（实时变化） |
+
+```css
+.hero { height: 100dvh; }                     /* 推荐 */
+```
+
+#### Tailwind 视口单位
+
+```html
+<div class="h-screen">100vh</div>
+<div class="h-dvh">100dvh（移动端推荐）</div>
+<div class="w-screen">100vw</div>
+```
+
+### 容器查询单位（CSS Containment 3）
+
+相对**最近的查询容器**而非视口：
+
+```css
+.parent { container-type: inline-size; }
+
+.card {
+  font-size: 4cqi;                            /* 4% 的容器内联尺寸 */
+  padding: 2cqb;                              /* 2% 的容器块尺寸 */
+}
+```
+
+| 单位 | 含义 |
+| ---- | ---- |
+| `cqw` / `cqh` | 容器宽 / 高的 1% |
+| `cqi` / `cqb` | 容器内联 / 块尺寸的 1% |
+| `cqmin` / `cqmax` | 容器较小 / 较大边的 1% |
+
+让组件根据**自身容器**而非视口响应——是组件化设计的关键工具。详见 [响应式](/css/responsive#容器查询)。
+
+### `ch` 与 `ex`
+
+```css
+.article {
+  max-width: 65ch;                            /* 65 个 "0" 字符宽度（最佳阅读宽度） */
+}
+```
+
+| 单位 | 含义 |
+| ---- | ---- |
+| `ch` | "0" 字符的宽度 |
+| `ex` | x 字符的高度 |
+
+`ch` 用于排版宽度限制；`ex` 不常用。
+
+#### Tailwind
+
+```html
+<article class="max-w-prose">         <!-- max-width: 65ch -->
+  ...
+</article>
+```
+
+## 单位选型决策
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 字号 | `rem`（或 Tailwind 的 `text-*`） |
+| 行距 | 无单位数字（`1.5`） |
+| 间距（padding / margin / gap） | `rem` 或 4 / 8 倍数 |
+| 边框宽度 | `px`（1px 边框需要精确） |
+| 圆角 | `rem` 或 `px` |
+| 容器宽度 | `%` / `max-width: 65ch` |
+| 视口区块 | `dvh` / `svh`（移动） |
+| 阴影偏移与模糊 | `px` |
+| 媒体查询断点 | `em` 或 `rem`（避免 px，尊重用户字号） |
+
+#### 媒体查询用 em / rem 的原因
+
+```css
+/* ✗ 用 px：用户调大字号后断点不变，体验断裂 */
+@media (min-width: 768px) { ... }
+
+/* ✓ 用 em：用户字号 +50% 时，断点也按比例放大 */
+@media (min-width: 48em) { ... }              /* = 768 / 16 */
+```
+
+## 数学函数
+
+### `calc()`
+
+混合不同单位的运算：
+
+```css
+.x { width: calc(100% - 32px); }              /* 撑满减去边距 */
+.x { padding: calc(1rem + 4px); }
+.x { height: calc(100vh - var(--header-height)); }
+```
+
+要求：`+` `-` 运算符前后**必须有空格**：
+
+```css
+calc(100% -32px)                              /* ✗ -32 被视为负数 */
+calc(100% - 32px)                             /* ✓ */
+```
+
+### `min()` / `max()`
+
+```css
+.x {
+  width: min(100%, 800px);                    /* 取较小者，等价于 max-width: 800px */
+  font-size: max(1rem, 4vw);                  /* 取较大者，确保最小 1rem */
+}
+```
+
+### `clamp(min, preferred, max)`
+
+```css
+.x {
+  font-size: clamp(1rem, 1rem + 1vw, 1.5rem);
+  /* 视口窄时是 1rem，宽时最大 1.5rem，中间流式过渡 */
+}
+
+.container {
+  width: clamp(320px, 90%, 1200px);
+}
+```
+
+`clamp` 是流式排版的核心工具——一行替代多个媒体查询。
+
+#### 示例：流式标题
+
+```css
+h1 { font-size: clamp(1.75rem, 1rem + 4vw, 3.5rem); }
+```
+
+视口窄到 320px 时约 1.75rem，宽到 1440px 时约 3.5rem，中间平滑过渡。
+
+#### Tailwind 等价
+
+```html
+<h1 class="text-[clamp(1.75rem,1rem+4vw,3.5rem)]">流式标题</h1>
+```
+
+或用响应式断点：
+
+```html
+<h1 class="text-3xl md:text-4xl lg:text-5xl">阶梯字号</h1>
+```
+
+二者各有优势：`clamp` 更平滑，断点更可控。
+
+### `round()` / `mod()` / `rem()`（CSS Values Level 4）
+
+```css
+.x {
+  width: round(123px, 8px);                   /* 圆整到 8px 的倍数 = 120px */
+  height: mod(100px, 30px);                   /* 取模 = 10px */
+}
+```
+
+新出，浏览器支持仍在普及，多数项目暂用 `calc` 即可。
+
+### `sin()` / `cos()` / `tan()`（CSS Values Level 4）
+
+```css
+.dial {
+  --angle: 30deg;
+  transform: translate(calc(cos(var(--angle)) * 100px), calc(sin(var(--angle)) * 100px));
+}
+```
+
+让 CSS 直接做三角运算——绘制环形菜单 / 圆形仪表盘极方便。
+
+## 颜色函数
+
+### `color-mix()`
+
+```css
+.x { background: color-mix(in oklch, blue, red); }      /* 等比混合 */
+.x { background: color-mix(in oklch, blue 70%, red); }  /* 7:3 */
+.x { background: color-mix(in oklch, var(--primary), black 20%); }
+```
+
+详见 [颜色与背景](/css/colors-backgrounds#color-mix-css-color-5)。
+
+### 相对颜色（CSS Color 5）
+
+```css
+:root { --brand: oklch(0.6 0.2 240); }
+
+.x {
+  background: oklch(from var(--brand) calc(l - 0.1) c h);  /* 暗 10% 亮度 */
+}
+```
+
+`oklch(from <color> ...)` 让你基于现有颜色派生变体——是 `darken()` / `lighten()` 的原生替代。
+
+## 其他单位
+
+| 单位 | 用途 |
+| ---- | ---- |
+| `deg` / `rad` / `turn` | 角度（旋转 / 渐变方向） |
+| `s` / `ms` | 时间（动画 / 过渡） |
+| `Hz` / `kHz` | 频率（语音相关，少用） |
+| `dpi` / `dpcm` / `dppx` | 分辨率（媒体查询） |
+
+```css
+.x { transform: rotate(0.25turn); }            /* 90deg */
+.x { transition: opacity 0.2s ease; }
+@media (min-resolution: 2dppx) { ... }        /* 高 DPI 屏幕 */
+```
+
+## 实战配方
+
+### 流式间距系统
+
+```css
+@theme {
+  --space-3xs: clamp(0.25rem, 0.2rem + 0.25vw, 0.5rem);
+  --space-2xs: clamp(0.5rem, 0.4rem + 0.5vw, 0.75rem);
+  --space-xs:  clamp(0.75rem, 0.6rem + 0.75vw, 1rem);
+  --space-s:   clamp(1rem, 0.8rem + 1vw, 1.5rem);
+  --space-m:   clamp(1.5rem, 1.2rem + 1.5vw, 2rem);
+  --space-l:   clamp(2rem, 1.5rem + 2.5vw, 3rem);
+  --space-xl:  clamp(3rem, 2rem + 5vw, 5rem);
+  --space-2xl: clamp(4rem, 2.5rem + 7.5vw, 8rem);
+}
+
+.section { padding-block: var(--space-l); }
+```
+
+视口越宽间距越大，无需断点。参考 [Utopia](https://utopia.fyi/) 的设计令牌生成器。
+
+### 限制最大与最小
+
+```css
+.container {
+  width: min(100% - 2rem, 1200px);            /* 永远留出 2rem 边距，最大 1200px */
+  margin-inline: auto;
+}
+```
+
+替代了 `max-width: 1200px; padding: 0 1rem` 的两行写法，且不会因 `box-sizing` 不同而误算。
+
+### 等比缩放容器
+
+```css
+.video-frame {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+}
+```
+
+```html
+<div class="aspect-video w-full">              <!-- aspect-ratio: 16 / 9 -->
+  <iframe src="..." class="w-full h-full"></iframe>
+</div>
+```
+
+### 间距比缩放
+
+设计令牌按比例（如 1.5 倍）派生：
+
+```css
+@theme {
+  --ratio: 1.5;
+  --space-1: 0.5rem;
+  --space-2: calc(var(--space-1) * var(--ratio));   /* = 0.75rem */
+  --space-3: calc(var(--space-2) * var(--ratio));   /* = 1.125rem */
+  --space-4: calc(var(--space-3) * var(--ratio));   /* = 1.6875rem */
+}
+```
+
+## 小结
+
+- 字号 / 间距用 `rem`，行距用无单位数字，边框用 `px`；
+- 视口高度在移动端用 `dvh`（动态）或 `svh`（小视口），`100vh` 已不推荐；
+- 容器查询单位 `cqi` / `cqb` 让组件根据自身容器响应；
+- `clamp(min, preferred, max)` 是流式排版的核心，常配合 `vw` 实现单行响应；
+- `min()` / `max()` 让组合宽度限制更优雅（如 `width: min(100% - 2rem, 1200px)`）；
+- 媒体查询断点用 `em` 而非 `px`，可尊重用户字号偏好；
+- Tailwind 间距系统基于 `rem`，可在 `@theme` 中自定义全部刻度。

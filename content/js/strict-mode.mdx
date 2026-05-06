@@ -1,0 +1,302 @@
+---
+title: 严格模式
+description: 严格模式的启用方式与语义差异
+---
+
+# 严格模式
+
+严格模式（strict mode）是 ECMAScript 5 引入的一种**受限的执行上下文**，目的是消除 JavaScript 早期为兼容性保留的、容易引发错误的"宽松"行为。在严格模式下，原本被静默忽略的不安全操作会**显式抛错**，禁用部分语义不清的特性，并启用更安全的标识符与语法约束。
+
+## 启用方式
+
+### 脚本 / 函数级
+
+在脚本文件或函数体首部添加指令字符串：
+
+```js
+'use strict'                                  // 整个脚本进入严格模式
+function f() {
+  // ...
+}
+```
+
+```js
+function strict() {
+  'use strict'                                // 仅此函数严格
+  // ...
+}
+```
+
+`'use strict'` 必须是字符串字面量、必须在所有可执行代码之前。任何前置语句都会让该指令失效。
+
+### 自动严格的上下文
+
+下列上下文**始终为严格模式**，无需声明：
+
+- ES Module（`.mjs` / `<script type="module">` / `package.json` 中 `type: "module"` 下的 `.js`）
+- `class` 体内（包括方法、字段、构造函数）
+- `function*` 生成器函数（按规范，但实现差异较大；最佳实践是显式声明）
+
+```js
+// 模块文件 user.mjs
+function f() {
+  this.x = 1                                  // this 是 undefined → TypeError
+}
+f()
+```
+
+```js
+class A {
+  set() {
+    arguments = 1                             // ✗ SyntaxError: assignment to arguments
+  }
+}
+```
+
+## 严格模式的差异
+
+下面按"为什么严格"分类，列出严格模式与非严格模式的可观察差异。
+
+### 1. 杜绝隐式全局变量
+
+非严格模式下，给未声明的标识符赋值会**自动创建全局变量**——这是 JavaScript 早期最危险的行为之一：
+
+```js
+function f() {
+  result = compute()                          // 非严格：创建 globalThis.result
+}
+f()
+console.log(globalThis.result)                // → 'something'
+```
+
+严格模式直接抛错：
+
+```js
+'use strict'
+function f() {
+  result = compute()                          // ✗ ReferenceError: result is not defined
+}
+```
+
+这迫使开发者用 `let` / `const` / `var` 显式声明，避免误拼变量名导致的"幽灵全局"。
+
+### 2. `this` 默认绑定为 `undefined`
+
+非严格模式下，独立调用的函数 `this` 指向全局对象（浏览器是 `window`，Node.js 是 `global`）：
+
+```js
+function f() { console.log(this) }
+f()                                           // 非严格 → window；严格 → undefined
+```
+
+通过 `null` / `undefined` 调用的函数也保持原值：
+
+```js
+'use strict'
+function f() { console.log(this) }
+f.call(null)                                  // → null
+f.call(undefined)                             // → undefined
+f.call(42)                                    // → 42（非严格会被装箱为 Number 对象）
+```
+
+这是设计良好的库与构造函数避免被误用为普通函数的核心保障。
+
+### 3. 只读属性不可静默写入
+
+```js
+'use strict'
+
+const obj = {}
+Object.defineProperty(obj, 'name', {
+  value: 'js',
+  writable: false
+})
+
+obj.name = 'ts'                               // 非严格：静默失败；严格：TypeError
+
+// 类似地：
+NaN = 1                                       // ✗ TypeError，NaN 是只读全局
+undefined = 'x'                               // ✗ TypeError
+```
+
+写入冻结对象的属性、向不可扩展对象添加新属性、删除不可配置的属性，在严格模式下都抛错而非静默失败。
+
+### 4. 函数参数不可重名
+
+```js
+function f(a, a) { return a }                 // 非严格 → 合法，第二个 a 覆盖
+'use strict'
+function f(a, a) {}                           // ✗ SyntaxError
+```
+
+### 5. 八进制字面量与 `with`
+
+```js
+'use strict'
+const n = 010                                 // ✗ SyntaxError: Octal literals are not allowed
+
+with (obj) {                                  // ✗ SyntaxError: Strict mode code may not include a with statement
+  // ...
+}
+```
+
+ES2015 引入了 `0o` 前缀的现代八进制字面量（`0o755`），可在严格模式下使用。
+
+### 6. `delete` 受限
+
+```js
+'use strict'
+const x = 1
+delete x                                      // ✗ SyntaxError: Delete of an unqualified identifier
+delete obj.frozenProp                         // ✗ TypeError（如果属性 configurable: false）
+```
+
+### 7. `eval` 不再污染外层作用域
+
+```js
+function f() {
+  eval('var x = 1')
+  console.log(x)                              // 非严格 → 1；严格 → ReferenceError
+}
+```
+
+非严格模式下 `eval` 中的 `var` 声明会泄漏到外层作用域，严重影响优化与安全性。
+
+### 8. `arguments` 不再与形参联动
+
+非严格模式下，修改 `arguments[i]` 会同步修改对应形参（"魔法关联"）：
+
+```js
+function f(a) {
+  arguments[0] = 99
+  console.log(a)                              // 非严格 → 99；严格 → 1
+}
+f(1)
+```
+
+严格模式切断这种关联，更接近其他语言的"参数按值传递"语义。
+
+### 9. 保留字限制
+
+严格模式额外保留的标识符（在非严格中可作变量名）：
+
+```text
+implements, interface, let, package, private, protected, public, static, yield
+```
+
+```js
+'use strict'
+const let = 1                                 // ✗ SyntaxError
+```
+
+### 10. 函数声明的位置
+
+严格模式下，`function` 声明必须出现在最外层或函数顶层，**不能嵌套在 `if` / `for` 等块中**（仅指 ES5 严格的形式语义；ES6 块级作用域使其成为正常块级声明）。
+
+```js
+'use strict'
+if (cond) {
+  function inner() {}                         // ES6 起合法（块作用域）；ES5 严格视为错误
+}
+```
+
+## 语义差异总览
+
+| 行为 | 非严格 | 严格 |
+| ---- | ------ | ---- |
+| 给未声明变量赋值 | 创建全局 | ReferenceError |
+| 独立函数 `this` | 全局对象 | undefined |
+| 写入只读属性 | 静默失败 | TypeError |
+| 删除不可配置属性 | 静默失败 | TypeError |
+| 形参重名 | 合法 | SyntaxError |
+| 八进制字面量 `0xx` | 合法 | SyntaxError |
+| `with` 语句 | 合法 | SyntaxError |
+| `delete` 标识符 | 合法（视情况） | SyntaxError |
+| `eval` 注入变量 | 污染外层 | 自有作用域 |
+| `arguments` 与形参联动 | 是 | 否 |
+| 保留字 | 普通 | SyntaxError |
+
+## 工程实践建议
+
+### 1. 默认使用 ESM / `class`
+
+新代码以 ES Module 与 `class` 为主，二者强制严格模式，无需手动声明。
+
+### 2. CommonJS 中显式声明
+
+如果维护 CommonJS 项目，每个文件首部加 `'use strict'`：
+
+```js
+// node 15+ 下 CommonJS 仍需显式声明
+'use strict'
+
+module.exports = function () { /* ... */ }
+```
+
+打包工具（Webpack、esbuild）通常会自动注入。
+
+### 3. 不混用严格与非严格
+
+```js
+'use strict'
+
+// 引入非严格代码：风险点
+require('./legacy.js')                        // 文件 legacy.js 不是严格，调用时按各自规则
+```
+
+混用容易在重构时引入"以为是严格、其实不是"的隐蔽 Bug。统一项目所有源文件均为严格。
+
+### 4. 检查打包结果
+
+部分打包工具会去除 `'use strict'`（视为冗余），或在 IIFE 包装时丢失指令。生产构建后可检查输出包是否仍处于严格模式：
+
+```js
+// 在打包结果中观察
+;(function () {
+  'use strict'
+  // ...
+})()
+```
+
+### 5. 不要将 `'use strict'` 放在外面
+
+```js
+'use strict'                                  // ✓ 全文件严格
+
+import { x } from 'a'                         // ESM 已经默认严格
+
+// 在 ESM 中：
+'use strict'                                  // 多余，可删除
+```
+
+ESM 中的 `'use strict'` 不会出错，但属于冗余指令。
+
+## 历史背景
+
+ES5 引入严格模式时，TC39 的目标是：
+
+- **修复已知错误**而不破坏 ES3 代码（迁移路径友好）
+- 为更现代的语义（块级作用域、模块、Class）铺路
+- 提供更好的优化空间（去除 `with`、限制 `eval` 让引擎可以静态分析）
+
+这种保守路线的代价是：JavaScript 长期在两种模式间分裂。ES2015 之后，新特性几乎都默认严格，工程上"全严格"是事实标准。
+
+## 与 TypeScript 的关系
+
+TypeScript 编译输出的 JS 默认在严格模式下运行。`tsconfig.json` 的 `"alwaysStrict": true` 会在每个输出文件顶部插入 `'use strict'`（在 `"strict": true` 时自动开启）。
+
+```jsonc
+{
+  "compilerOptions": {
+    "strict": true,
+    "alwaysStrict": true
+  }
+}
+```
+
+## 小结
+
+- 严格模式消除了一类历史遗留的不安全行为，使代码更可预测、错误更早暴露；
+- ES Module 与 `class` 已默认严格，新代码无需显式声明；
+- CommonJS 项目应在每个源文件顶部加 `'use strict'`；
+- 严格模式不影响运行时性能（现代引擎对此优化充分），仅改变语义边界。

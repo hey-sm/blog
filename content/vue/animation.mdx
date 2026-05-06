@@ -1,0 +1,127 @@
+---
+title: 动画与过渡
+description: Transition、TransitionGroup、CSS/JS 钩子与动画库集成
+---
+
+# 动画与过渡
+
+Vue 提供 `<Transition>` 和 `<TransitionGroup>` 组件实现过渡效果。
+
+## Transition 基础
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const show = ref(true)
+</script>
+
+<template>
+  <button @click="show = !show">Toggle</button>
+  
+  <Transition name="fade">
+    <p v-if="show">Hello</p>
+  </Transition>
+</template>
+
+<style>
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+</style>
+```
+
+## CSS 过渡类名
+
+```text
+v-enter-from    进入开始
+v-enter-active  进入过程
+v-enter-to      进入结束
+
+v-leave-from    离开开始
+v-leave-active  离开过程
+v-leave-to      离开结束
+```
+
+## TransitionGroup
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const items = ref([1, 2, 3, 4, 5])
+
+function shuffle() {
+  items.value.sort(() => Math.random() - 0.5)
+}
+</script>
+
+<template>
+  <button @click="shuffle">Shuffle</button>
+  
+  <TransitionGroup name="list" tag="ul">
+    <li v-for="item in items" :key="item">
+      {{ item }}
+    </li>
+  </TransitionGroup>
+</template>
+
+<style>
+.list-move {
+  transition: transform 0.3s;
+}
+
+.list-enter-active,
+.list-leave-active {
+  transition: opacity 0.3s;
+}
+
+.list-enter-from,
+.list-leave-to {
+  opacity: 0;
+}
+</style>
+```
+
+## JavaScript 钩子
+
+```vue
+<script setup lang="ts">
+function onBeforeEnter(el: Element) {}
+function onEnter(el: Element, done: () => void) {
+  done()
+}
+function onAfterEnter(el: Element) {}
+function onEnterCancelled(el: Element) {}
+
+function onBeforeLeave(el: Element) {}
+function onLeave(el: Element, done: () => void) {
+  done()
+}
+function onAfterLeave(el: Element) {}
+function onLeaveCancelled(el: Element) {}
+</script>
+
+<template>
+  <Transition
+    @before-enter="onBeforeEnter"
+    @enter="onEnter"
+    @after-enter="onAfterEnter"
+    @enter-cancelled="onEnterCancelled"
+    @before-leave="onBeforeLeave"
+    @leave="onLeave"
+    @after-leave="onAfterLeave"
+    @leave-cancelled="onLeaveCancelled"
+  >
+    <div v-if="show">Content</div>
+  </Transition>
+</template>
+```
+
+下一章 [路由](/vue/routing) 介绍 Vue Router。

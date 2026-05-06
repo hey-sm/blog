@@ -1,0 +1,494 @@
+---
+title: 类型别名
+description: TypeScript Type Aliases 类型别名、keyof 运算符、索引访问类型、递归类型别名与高级模式
+---
+
+# 类型别名
+
+类型别名（Type Alias）为现有类型创建一个新名称。它可以是任何类型：原始类型、联合类型、交叉类型、对象类型等。
+
+## 基本语法
+
+```ts
+// 原始类型别名
+type UserId = number
+
+// 对象类型别名
+type User = {
+  id: UserId
+  name: string
+  email: string
+}
+
+// 联合类型别名
+type Status = 'active' | 'inactive' | 'banned'
+
+// 函数类型别名
+type EventHandler = (event: Event) => void
+
+// 元组类型别名
+type Point3D = [number, number, number]
+
+// 数组类型别名
+type UserList = User[]
+```
+
+## 泛型类型别名
+
+```ts
+// 泛型容器
+type Container<T> = {
+  value: T
+  timestamp: Date
+}
+
+const numContainer: Container<number> = {
+  value: 42,
+  timestamp: new Date()
+}
+
+// 多个类型参数
+type Dictionary<K extends string, V> = {
+  [key: string]: V
+}
+
+type Result<T, E = Error> =
+  | { success: true; data: T }
+  | { success: false; error: E }
+
+function fetchUser(id: number): Result<User> {
+  try {
+    const user = {}
+    return { success: true, data: user as User }
+  } catch (err) {
+    return { success: false, error: err as Error }
+  }
+}
+```
+
+**React 示例——泛型组件 Props**：
+
+```tsx
+type ListProps<T> = {
+  items: T[]
+  renderItem: (item: T, index: number) => React.ReactNode
+  getKey: (item: T) => string | number
+  emptyMessage?: string
+}
+
+function List<T>({ items, renderItem, getKey, emptyMessage = 'No items' }: ListProps<T>) {
+  if (items.length === 0) {
+    return <div>{emptyMessage}</div>
+  }
+
+  return (
+    <ul>
+      {items.map((item, index) => (
+        <li key={getKey(item)}>
+          {renderItem(item, index)}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+// 使用时类型自动推断
+interface Todo {
+  id: number
+  text: string
+  done: boolean
+}
+
+const todos: Todo[] = [
+  { id: 1, text: 'Learn TS', done: false }
+]
+
+<List
+  items={todos}
+  renderItem={(todo) => (
+    <span style={{ textDecoration: todo.done ? 'line-through' : 'none' }}>
+      {todo.text}
+    </span>
+  )}
+  getKey={(todo) => todo.id}
+/>
+```
+
+## keyof 运算符
+
+`keyof T` 获取类型 `T` 所有属性名的联合类型：
+
+```ts
+interface User {
+  id: number
+  name: string
+  email: string
+}
+
+type UserKeys = keyof User
+// 'id' | 'name' | 'email'
+
+// 用于约束泛型参数
+function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key]
+}
+
+const user: User = { id: 1, name: 'Alice', email: 'alice@example.com' }
+
+const name = getProperty(user, 'name')   // ✅ string
+const age = getProperty(user, 'age')     // ❌ 错误：'age' 不在 keyof User 中
+```
+
+### keyof 与索引签名
+
+```ts
+type Dictionary = {
+  [key: string]: number
+}
+
+type DictKeys = keyof Dictionary
+// string | number（索引签名同样产生 number，因为 arr[0] 也是合法的）
+
+type StringMap = {
+  [key: symbol]: unknown
+  foo: string
+}
+
+type StringMapKeys = keyof StringMap
+// symbol | 'foo'
+```
+
+### keyof + typeof 获取对象键的联合
+
+```ts
+const CONFIG = {
+  apiUrl: 'https://api.example.com',
+  timeout: 5000,
+  retries: 3
+} as const
+
+type ConfigKey = keyof typeof CONFIG
+// 'apiUrl' | 'timeout' | 'retries'
+
+// 配合 typeof
+const ROUTES = {
+  home: '/',
+  about: '/about',
+  dashboard: '/dashboard'
+} as const
+
+type RouteKey = keyof typeof ROUTES
+// 'home' | 'about' | 'dashboard'
+```
+
+**React 示例**：
+
+```tsx
+const BREAKPOINTS = {
+  sm: 640,
+  md: 768,
+  lg: 1024,
+  xl: 1280,
+} as const
+
+type Breakpoint = keyof typeof BREAKPOINTS
+
+interface ResponsiveProps {
+  visibleAt: Breakpoint
+  children: React.ReactNode
+}
+
+function Responsive({ visibleAt, children }: ResponsiveProps) {
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth)
+
+  useEffect(() => {
+    const handler = () => setWindowWidth(window.innerWidth)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+
+  if (windowWidth < BREAKPOINTS[visibleAt]) {
+    return null
+  }
+
+  return <>{children}</>
+}
+```
+
+## 索引访问类型
+
+使用 `T[K]` 语法访问类型的属性类型：
+
+```ts
+interface User {
+  id: number
+  name: string
+  tags: string[]
+  profile: {
+    avatar: string
+    bio: string
+  }
+}
+
+// 访问单个属性类型
+type UserName = User['name']          // string
+type UserTags = User['tags']          // string[]
+type UserProfile = User['profile']    // { avatar: string; bio: string }
+
+// 访问嵌套属性
+type UserAvatar = User['profile']['avatar']  // string
+
+// 使用联合类型
+type StringFields = User['name' | 'email']   // string
+
+// 使用 keyof
+type AllValues = User[keyof User]
+// string | number | string[] | { avatar: string; bio: string }
+```
+
+### 从数组中提取元素类型
+
+```ts
+type Item = (string | number)[]
+type Element = Item[number]  // string | number
+
+// 实用技巧
+type ArrayElement<T extends readonly unknown[]> = T[number]
+
+type StrArray = string[]
+type Str = ArrayElement<StrArray>  // string
+```
+
+**React 示例**：
+
+```tsx
+// 从列表类型中提取元素类型
+type UserList = {
+  id: number
+  name: string
+  email: string
+}[]
+
+type User = UserList[number]
+// { id: number; name: string; email: string }
+
+// 提取数组元素的属性类型
+type UserIds = UserList[number]['id']  // number
+```
+
+## 递归类型别名
+
+TypeScript 3.7+ 支持递归类型别名：
+
+```ts
+// 树形结构
+type TreeNode<T> = {
+  value: T
+  children: TreeNode<T>[]
+}
+
+const tree: TreeNode<string> = {
+  value: 'root',
+  children: [
+    {
+      value: 'child-1',
+      children: [
+        { value: 'leaf', children: [] }
+      ]
+    }
+  ]
+}
+
+// JSON 类型
+type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | Json[]
+  | { [key: string]: Json }
+```
+
+**React 示例——递归组件**：
+
+```tsx
+type MenuItem = {
+  label: string
+  href?: string
+  children?: MenuItem[]
+}
+
+function Menu({ items }: { items: MenuItem[] }) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={item.label}>
+          {item.href ? (
+            <a href={item.href}>{item.label}</a>
+          ) : (
+            <span>{item.label}</span>
+          )}
+          {item.children && <Menu items={item.children} />}
+        </li>
+      ))}
+    </ul>
+  )
+}
+```
+
+## 模板字面量类型别名
+
+```ts
+// 动态生成联合类型
+type EventName = `on${Capitalize<string>}`
+
+const handler: Record<EventName, () => void> = {
+  onClick: () => {},
+  onChange: () => {},
+  onSubmit: () => {}
+}
+
+// 实际应用：生成 action 类型
+type Action<T extends string> = `${T}_START` | `${T}_SUCCESS` | `${T}_FAILURE`
+
+type UserAction = Action<'USER'>
+// 'USER_START' | 'USER_SUCCESS' | 'USER_FAILURE'
+```
+
+## 类型别名与类型体操
+
+### 条件类型别名
+
+```ts
+type IsString<T> = T extends string ? 'yes' : 'no'
+
+type T1 = IsString<'hello'>  // 'yes'
+type T2 = IsString<42>       // 'no'
+```
+
+### 映射类型别名
+
+```ts
+type ReadonlyUser<T> = {
+  readonly [K in keyof T]: T[K]
+}
+
+type PartialUser<T> = {
+  [K in keyof T]?: T[K]
+}
+```
+
+### 约束递归深度
+
+```ts
+// TypeScript 约限制递归深度为 50 层
+// ❌ 过度递归
+type Deep<T> = { value: T; next: Deep<T> | null }  // ✅ 还好，加了一层保护
+
+// 手动控制深度
+type List<T, D extends number = 3> = D extends 0
+  ? null
+  : { value: T; next: List<T, Subtract<D, 1>> }
+```
+
+## 陷阱
+
+### 1. 类型别名无法声明合并
+
+```ts
+type User = {
+  name: string
+}
+
+// ❌ 错误：重复标识符
+type User = {
+  age: number
+}
+
+// ✅ 使用 interface 代替
+interface User {
+  name: string
+}
+
+interface User {
+  age: number
+}
+```
+
+### 2. 交叉类型的 `&` 短路
+
+```ts
+type Impossible = string & number
+// never——没有值同时是 string 和 number
+
+type MaybeCross<T, U> = T & U
+type Test = MaybeCross<{ a: 1 }, { b: 2 }>  // { a: 1; b: 2 } ✅
+type Bad = MaybeCross<{ a: 1 }, { a: 2 }>    // { a: never } ❌
+```
+
+### 3. 递归循环引用
+
+```ts
+// ❌ 直接循环引用
+type A = B
+type B = A  // 可能被检测到
+
+// ❌ 间接循环引用（过深可能报错）
+type JSON = { [k: string]: JSON }
+// 这个还好，因为有 string key 兜底
+```
+
+## 最佳实践
+
+### ✅ 为联合类型起别名
+
+```ts
+// ✅ 复用且语义化
+type Color = 'red' | 'green' | 'blue'
+type Alignment = 'left' | 'center' | 'right'
+```
+
+### ✅ 使用泛型别名提取公用模式
+
+```ts
+// ✅ 一个泛型别名替代重复定义
+type Paginated<T> = {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+type UsersPage = Paginated<User>
+type PostsPage = Paginated<Post>
+```
+
+### ✅ 使用索引访问替代重复定义
+
+```ts
+// ❌ 重复定义
+type UserId = number
+type PostAuthor = number
+
+// ✅ 引用原始来源
+type PostAuthor = User['id']
+```
+
+### ✅ 善用 `const` 对象 + `typeof` 管理常量
+
+```ts
+// ✅ 单一数据源、类型自动同步
+const APP_CONFIG = {
+  maxRetries: 3,
+  apiTimeout: 5000,
+  features: {
+    darkMode: true,
+    notifications: true
+  }
+} as const
+
+type AppConfig = typeof APP_CONFIG
+type FeatureName = keyof typeof APP_CONFIG.features
+```
+
+下一章 [类型守卫与收窄](/ts/type-guards) 介绍如何安全地在联合类型中收窄具体类型。

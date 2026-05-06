@@ -1,0 +1,339 @@
+---
+title: this 关键字
+description: 五种 this 绑定规则、call / apply / bind 与箭头函数的词法 this
+---
+
+# this 关键字
+
+`this` 是 JavaScript 中最常被误解的关键字之一。它**不是固定指向某个对象的引用**，而是在**函数调用时**根据规则动态确定。
+
+> 一句话总结：**`this` 由调用方式决定，与函数定义位置无关**（箭头函数除外）。
+
+## 五种绑定规则
+
+按优先级从低到高：
+
+1. 默认绑定（独立调用）
+2. 隐式绑定（方法调用）
+3. 显式绑定（`call` / `apply` / `bind`）
+4. `new` 绑定
+5. 箭头函数 / 词法绑定
+
+### 默认绑定
+
+函数被独立调用（无任何修饰）时：
+
+```js
+function show() {
+  console.log(this)
+}
+
+show()                                        // 浏览器：window；Node：globalThis；
+                                              // 模块/严格模式：undefined
+```
+
+```js
+'use strict'
+function show() {
+  console.log(this)
+}
+show()                                        // → undefined
+```
+
+### 隐式绑定
+
+通过对象方法调用：
+
+```js
+const obj = {
+  name: 'js',
+  greet() {
+    console.log(this.name)
+  }
+}
+
+obj.greet()                                   // → 'js'    this = obj
+```
+
+#### 隐式丢失
+
+```js
+const fn = obj.greet                          // 提取方法引用
+fn()                                          // → undefined（严格）/ window.name（非严格）
+                                              // ↑ 隐式绑定丢失，回到默认绑定
+
+setTimeout(obj.greet, 0)                      // 同样丢失：传入的是函数本身
+
+const arr = [obj.greet]
+arr[0]()                                      // 等价于 arr[0]，this = arr
+```
+
+修复方法：使用 `bind` 或箭头函数包装：
+
+```js
+setTimeout(obj.greet.bind(obj), 0)            // → 'js'
+setTimeout(() => obj.greet(), 0)              // → 'js'
+```
+
+### 显式绑定：`call` / `apply` / `bind`
+
+#### `call(thisArg, ...args)` 与 `apply(thisArg, argsArray)`
+
+立即调用，传入 `this`：
+
+```js
+function greet(greeting, punct) {
+  console.log(`${greeting}, ${this.name}${punct}`)
+}
+
+const user = { name: 'js' }
+greet.call(user, 'Hi', '!')                   // → 'Hi, js!'
+greet.apply(user, ['Hello', '.'])             // → 'Hello, js.'
+```
+
+`call` 与 `apply` 仅在参数传递形式上有别，行为一致。
+
+#### `bind(thisArg, ...preset)`
+
+创建**新函数**，永久绑定 `this` 与可选预置参数（偏应用）：
+
+```js
+const bound = greet.bind(user, 'Hey')
+bound('!')                                    // → 'Hey, js!'
+bound.call({ name: 'other' }, '!')            // → 'Hey, js!'   bind 不可被覆盖
+
+// 经典用法：偏应用
+function multiply(a, b) { return a * b }
+const double = multiply.bind(null, 2)
+double(5)                                     // → 10
+```
+
+#### 三者性能与适用场景
+
+| 维度 | `call` | `apply` | `bind` |
+| ---- | ------ | ------- | ------ |
+| 立即执行 | ✅ | ✅ | ❌（返回新函数） |
+| 参数形式 | 列表 | 数组 | 列表（部分预置） |
+| 典型用途 | 借用方法 | 已有数组的参数 | 事件回调、偏应用 |
+
+```js
+// 借用 Array 方法处理类数组
+function f() {
+  const args = Array.prototype.slice.call(arguments)
+  // 现代写法：const args = [...arguments]
+}
+
+// 借用 Object.prototype.toString
+Object.prototype.toString.call(null)          // → '[object Null]'
+```
+
+### `new` 绑定
+
+构造函数调用时，引擎执行如下步骤：
+
+1. 创建一个新对象 `obj`
+2. 将 `obj.[[Prototype]]` 指向 `Constructor.prototype`
+3. 以 `obj` 为 `this` 执行构造函数体
+4. 若构造函数显式返回对象，则采用之；否则返回 `obj`
+
+```js
+function User(name) {
+  this.name = name
+}
+
+const u = new User('js')
+console.log(u.name)                           // → 'js'
+console.log(u instanceof User)                // → true
+```
+
+#### 显式返回对象会覆盖 `this`
+
+```js
+function Foo() {
+  this.x = 1
+  return { y: 2 }                             // 返回新对象会替换 this
+}
+const f = new Foo()
+console.log(f)                                // → { y: 2 }   不是 { x: 1 }
+
+function Bar() {
+  this.x = 1
+  return 42                                   // 原始值会被忽略
+}
+const b = new Bar()
+console.log(b)                                // → { x: 1 }
+```
+
+### 箭头函数：词法 `this`
+
+箭头函数**没有自己的 `this`**，使用定义所在作用域的 `this`：
+
+```js
+const obj = {
+  name: 'js',
+  delay() {
+    setTimeout(() => {
+      console.log(this.name)                  // → 'js'   箭头函数继承 delay 的 this
+    }, 0)
+  }
+}
+obj.delay()
+```
+
+注意：箭头函数的 `this` 在**定义时就已确定**，无法被 `call` / `apply` / `bind` 改变：
+
+```js
+const arrow = () => this
+arrow.call({ x: 1 })                          // 仍然是外层的 this
+```
+
+## 优先级总览
+
+```js
+function f() { console.log(this) }
+
+const obj = { f }
+
+f()                                            // 默认绑定
+obj.f()                                        // 隐式绑定
+f.call(other)                                  // 显式绑定（覆盖默认）
+obj.f.call(other)                              // 显式覆盖隐式
+new f()                                        // new 绑定（最高）
+new obj.f()                                    // new 仍胜出
+new f.bind(obj)()                              // new 胜过 bind
+```
+
+> ES6 之前 `bind` 的 polyfill 一般通过手写函数实现 new 检测；规范 `bind` 已正确处理 new 优先级问题。
+
+## `this` 在不同环境下的初始值
+
+| 环境 | 顶层 `this` |
+| ---- | ----------- |
+| 浏览器全局脚本 | `window` |
+| 浏览器模块（`type="module"`） | `undefined` |
+| Node.js CommonJS | `module.exports`（即 `{}`） |
+| Node.js ESM | `undefined` |
+| `eval` 在严格模式下 | `undefined` |
+
+跨环境通用引用：
+
+```js
+console.log(globalThis)                       // ES2020 引入，跨环境统一指向全局对象
+```
+
+## 常见陷阱与修复
+
+### 1. 回调中丢失 `this`
+
+```js
+class Counter {
+  count = 0
+  start() {
+    setInterval(this.tick, 1000)              // ✗ tick 中 this = undefined
+  }
+  tick() {
+    this.count++
+  }
+}
+
+// 修复 1：箭头函数
+class Counter {
+  count = 0
+  tick = () => { this.count++ }                // 字段定义中的箭头函数自动绑定
+  start() {
+    setInterval(this.tick, 1000)
+  }
+}
+
+// 修复 2：bind
+class Counter {
+  count = 0
+  constructor() {
+    this.tick = this.tick.bind(this)
+  }
+  tick() { this.count++ }
+}
+```
+
+### 2. 数组方法的 `thisArg`
+
+`forEach` / `map` / `filter` / `find` / `every` / `some` 接受第二参数指定 `this`：
+
+```js
+class Filter {
+  threshold = 10
+  apply(arr) {
+    return arr.filter(function (n) {
+      return n > this.threshold               // 普通函数中需绑定 this
+    }, this)                                  // ← thisArg
+  }
+}
+
+// 现代写法直接用箭头函数：
+class Filter2 {
+  threshold = 10
+  apply(arr) {
+    return arr.filter(n => n > this.threshold)
+  }
+}
+```
+
+### 3. 类方法对象解构
+
+```js
+class Service {
+  url = '/api'
+  fetch() { return fetch(this.url) }
+}
+
+const svc = new Service()
+const { fetch } = svc
+fetch()                                       // ✗ this 丢失
+
+// 修复
+const fetchBound = svc.fetch.bind(svc)
+```
+
+## `super` 与方法的 `this`
+
+```js
+class Base {
+  greet() { console.log('hi from', this.name) }
+}
+
+class Derived extends Base {
+  name = 'derived'
+  greet() {
+    super.greet()                             // this 仍是 Derived 实例
+  }
+}
+
+new Derived().greet()                         // → 'hi from derived'
+```
+
+`super.method()` 是绑定到当前 `this` 的：可以理解为"使用父类原型的方法体，但 `this` 仍是当前实例"。
+
+## `this` 的最佳实践
+
+1. **类方法中需要异步回调** → 使用箭头函数字段或在构造函数中 `bind`；
+2. **回调函数从外部传入** → 调用方负责绑定，库不应假设；
+3. **库设计中** → 优先支持函数式 API（接受参数），减少对 `this` 的依赖；
+4. **避免在箭头函数中使用 `this`** —— 它指向定义位置的 `this`，可能是不期望的全局对象；
+5. **永远不要在方法定义中使用箭头函数**（指原型方法）：
+
+```js
+// ✗ 错误：所有实例共享同一个箭头函数，且 this 在定义时已绑定为外层
+const proto = {
+  name: 'proto',
+  greet: () => console.log(this.name)         // this 指向定义所在作用域，而非 proto
+}
+proto.greet()                                  // → undefined
+```
+
+## 小结
+
+- `this` 不是变量，而是函数调用的隐式参数；
+- 五种绑定规则按优先级：箭头/词法 → `new` → 显式 → 隐式 → 默认；
+- 箭头函数没有自己的 `this`，无法被 `call` / `apply` / `bind` 修改；
+- 异步回调中 `this` 丢失是高频 Bug，使用箭头字段或 `bind` 修复；
+- `globalThis` 是跨环境统一访问全局对象的现代方式。

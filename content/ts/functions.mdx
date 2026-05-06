@@ -1,0 +1,481 @@
+---
+title: 函数类型
+description: TypeScript 函数签名、可选参数、剩余参数、函数重载、this 类型注解、类型谓词与常见模式
+---
+
+# 函数类型
+
+TypeScript 为函数提供丰富的类型标注能力，包括参数类型、返回值类型、函数重载和 `this` 注解。
+
+## 函数类型签名
+
+### 定义函数类型
+
+```ts
+// 方式 1：类型别名
+type Add = (a: number, b: number) => number
+
+// 方式 2：接口
+interface Add {
+  (a: number, b: number): number
+}
+
+// 使用函数类型
+const add: Add = (a, b) => a + b
+```
+
+### 标注函数参数与返回值
+
+```ts
+// 完整标注
+function createUser(
+  name: string,
+  age: number,
+  roles: string[] = []
+): { name: string; age: number; roles: string[] } {
+  return { name, age, roles }
+}
+
+// 返回值类型可以省略（TS 推断）
+function createUser(name: string, age: number) {
+  return { name, age }
+}
+// 推断返回类型: { name: string; age: number }
+```
+
+### void 与 undefined 的区别
+
+```ts
+// void：忽略返回值
+type Callback = () => void
+const cb: Callback = () => 42  // ✅ 返回值被忽略
+
+// undefined：必须显式返回 undefined
+type UndefinedFn = () => undefined
+// ✅ 必须返回 undefined
+const fn: UndefinedFn = () => undefined
+```
+
+## 可选参数与默认参数
+
+### 可选参数
+
+```ts
+// lastname 是可选的
+function fullName(first: string, last?: string) {
+  if (last) return `${first} ${last}`
+  return first
+}
+
+fullName('Alice')          // ✅
+fullName('Alice', 'Smith') // ✅
+```
+
+### 默认参数
+
+```ts
+// 有默认值的参数自动变为可选
+function greet(name: string, greeting = 'Hello') {
+  return `${greeting}, ${name}!`
+}
+
+greet('Alice')              // "Hello, Alice!"
+greet('Alice', 'Welcome')   // "Welcome, Alice!"
+```
+
+**React 示例**：
+
+```tsx
+interface ButtonProps {
+  label: string
+  variant?: 'primary' | 'secondary'
+  size?: 'sm' | 'md' | 'lg'
+  disabled?: boolean
+}
+
+function Button({
+  label,
+  variant = 'primary',  // 默认值
+  size = 'md',
+  disabled = false
+}: ButtonProps) {
+  return (
+    <button
+      className={`btn btn-${variant} btn-${size}`}
+      disabled={disabled}
+    >
+      {label}
+    </button>
+  )
+}
+```
+
+## 剩余参数
+
+```ts
+// 剩余参数收集
+function sum(...numbers: number[]): number {
+  return numbers.reduce((acc, n) => acc + n, 0)
+}
+
+sum(1, 2, 3, 4)  // 10
+
+// 解构 + 剩余参数
+function log(message: string, ...args: unknown[]) {
+  console.log(message, ...args)
+}
+
+log('Error:', 404, 'Not Found')
+```
+
+**React 示例——展开 props**：
+
+```tsx
+// 组件接收未知的 HTML 属性
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  label: string
+  error?: string
+}
+
+function Input({ label, error, className, ...rest }: InputProps) {
+  return (
+    <div>
+      <label>{label}</label>
+      <input
+        className={`input ${className ?? ''} ${error ? 'input-error' : ''}`}
+        {...rest}
+      />
+      {error && <span className="error">{error}</span>}
+    </div>
+  )
+}
+
+// 使用时可以传任何 input 原生属性
+<Input label="Email" type="email" placeholder="Enter email" required />
+```
+
+## 函数重载
+
+函数重载提供多组参数签名，编译器自动选择匹配的签名：
+
+```ts
+// 重载签名（无函数体）
+function createDate(timestamp: number): Date
+function createDate(year: number, month: number, day: number): Date
+
+// 实现签名（必须覆盖所有重载）
+function createDate(a: number, b?: number, c?: number): Date {
+  if (b !== undefined && c !== undefined) {
+    return new Date(a, b, c)
+  }
+  return new Date(a)
+}
+
+createDate(1700000000000)         // Date
+createDate(2024, 0, 1)            // Date
+createDate(2024, 0)               // ❌ 错误：没有匹配的重载
+```
+
+### 重载的规则
+
+```ts
+function handle(value: string): string
+function handle(value: number): number
+function handle(value: string | number): string | number {
+  return value
+}
+// ✅ 实现签名兼容所有重载签名
+```
+
+**React 示例——useFetch hook**：
+
+```tsx
+// 重载：当 key 存在时为 T，否则为 T | null
+function useFetch<T>(url: string, key: string): T
+function useFetch<T>(url: string): T | null
+
+function useFetch<T>(url: string, key?: string): T | null {
+  const [data, setData] = useState<T | null>(null)
+
+  useEffect(() => {
+    fetch(url)
+      .then(r => r.json())
+      .then(setData)
+  }, [url])
+
+  return data
+}
+
+// 使用时类型自动匹配
+const data1 = useFetch<User>('/api/user', 'user-1')
+// data1: User
+
+const data2 = useFetch<User>('/api/user')
+// data2: User | null
+```
+
+## this 类型注解
+
+### 标注 this 参数类型
+
+```ts
+// this 作为第一个参数（假参数），编译后会被删除
+interface Card {
+  suit: string
+  rank: number
+}
+
+function describe(this: Card) {
+  return `${this.rank} of ${this.suit}`
+}
+
+const card: Card = { suit: 'hearts', rank: 10 }
+
+// ✅ call 提供正确的 this
+describe.call(card)  // "10 of hearts"
+
+// ❌ 独立调用没有 this 上下文
+describe()  // 错误
+```
+
+### 方法中的 this 推断
+
+```ts
+class ToggleButton {
+  isOn = false
+
+  // ✅ 箭头函数自动绑定 this
+  toggle = () => {
+    this.isOn = !this.isOn
+  }
+
+  // ❌ 普通方法需要手动绑定
+  handleClick() {
+    this.isOn = !this.isOn
+  }
+}
+```
+
+**React 示例**：
+
+```tsx
+class SearchInput extends React.Component<{}, { query: string }> {
+  state = { query: '' }
+
+  // ✅ 箭头函数确保 this 正确
+  handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    this.setState({ query: e.target.value })
+  }
+
+  render() {
+    return <input value={this.state.query} onChange={this.handleChange} />
+  }
+}
+```
+
+## Rest 参数的类型推断
+
+```ts
+// 剩余参数作为元组
+function tuple<T extends unknown[]>(...args: T): T {
+  return args
+}
+
+const t = tuple('a', 1, true)
+// t: [string, number, boolean]
+
+// 对剩余参数使用泛型约束
+function concat<T extends unknown[], U extends unknown[]>(a: [...T], b: [...U]): [...T, ...U] {
+  return [...a, ...b]
+}
+
+const result = concat([1, 2], ['a', 'b'])
+// result: [number, number, string, string]
+```
+
+## 函数类型推断
+
+### 参数解构的类型推断
+
+```ts
+// ✅ 解构参数带类型
+function createUser({ name, age }: { name: string; age: number }) {
+  return { name, age }
+}
+
+// ❌ 不要在解构内部标注类型（无效语法）
+function createUser({ name: string, age: number }) {  // 语法错误
+  return { name, age }
+}
+```
+
+### 回调参数的类型推断
+
+```ts
+// 回调参数从上下文推断
+const numbers = [1, 2, 3]
+
+numbers.forEach((n) => {
+  // n 自动推断为 number
+  console.log(n * 2)
+})
+
+// 无需显式标注
+numbers.reduce((acc, n) => acc + n, 0)
+```
+
+## 条件式回调
+
+```tsx
+// 根据条件区分不同的事件处理函数
+interface EventHandlers {
+  onSubmit: (data: FormData) => void
+  onChange: (field: string, value: string) => void
+  onBlur: (field: string) => void
+}
+
+function useFormHandlers(handlers: EventHandlers) {
+  return {
+    handleSubmit: (e: React.FormEvent) => {
+      e.preventDefault()
+      // handlers.onSubmit(formData)
+    },
+    handleChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      handlers.onChange(e.target.name, e.target.value)
+    },
+    handleBlur: (e: React.FocusEvent<HTMLInputElement>) => {
+      handlers.onBlur(e.target.name)
+    }
+  }
+}
+```
+
+## 函数类型守卫
+
+```ts
+// 返回类型谓词
+function isString(value: unknown): value is string {
+  return typeof value === 'string'
+}
+
+function isDefined<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined
+}
+
+// 在 filter 中使用
+const items: (string | null | undefined)[] = ['a', null, 'b', undefined, 'c']
+const validItems = items.filter(isDefined)
+// validItems: string[]
+```
+
+### 断言函数
+
+```ts
+function assertIsError(value: unknown): asserts value is Error {
+  if (!(value instanceof Error)) {
+    throw new TypeError('Expected an Error')
+  }
+}
+
+function handleError(error: unknown) {
+  assertIsError(error)
+  // 此后 error 为 Error 类型
+  console.error(error.message)
+}
+```
+
+## 使用 bind / call / apply 的类型
+
+```ts
+type Handler = (this: HTMLElement, e: Event) => void
+
+const handler: Handler = function(this: HTMLElement, e) {
+  console.log(this.tagName)
+}
+
+// bind 创建一个 this 已经绑定的函数
+const bound = handler.bind(document.body)
+bound(new Event('click'))  // 打印 "BODY"
+```
+
+## 陷阱
+
+### 1. void 返回值不会被严格检查
+
+```ts
+type Callback = () => void
+
+// ✅ 返回值会直接被丢弃
+const cb: Callback = () => {
+  return 'ignored'  // 不报错——void 允许任何返回值
+}
+
+// 但如果后面用到返回值：
+// const v = cb().toUpperCase()  // ❌ 错误：不能访问 void 属性
+```
+
+### 2. 实现签名过于宽松
+
+```ts
+// ❌ 实现签名太宽，不会检查与重载签名的匹配
+function fn(x: string): number  // 重载签名
+function fn(x: number): string  // 重载签名
+function fn(x: unknown): unknown {
+  // 你可以在这里返回任何类型而不会报错
+  return { bad: true }
+}
+
+fn('hello')  // 类型系统认为返回 number，实际是 { bad: true }
+```
+
+### 3. 可选参数与剩余参数混用时注意位置
+
+```ts
+// ✅ 剩余参数放最后
+function format(template: string, ...args: string[]): string {
+  return template
+}
+
+// ❌ 可选参数不能放在剩余参数之后
+function bad(...args: string[], extra?: string) {}
+```
+
+## 最佳实践
+
+### ✅ 函数参数使用显式类型
+
+```ts
+// ✅ 参数类型不能推断，必须标注
+function greet(name: string) {
+  return `Hello, ${name}!`
+}
+```
+
+### ✅ 返回值类型简单时可省略
+
+```ts
+// ✅ 返回类型明显时省略
+function add(a: number, b: number) {
+  return a + b  // 推断为 number
+}
+
+// ✅ 公共 API 或复杂返回值时标注
+export function fetchUsers(page: number): Promise<Paginated<User>> {
+  // ...
+}
+```
+
+### ✅ 使用重载处理多形态函数
+
+```ts
+// ✅ 当参数不同导致返回值类型变化时
+function fetchData(url: string): Promise<unknown>
+function fetchData(url: string, parser: (data: unknown) => string): Promise<string>
+function fetchData(url: string, parser?: (data: unknown) => string) {
+  return fetch(url)
+    .then(r => r.json())
+    .then(data => parser ? parser(data) : data)
+}
+```
+
+下一章 [工具类型（上）](/ts/utility-types-1) 介绍 Partial、Required、Readonly、Pick、Omit 等内建工具类型。

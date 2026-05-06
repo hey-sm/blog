@@ -1,0 +1,301 @@
+---
+title: 简介与心智模型
+description: CSS 是什么、引入方式、级联机制、继承与特异性
+---
+
+# 简介与心智模型
+
+CSS（Cascading Style Sheets，层叠样式表）是为 HTML / XML 文档**描述视觉表现**的声明式语言。它的核心命题：
+
+> **「描述结果，由浏览器决定如何实现。」**
+
+理解 CSS 必须把握三个概念支柱：**层叠（Cascade）**、**继承（Inheritance）**、**特异性（Specificity）**。它们决定了"为什么我的样式不生效 / 被覆盖了"——CSS 的绝大多数挫败感都来自这三条规则的相互作用。
+
+## CSS 不是命令式
+
+传统命令式：
+
+```js
+element.style.color = 'red'
+```
+
+CSS 是声明式：
+
+```css
+.title { color: red; }
+```
+
+声明的语义是"任何匹配 `.title` 的元素，文字颜色为红色"——而不是"把这个元素的颜色改成红色"。这条规则的**作用域、生效时机、覆盖关系**都由层叠规则决定，不由你直接控制。
+
+## 引入方式
+
+### 内联（Inline）
+
+```html
+<button style="color: red; padding: 8px;">Click</button>
+```
+
+**特异性极高**（仅次于 `!important`），常用于：
+
+- JS 动态计算样式（视口、动画）
+- 邮件模板（多数邮件客户端不支持外部样式表）
+- 紧急覆盖
+
+不推荐用于业务样式——破坏了 CSS 的复用性。
+
+### 内部（Internal）
+
+```html
+<head>
+  <style>
+    .title { color: red; }
+  </style>
+</head>
+```
+
+仅作用于当前页面。SSR 框架的 critical CSS 内联会注入到 `<style>` 节点，加速首屏渲染。
+
+### 外部（External，主流）
+
+```html
+<head>
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+```
+
+最常见也最推荐：可缓存、可拆分、可被构建工具处理。
+
+#### 在 React / Vite 项目中
+
+```ts filename="main.tsx"
+import './styles/main.css'                    // Vite 自动处理
+import styles from './Button.module.css'       // CSS Modules 自动作用域化
+```
+
+### Tailwind 4 的引入
+
+```css filename="src/index.css"
+@import 'tailwindcss';
+
+@theme {
+  --color-brand: #1d4ed8;
+  --font-sans: 'Inter', system-ui, sans-serif;
+}
+```
+
+```ts filename="vite.config.ts"
+import tailwindcss from '@tailwindcss/vite'
+export default defineConfig({
+  plugins: [tailwindcss()]
+})
+```
+
+Tailwind 4 取消了 v3 的 `tailwind.config.js`——所有令牌（颜色、字号、间距）都用 CSS `@theme` 块声明，更接近"原生 CSS 自定义属性"。
+
+## 层叠（Cascade）
+
+当多条规则同时匹配某元素时，CSS 按以下优先级决定胜出者：
+
+```text
+1. Origin（来源）
+   user agent < user < author（按重要性递增）
+   作者 !important > 用户 !important > 用户代理 !important > 作者 > 用户 > 用户代理
+
+2. Specificity（特异性）
+   见下文
+
+3. Source order（出现顺序）
+   后写的胜
+```
+
+```css
+.btn { color: red; }
+.btn { color: blue; }                         /* 胜出：源码顺序在后 */
+```
+
+### 层叠层（@layer，CSS3）
+
+`@layer` 把样式分组到不同优先级层级，**层级低的总是被层级高的覆盖**，与源码顺序无关：
+
+```css
+@layer reset, base, components, utilities;
+
+@layer base {
+  .btn { padding: 8px; }
+}
+
+@layer components {
+  .btn { padding: 16px; }                     /* 胜出：components 层在 base 之上 */
+}
+```
+
+Tailwind 4 内部就是用 `@layer` 组织的：
+
+```css
+@layer base, components, utilities;
+```
+
+你声明的 `@theme` 与 `@utility` 会被自动放入对应层。这让"用户样式 → 组件库 → 业务覆盖"的优先级关系明确化，不再依赖源码顺序的微妙性。
+
+## 继承（Inheritance）
+
+部分属性会自动从父元素继承到子元素，部分不会：
+
+| 默认继承 | 默认不继承 |
+| -------- | ---------- |
+| `color`、`font-*`、`line-height`、`text-align` | `padding`、`margin`、`border`、`background` |
+| `cursor`、`visibility`、`white-space` | `width`、`height`、`top` 等 |
+| `letter-spacing`、`word-spacing` | `display`、`position`、`z-index` |
+
+强制继承 / 重置：
+
+```css
+.child {
+  color: inherit;                             /* 强制继承 */
+  margin: initial;                            /* 重置为规范默认值 */
+  border: unset;                              /* 继承的属性走 inherit；否则走 initial */
+  all: revert;                                /* 重置为浏览器默认 */
+}
+```
+
+`all` + `revert` 是清除框架样式覆盖的利器：
+
+```css
+.unstyled-button {
+  all: unset;
+  cursor: pointer;
+}
+```
+
+## 特异性（Specificity）
+
+每条选择器对应一个**四元组 `(a, b, c, d)`**：
+
+```text
+a: 内联 style 数（0 / 1）
+b: id 选择器数
+c: class / 属性 / 伪类 数
+d: 元素 / 伪元素 数
+```
+
+按字典序比较，前面位数大者胜出。
+
+```css
+#header .title { ... }                        /* (0, 1, 1, 0) */
+.title.large { ... }                          /* (0, 0, 2, 0) */
+header h1 { ... }                             /* (0, 0, 0, 2) */
+h1 { ... }                                    /* (0, 0, 0, 1) */
+```
+
+#### `!important`
+
+`!important` 提升到层叠的"重要性"维度，跨越特异性：
+
+```css
+.btn { color: red !important; }
+```
+
+**避免使用** `!important`——它会让层叠失控。仅在覆盖第三方库且无法通过特异性解决时才用。
+
+#### `:where()` 与 `:is()`
+
+`:is()` 接受选择器列表，特异性取列表中**最高**的一个：
+
+```css
+:is(h1, h2, h3) { color: blue; }
+/* 等价于：h1, h2, h3 { color: blue; } 但短得多 */
+```
+
+`:where()` 与 `:is()` 行为相同，但**特异性永远为 0**。这让重置样式不再"压倒"用户样式：
+
+```css
+:where(button, [type='button'], [type='submit']) {
+  all: unset;
+}
+/* 任何 .my-button { color: red } 都能正常覆盖此重置 */
+```
+
+`:where()` 是现代 CSS 库的关键工具——开源 reset / normalize / 框架基础样式可以"轻量地"为元素打底，不污染特异性。
+
+## CSS 自定义属性（CSS Variables）
+
+```css
+:root {
+  --primary: #1d4ed8;
+  --space: 1rem;
+}
+
+.btn {
+  background: var(--primary);
+  padding: var(--space);
+}
+```
+
+特点：
+
+- 遵循作用域 / 继承规则——子元素可见父元素声明的变量
+- 可在 JS 中读写：`element.style.setProperty('--primary', 'red')`
+- 媒体查询、伪类中可重新赋值，实现主题切换
+
+```css
+:root           { --bg: white; }
+[data-theme=dark] { --bg: #111; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111; }
+}
+```
+
+详见 [CSS 变量与现代函数](/css/variables-functions)。
+
+## Tailwind 与原生 CSS 的关系
+
+Tailwind 4 的设计理念：
+
+```text
+Tailwind 不替代 CSS，它是 CSS 的"工具语义层"。
+所有 utility 类最终都是普通 CSS 规则——你随时可以打开 DevTools 看到它们的真身。
+```
+
+实战中典型分工：
+
+| 角色 | 写法 |
+| ---- | ---- |
+| 标记元素的视觉表现 | Tailwind utility（90% 的样式） |
+| 全局令牌（颜色 / 字号 / 间距） | `@theme { }` 中的 CSS 变量 |
+| 跨元素的复杂规则（`:has`、嵌套、关键帧） | 原生 CSS 规则 + `@layer components` |
+| 框架重置（reset / normalize） | Tailwind 默认提供（preflight） |
+
+Tailwind 不是"反 CSS"——而是把"重复的、机械的"部分类名化，让你专注于"独特的、设计的"部分。
+
+## 浏览器渲染流水线（简化）
+
+```text
+HTML  → Parsing → DOM
+                          ↘
+                            → Render Tree → Layout → Paint → Composite
+                          ↗
+CSS   → Parsing → CSSOM
+```
+
+CSS 的解析与 DOM 并行进行，但渲染必须等到 CSSOM 完成。这就是 `<link rel="stylesheet">` 默认会**阻塞渲染**的原因。
+
+性能优化技巧：
+
+- **关键 CSS 内联**：把首屏所需的 CSS 直接写到 `<style>`
+- **非关键 CSS 异步加载**：`<link rel="preload" as="style">`
+- **避免 `@import` 串行加载**：用打包工具合并
+
+详见 [最佳实践](/css/best-practices)。
+
+## 心智模型清单
+
+读完本节后，请确认以下命题已成为肌肉记忆：
+
+1. **CSS 是声明式的**：你描述结果，浏览器决定怎么做；
+2. **样式冲突由层叠规则决定**：来源 → 特异性 → 顺序；
+3. **继承使部分属性向下传播**：`color` / `font-*` 是常见继承属性；
+4. **`!important` 是逃生舱**，不是日常工具；
+5. **`@layer` 与 `:where()`** 是处理"框架/业务覆盖"问题的现代答案；
+6. **Tailwind 是 CSS 之上的工具语义层**，不取代你对底层机制的理解。
+
+下一章 [选择器](/css/selectors) 系统覆盖全部选择器与优先级算法。

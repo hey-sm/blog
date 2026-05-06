@@ -1,0 +1,335 @@
+---
+title: 模板字面量类型
+description: TypeScript 模板字面量类型 Template Literal Types：字符串拼接、联合分发、infer 提取、内建字符串工具与实战
+---
+
+# 模板字面量类型
+
+模板字面量类型（Template Literal Types）是 TypeScript 4.1 引入的强大特性，它让你在类型层面操作字符串——拼接、分割、转换大小写。
+
+## 基本语法
+
+```ts
+type Greeting = `Hello, ${string}!`
+
+const g1: Greeting = 'Hello, World!'   // ✅
+const g2: Greeting = 'Hello, Alice!'   // ✅
+const g3: Greeting = 'Hi!'             // ❌ 错误
+
+// 与值级模板字面量对应
+const name = 'Alice'
+const valueGreeting = `Hello, ${name}!`
+```
+
+### 插值位置可以放任何字符串兼容类型
+
+```ts
+type Subject = 'World' | 'Alice' | 'Bob'
+type FullGreeting = `Hello, ${Subject}!`
+// 'Hello, World!' | 'Hello, Alice!' | 'Hello, Bob!'
+```
+
+## 联合类型的自动分发
+
+当插值位置是联合类型时，模板字面量类型自动分发（类笛卡尔积）：
+
+```ts
+type Vertical = 'top' | 'bottom'
+type Horizontal = 'left' | 'right'
+
+type Position = `${Vertical}-${Horizontal}`
+// 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+```
+
+### 多位置分布
+
+```ts
+type Color = 'red' | 'green' | 'blue'
+type Size = 'sm' | 'md' | 'lg'
+type Variant = 'solid' | 'outline'
+
+type ButtonClass = `btn-${Color}-${Size}-${Variant}`
+// 3 × 3 × 2 = 18 种组合
+```
+
+**注意**：大量组合会导致性能问题，超过 100,000 个成员的联合类型会触发编译器警告。
+
+## infer 从模板字面量中提取
+
+```ts
+// ✅ 提取首字符
+type FirstChar<T extends string> = T extends `${infer F}${string}` ? F : never
+type F1 = FirstChar<'hello'>  // 'h'
+
+// ✅ 提取事件名前缀
+type EventName<T extends string> = T extends `on${infer Rest}` ? Rest : never
+type E1 = EventName<'onClick'>   // 'Click'
+type E2 = EventName<'onChange'>  // 'Change'
+
+// ✅ 分割以分隔符连接的字符串
+type Split<T extends string, Sep extends string> =
+  T extends `${infer Head}${Sep}${infer Tail}`
+    ? Head | Split<Tail, Sep>
+    : T
+
+type Parts = Split<'a.b.c.d', '.'>
+// 'a' | 'b' | 'c' | 'd'
+```
+
+## 内建字符串工具类型
+
+### Uppercase / Lowercase / Capitalize / Uncapitalize
+
+```ts
+type T1 = Uppercase<'hello'>       // 'HELLO'
+type T2 = Lowercase<'HELLO'>       // 'hello'
+type T3 = Capitalize<'hello'>      // 'Hello'
+type T4 = Uncapitalize<'Hello'>    // 'hello'
+
+// ✅ 用于模板字面量中
+type MethodName<T extends string> = `get${Capitalize<T>}`
+type M1 = MethodName<'name'>  // 'getName'
+
+type EventHandler<T extends string> = `on${Capitalize<Lowercase<T>>}`
+type H1 = EventHandler<'CLICK'>  // 'onClick'
+```
+
+## 实用模式
+
+### 1. 生成 Getter/Setter 类型
+
+```ts
+type Accessors<T> = {
+  [K in keyof T & string as `get${Capitalize<K>}`]: () => T[K]
+} & {
+  [K in keyof T & string as `set${Capitalize<K>}`]: (value: T[K]) => void
+}
+
+interface Store {
+  name: string
+  count: number
+}
+
+type StoreAccessors = Accessors<Store>
+// {
+//   getName: () => string
+//   getCount: () => number
+//   setName: (value: string) => void
+//   setCount: (value: number) => void
+// }
+```
+
+### 2. 生成 Redux 风格的 Action Types
+
+```ts
+type Action<T extends string, S extends string> = `${T}_${S}`
+
+type UserActions =
+  | Action<'user', 'FETCH_START'>
+  | Action<'user', 'FETCH_SUCCESS'>
+  | Action<'user', 'FETCH_FAILURE'>
+// 'user_FETCH_START' | 'user_FETCH_SUCCESS' | 'user_FETCH_FAILURE'
+```
+
+### 3. 路径类型
+
+```ts
+// ✅ 生成 API 路径联合
+type Resource = 'users' | 'posts' | 'comments'
+type ApiPath = `/api/${Resource}` | `/api/${Resource}/${number}`
+
+// 类型安全的路由函数
+function apiGet(path: ApiPath) {
+  return fetch(path).then(r => r.json())
+}
+
+apiGet('/api/users')        // ✅
+apiGet('/api/posts/123')    // ✅
+apiGet('/api/undefined')    // ❌ 错误
+```
+
+### 4. CSS 属性名转换
+
+```ts
+// ✅ marginLeft → margin-left
+type KebabCase<T extends string> =
+  T extends `${infer H}${infer R}`
+    ? H extends Uppercase<H>
+      ? `-${Lowercase<H>}${KebabCase<R>}`
+      : `${H}${KebabCase<R>}`
+    : ''
+
+type K1 = KebabCase<'marginLeft'>         // 'margin-left'
+type K2 = KebabCase<'backgroundColor'>    // 'background-color'
+
+// ✅ 反向：margin-left → marginLeft
+type CamelCase<T extends string> =
+  T extends `${infer Head}-${infer Tail}`
+    ? `${Head}${Capitalize<CamelCase<Tail>>}`
+    : T
+
+type C1 = CamelCase<'margin-left'>         // 'marginLeft'
+type C2 = CamelCase<'background-color'>    // 'backgroundColor'
+```
+
+### 5. 类型安全的字符串匹配
+
+```ts
+// ✅ 是否为邮件格式（类型层面验证）
+type IsEmail<T extends string> =
+  T extends `${string}@${string}.${string}` ? true : false
+
+type E1 = IsEmail<'alice@example.com'>   // true
+type E2 = IsEmail<'not-valid'>           // false
+
+// ✅ 提取邮件域名
+type EmailDomain<T extends string> =
+  T extends `${string}@${infer Domain}` ? Domain : never
+
+type D = EmailDomain<'alice@example.com'>  // 'example.com'
+```
+
+**React 示例**：
+
+```tsx
+// ✅ 类型安全的 CSS 变量名
+type CSSVarName = `--${string}`
+
+function useCSSVar(name: CSSVarName, fallback: string) {
+  const [value] = useState(() =>
+    getComputedStyle(document.documentElement).getPropertyValue(name) || fallback
+  )
+  return value
+}
+
+const primary = useCSSVar('--primary-color', '#3b82f6')  // ✅
+const bad = useCSSVar('primary-color', '#000')            // ❌ 缺少 --
+
+// ✅ 类型安全的 data- 属性
+type DataAttribute = `data-${string}`
+
+interface DivProps extends React.HTMLAttributes<HTMLDivElement> {
+  [key: DataAttribute]: string
+}
+```
+
+### 6. Object Path 推导
+
+```ts
+// ✅ 从嵌套对象提取所有路径
+type NestedPaths<T, P extends string = ''> =
+  T extends object
+    ? {
+        [K in keyof T & string]:
+          T[K] extends object
+            ? `${P}${K}.${NestedPaths<T[K]>}`
+            : `${P}${K}`
+      }[keyof T & string]
+    : ''
+
+interface AppConfig {
+  server: {
+    host: string
+    port: number
+  }
+  features: {
+    darkMode: boolean
+  }
+}
+
+type ConfigPaths = NestedPaths<AppConfig>
+// 'server.host' | 'server.port' | 'features.darkMode'
+```
+
+## 与映射类型结合
+
+```ts
+type EventHandlerMap<Events extends string> = {
+  [K in Events as `on${Capitalize<K>}`]: (event: K) => void
+}
+
+type UIHandlers = EventHandlerMap<'click' | 'focus' | 'blur' | 'change'>
+// {
+//   onClick: (event: 'click') => void
+//   onFocus: (event: 'focus') => void
+//   onBlur: (event: 'blur') => void
+//   onChange: (event: 'change') => void
+// }
+```
+
+## 陷阱
+
+### 1. 联合类型组合爆炸
+
+```ts
+// ⚠️ 小心组合数量
+type Alphabet = 'a' | 'b' | 'c' | /* ... 26字母 */
+type ThreeLetters = `${Alphabet}${Alphabet}${Alphabet}`
+// 26^3 = 17,576 种组合——还在接受范围内
+
+type FourLetters = `${Alphabet}${Alphabet}${Alphabet}${Alphabet}`
+// 26^4 = 456,976——可能已经太慢了
+```
+
+### 2. infer 只能做非贪婪匹配
+
+```ts
+// ⚠️ 模板字面量的 infer 使用非贪婪匹配
+type SplitFirst<T extends string> =
+  T extends `${infer Head}.${infer Tail}` ? [Head, Tail] : never
+
+type S = SplitFirst<'a.b.c'>
+// ['a', 'b.c']  ← Tail 匹配 'b.c'（贪婪？不对，是非贪婪）
+
+// 实际上：第一个 infer 尽可能少匹配，
+// 但为了让剩余部分满足 `.${infer Tail}` 的约束，Head 最少匹配到 '.'
+// 结果：Head = 'a', Tail = 'b.c'
+```
+
+### 3. 大写字母判断
+
+```ts
+// ⚠️ Uppercase/H 不等于原字符不一定意味着它是小写
+type IsLowercase<C extends string> =
+  C extends Uppercase<C>
+    ? C extends Lowercase<C>
+      ? 'both'   // 如数字、非字母字符
+      : 'upper'
+    : 'lower'
+
+type C1 = IsLowercase<'a'>  // 'lower' ✅
+type C2 = IsLowercase<'A'>  // 'upper' ✅
+type C3 = IsLowercase<'1'>  // 'both'——因为它既是自己的大写也是自己的小写
+```
+
+## 最佳实践
+
+### ✅ 模板字面量类型用于限制字符串格式
+
+```ts
+// ✅ 利用模板字面量限制字符串格式而非 string
+type HexColor = `#${string}`
+type ISO = `${number}-${number}-${number}`
+type SemanticVersion = `${number}.${number}.${number}`
+```
+
+### ✅ 配合映射类型的键重映射
+
+```ts
+// ✅ 自动生成完整的 handler 类型
+type WithHandlers<T> = {
+  [K in keyof T & string as `handle${Capitalize<K>}`]: (value: T[K]) => void
+}
+```
+
+### ✅ 合理使用，避免过度类型体操
+
+```ts
+// ✅ 类型安全的 DSL
+type EventPattern = `${'user' | 'post'}:${'create' | 'update' | 'delete'}`
+
+// ❌ 不要试图用模板类型做正则验证
+type Email = `${string}@${string}.${string}`  // 太宽泛，意义不大
+```
+
+下一章 [装饰器](/ts/decorators) 介绍 TypeScript 5.0 装饰器系统。

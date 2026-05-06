@@ -1,0 +1,494 @@
+---
+title: 文字与排版
+description: 字体栈、字号、行距、字间距、对齐与可变字体
+---
+
+# 文字与排版
+
+文字是网页 95% 的内容，但**排版往往是设计与开发分歧最深的地方**。本章覆盖：字体加载、字号体系、行距 / 字间距、文本对齐、装饰、可变字体与 Tailwind 等价类。
+
+## 字体族（font-family）
+
+### 字体栈（fallback）
+
+```css
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+}
+```
+
+字体栈从左到右尝试加载，找不到则使用下一个。最末尾必须是**通用字体族**：`sans-serif` / `serif` / `monospace` / `cursive` / `fantasy`。
+
+### 现代系统字体栈
+
+避免 Web 字体加载时间，直接使用操作系统提供的现代字体：
+
+```css
+body {
+  font-family:
+    system-ui,                                /* 动态匹配系统 UI 字体 */
+    -apple-system,                            /* macOS Safari */
+    'Segoe UI',                               /* Windows */
+    Roboto,                                   /* Android */
+    Oxygen, Ubuntu, Cantarell,                /* Linux */
+    'Helvetica Neue', sans-serif;
+}
+```
+
+`system-ui` 是 CSS 关键字，让浏览器选用系统的"UI 字体"——零加载、原生质感。
+
+### Tailwind 等价
+
+```css filename="src/index.css"
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-serif: 'Playfair Display', Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+```
+
+```html
+<p class="font-sans">默认</p>
+<h1 class="font-serif">标题</h1>
+<code class="font-mono">代码</code>
+```
+
+`@theme` 中声明的字体令牌自动生成 `font-*` utility 类。
+
+### Web 字体加载
+
+#### `@font-face` 自托管
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter-Bold.woff2') format('woff2');
+  font-weight: 700;
+}
+```
+
+`font-display` 控制加载期行为：
+
+| 值 | 行为 |
+| -- | ---- |
+| `block` | 短暂隐藏 → 切到 Web 字体 → 失败回退（默认行为，可能 FOIT 闪白） |
+| `swap` | 立即显示 fallback → 切到 Web 字体（可能 FOUT 闪烁） |
+| `fallback` | 100ms 隐藏 → fallback 3s → 永久 fallback |
+| `optional` | 让浏览器决定（弱网下倾向不加载 Web 字体） |
+
+通常设为 `swap`——内容立即可读，比闪白好。
+
+#### 在 Vite 中
+
+```ts
+// 直接 import 字体文件 → Vite 处理为 URL
+import InterRegular from '@/fonts/Inter-Regular.woff2'
+```
+
+或在 `index.html` 用 `<link rel="preload">`：
+
+```html
+<link rel="preload" href="/fonts/Inter.woff2" as="font" type="font/woff2" crossorigin>
+```
+
+### Google Fonts
+
+```html
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+```
+
+注意性能：
+
+- 用 `preconnect` 提前建立 TLS 连接
+- 仅加载实际用到的字重
+- 隐私敏感场景考虑自托管（[google-webfonts-helper](https://gwfh.mranftl.com/fonts)）
+
+### 在 Next.js 中：next/font
+
+```tsx
+import { Inter } from 'next/font/google'
+
+const inter = Inter({ subsets: ['latin'], display: 'swap' })
+
+export default function Layout({ children }) {
+  return <html className={inter.className}><body>{children}</body></html>
+}
+```
+
+`next/font` **构建时**下载字体到本地，自托管 + 自动 CSS 内联，零 FOUT。生产首选。
+
+## 字号（font-size）
+
+```css
+.title { font-size: 1.5rem; }                 /* 24px (假设 root = 16px) */
+.body  { font-size: 1rem; }                   /* 16px */
+.small { font-size: 0.875rem; }               /* 14px */
+```
+
+### 单位选型
+
+| 单位 | 含义 | 典型场景 |
+| ---- | ---- | -------- |
+| `px` | 绝对像素 | 不推荐（无视用户字号偏好） |
+| `rem` | 相对 root（默认 16px）| **首选**——可缩放、可主题化 |
+| `em` | 相对父元素 font-size | 排版内嵌（如行内 spacing） |
+| `%` | 相对父元素 font-size | 历史用法 |
+| `clamp(min, fluid, max)` | 流式 | 响应式排版 |
+
+### 流式排版
+
+```css
+h1 { font-size: clamp(1.5rem, 1rem + 2vw, 3rem); }
+```
+
+视口宽度变化时 `font-size` 平滑过渡，无需写多个媒体查询。详见 [响应式](/css/responsive#流式排版)。
+
+### Tailwind 字号体系
+
+Tailwind 内置一组遵循 1.25 比例的字号：
+
+| 类 | font-size | line-height |
+| -- | --------- | ----------- |
+| `text-xs` | 12px | 16px |
+| `text-sm` | 14px | 20px |
+| `text-base` | 16px | 24px |
+| `text-lg` | 18px | 28px |
+| `text-xl` | 20px | 28px |
+| `text-2xl` | 24px | 32px |
+| `text-3xl` | 30px | 36px |
+| `text-4xl` | 36px | 40px |
+
+```html
+<h1 class="text-4xl">标题</h1>
+<p class="text-base">正文</p>
+```
+
+每个字号都已配套合适的 line-height，开箱即用。
+
+任意值：
+
+```html
+<h1 class="text-[2.5rem]">特定字号</h1>
+<h1 class="text-[clamp(1.5rem,2vw,3rem)]">流式</h1>
+```
+
+## 字重（font-weight）
+
+```css
+.thin       { font-weight: 100; }
+.light      { font-weight: 300; }
+.normal     { font-weight: 400; }              /* 默认 */
+.medium     { font-weight: 500; }
+.semibold   { font-weight: 600; }
+.bold       { font-weight: 700; }
+.extrabold  { font-weight: 800; }
+.black      { font-weight: 900; }
+```
+
+注意：仅当字体提供该字重的字形时才生效。Inter / Roboto 等现代字体提供完整字重，但许多字体只有 400/700。
+
+### Tailwind 字重
+
+```html
+<p class="font-thin">100</p>
+<p class="font-normal">400</p>
+<p class="font-semibold">600</p>
+<p class="font-bold">700</p>
+```
+
+## 行距（line-height）
+
+```css
+.body  { line-height: 1.5; }                  /* 推荐：无单位（1.5 倍 font-size） */
+.tight { line-height: 1.25; }
+.loose { line-height: 1.75; }
+.fixed { line-height: 24px; }                 /* 不推荐：固定值，缩放时不跟字号 */
+```
+
+**无单位**优先——`line-height: 1.5` 会随子元素 font-size 自动缩放；`line-height: 24px` 会"卡死"。
+
+#### Tailwind 行距
+
+```html
+<p class="leading-none">1</p>
+<p class="leading-tight">1.25</p>
+<p class="leading-snug">1.375</p>
+<p class="leading-normal">1.5</p>
+<p class="leading-relaxed">1.625</p>
+<p class="leading-loose">2</p>
+```
+
+通常**不需要单独写 leading**——`text-*` 已包含合适的行距。仅在需要覆盖时使用。
+
+## 字间距（letter-spacing）
+
+```css
+.tighter { letter-spacing: -0.025em; }
+.tight   { letter-spacing: -0.0125em; }
+.normal  { letter-spacing: 0; }
+.wide    { letter-spacing: 0.025em; }
+.wider   { letter-spacing: 0.05em; }
+.widest  { letter-spacing: 0.1em; }
+```
+
+排版要点：
+
+- 大字号常用负值（`-0.02em`）让字母更紧凑
+- 小字号 / 全大写文字用正值（`0.05em ~ 0.1em`）增加可读性
+
+```css
+.heading { font-size: 3rem; letter-spacing: -0.02em; }
+.label { text-transform: uppercase; letter-spacing: 0.08em; }
+```
+
+#### Tailwind
+
+```html
+<h1 class="tracking-tight">紧凑</h1>
+<span class="tracking-wider uppercase">SECTION</span>
+```
+
+## 文本装饰
+
+```css
+.underline       { text-decoration: underline; }
+.line-through    { text-decoration: line-through; }
+.no-underline    { text-decoration: none; }
+
+/* 现代 API：精细控制 */
+a {
+  text-decoration: underline;
+  text-decoration-color: blue;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+```
+
+### Tailwind
+
+```html
+<a class="underline decoration-blue-500 decoration-2 underline-offset-4">链接</a>
+<del class="line-through">已删除</del>
+```
+
+## 文本变换
+
+```css
+.upper      { text-transform: uppercase; }
+.lower      { text-transform: lowercase; }
+.capitalize { text-transform: capitalize; }
+```
+
+```html
+<p class="uppercase">hello → HELLO</p>
+<p class="capitalize">hello world → Hello World</p>
+```
+
+## 文本对齐
+
+```css
+.left   { text-align: left; }
+.center { text-align: center; }
+.right  { text-align: right; }
+.justify { text-align: justify; }
+.start  { text-align: start; }                /* 双向感知，RTL 时为右 */
+.end    { text-align: end; }
+```
+
+```html
+<p class="text-center">居中</p>
+<p class="text-justify">两端对齐</p>
+<p class="text-start">逻辑起始（推荐用于多语言场景）</p>
+```
+
+## 文本溢出与换行
+
+### 单行截断
+
+```css
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+```
+
+### 多行截断
+
+```css
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+```
+
+#### Tailwind
+
+```html
+<p class="truncate">单行...</p>
+<p class="line-clamp-3">多行...</p>
+```
+
+`line-clamp` 已成 CSS 标准属性（`-webkit-line-clamp` 自动加），现代浏览器全支持。
+
+### `text-wrap`
+
+```css
+h1 { text-wrap: balance; }                    /* 标题各行长度均衡 */
+p  { text-wrap: pretty; }                     /* 段落避免最后一行只剩一两个字 */
+```
+
+`balance` 适合标题（避免末行孤字），`pretty` 适合长段落。是 2024 年广泛支持的现代 API。
+
+#### Tailwind
+
+```html
+<h1 class="text-balance">My Beautiful Title</h1>
+<p class="text-pretty">长段落...</p>
+```
+
+## 可变字体（Variable Fonts）
+
+可变字体用一个文件包含多种字重、字宽、斜体——极大减少 HTTP 请求与字体体积：
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter.var.woff2') format('woff2-variations');
+  font-weight: 100 900;                       /* 范围 */
+}
+
+h1 { font-variation-settings: 'wght' 750, 'opsz' 32; }
+
+/* 现代浏览器：直接用 font-weight */
+h1 { font-weight: 750; }                      /* 任意中间值 */
+```
+
+许多设计令牌型项目（如 Linear、Vercel）都使用 Inter 可变版本。一个文件 + 任意字重 = 极致灵活。
+
+### 字重动画
+
+```css
+.heading {
+  font-weight: 400;
+  transition: font-weight 200ms;
+}
+.heading:hover {
+  font-weight: 700;
+}
+```
+
+可变字体让 `font-weight` 可以**平滑过渡**——非可变字体下会跳变。
+
+## 文字方向
+
+```css
+[dir='rtl'] .menu { direction: rtl; }
+.note      { unicode-bidi: isolate; }         /* 双向文字隔离 */
+.vertical  { writing-mode: vertical-rl; }      /* 垂直排版（中日韩、装饰） */
+```
+
+## 文字阴影
+
+```css
+h1 {
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* 多层阴影：复古效果 */
+.retro {
+  text-shadow:
+    1px 1px 0 #ff0000,
+    2px 2px 0 #00ff00,
+    3px 3px 0 #0000ff;
+}
+```
+
+#### Tailwind
+
+```html
+<h1 class="text-shadow-md">默认阴影</h1>
+<h1 class="text-shadow-[2px_2px_0_red]">任意</h1>
+```
+
+## 实战配方
+
+### 排版令牌系统
+
+```css
+@theme {
+  /* 字体 */
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-display: 'Playfair Display', serif;
+
+  /* 字号刻度 */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-4xl: clamp(2rem, 1rem + 2vw, 3rem);
+
+  /* 行距：字号越大、行距越紧凑 */
+  --text-xs--line-height: 1.5;
+  --text-base--line-height: 1.75;
+  --text-4xl--line-height: 1.1;
+
+  /* 字间距 */
+  --tracking-tight: -0.025em;
+  --tracking-wide: 0.025em;
+}
+```
+
+### 阅读体验优化
+
+```css
+article {
+  max-width: 65ch;                            /* 单行 65 字符（最佳阅读宽度） */
+  line-height: 1.6;
+  font-size: 1.125rem;
+  text-wrap: pretty;
+  hyphens: auto;
+}
+```
+
+```html
+<article class="prose max-w-prose">...</article>
+```
+
+`prose` 来自 Tailwind 的 `@tailwindcss/typography` 插件——专为长文章设计的"打字稿"样式集。
+
+### 防止 ZOOM 缩放（移动端表单）
+
+iOS 在 input `font-size < 16px` 时会自动缩放视口。解决：
+
+```css
+input, textarea, select {
+  font-size: 16px;                            /* 至少 16 */
+}
+```
+
+## 小结
+
+- 字体栈以"通用字体族"结尾兜底；现代项目优先 system-ui / 自托管 Web 字体；
+- `rem` 是字号首选单位；`em` 适合内嵌相对量；`clamp()` 实现流式排版；
+- `line-height` 用无单位值，让其随字号缩放；
+- `text-wrap: balance / pretty` 是 2024 年的现代 API，对标题与段落体验提升显著；
+- 可变字体一个文件覆盖多字重，是性能与表现力的双赢；
+- Tailwind 的 `text-*` 已捆绑合适的行距与字号刻度，按设计令牌（`@theme`）扩展即可。

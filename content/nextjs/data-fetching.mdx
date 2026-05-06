@@ -1,0 +1,285 @@
+---
+title: 数据获取
+description: "Server Components 中直接 fetch、去重与缓存、'use cache' 用于 ORM 查询、客户端数据获取模式"
+---
+
+# 数据获取
+
+App Router 的核心改変之一：**数据获取发生在服务端（Server Components），而不是客户端 `useEffect`**。
+
+## 基本原则
+
+| 之前（Pages Router） | 之后（App Router） |
+| -------------------- | ------------------ |
+| `useEffect` + `fetch` 或 SWR | 直接在 async 函数体中 `await` |
+| 客户端暴露 API 端点 | Server Components 中直查 DB |
+| 每个 API 请求都有网络开销 | 服务端 fetch 与 DB 在同一环境中 |
+| 数据用 `useState` 管理 | 数据直接传给子组件 |
+
+## Server Component 中 fetch
+
+```tsx filename="app/posts/page.tsx"
+export default async function PostsPage() {
+  const posts = await fetch('https://api.example.com/posts', {
+    next: { revalidate: 3600 },
+  }).then(r => r.json())
+
+  return (
+    <ul>
+      {posts.map((p: Post) => (
+        <li key={p.id}>{p.title}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+优势：
+- 数据获取在 Render 之前完成，输出包含数据的完整 HTML
+- 一次服务器 fetch 替代 N 次客户端 fetch
+- types 可在服务端直接共享（无需跨网络边界）
+
+## 直接读取数据库
+
+```tsx filename="app/posts/page.tsx"
+import { db } from '@/lib/db'
+
+export default async function PostsPage() {
+  const posts = await db.post.findMany({
+    where: { published: true },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  })
+
+  return <PostList posts={posts} />
+}
+```
+
+没有 HTTP 开销、没有 CORS 问题、没有暴露 API 端点——Server Component 直接与数据库对话。
+
+### 去重同一个 render 中多次 fetch
+
+```tsx filename="app/posts/[slug]/page.tsx"
+import { getPost } from '@/lib/data'
+import type { Metadata } from 'next'
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)   // ← 第一次调用
+  return { title: post.title }
+}
+
+export default async function PostPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)   // ← 第二次调用，但结果被缓存
+  return <article>{post.content}</article>
+}
+```
+
+Next.js 的 fetch 层会自动缓存相同 URL 的请求。对于 ORM（不是 fetch），需要使用 `React.cache()` 包裹：
+
+```tsx filename="lib/data.ts"
+import { cache } from 'react'
+import { db } from '@/lib/db'
+
+export const getPost = cache(async (slug: string) => {
+  return db.post.findUnique({ where: { slug } })
+})
+```
+
+## `'use cache'` 持久化 ORM 查询
+
+```tsx filename="lib/data.ts"
+export async function getFeaturedPosts() {
+  'use cache'
+  cacheTag('posts', 'featured')
+  cacheLife('hours')
+
+  return db.post.findMany({
+    where: { featured: true },
+    orderBy: { createdAt: 'desc' },
+  })
+}
+
+export async function getPost(slug: string) {
+  'use cache'
+  cacheTag(`post-${slug}`)
+
+  return db.post.findUnique({
+    where: { slug },
+    include: { author: true, comments: true },
+  })
+}
+```
+
+`'use cache'` 会将 ORM 查询的结果持久化到 Data Cache，变相实现了"ORM 的 ISR"。
+
+## 并行 vs 串行
+
+### 串行 —— 时间叠加
+
+```tsx
+// 总耗时 = fetch1(500ms) + fetch2(300ms) = 800ms
+const data1 = await fetch1()
+const data2 = await fetch2()
+```
+
+### 并行 —— 取决于最慢的
+
+```tsx
+// 总耗时 = max(500ms, 300ms) = 500ms
+const [data1, data2] = await Promise.all([
+  fetch1(),
+  fetch2(),
+])
+```
+
+## 客户端数据获取
+
+对于需要在客户端实时更新的数据（如用户输入触发的查询），有两种模式：
+
+### 1. Route Handler + SWR / TanStack Query
+
+```tsx filename="app/api/search/route.ts"
+export async function GET(request: NextRequest) {
+  const q = request.nextUrl.searchParams.get('q')
+  const results = await db.search(q ?? '')
+  return NextResponse.json(results)
+}
+```
+
+```tsx filename="components/SearchBox.tsx"
+'use client'
+
+import { useRef, useState } from 'react'
+
+export function SearchBox() {
+  const [results, setResults] = useState([])
+
+  const handleSearch = async (q: string) => {
+    const res = await fetch(`/api/search?q=${q}`)
+    setResults(await res.json())
+  }
+
+  // ...
+}
+```
+
+### 2. Server Action + 客户端触发
+
+```tsx filename="app/search/actions.ts"
+'use server'
+
+export async function searchAction(query: string) {
+  const results = await db.search(query)
+  return results
+}
+```
+
+然后传给客户端：
+
+```tsx filename="app/search/page.tsx"
+import { searchAction } from './actions'
+import { SearchForm } from './SearchForm'
+
+export default function SearchPage() {
+  return <SearchForm onSearch={searchAction} />
+}
+```
+
+## 预加载模式（TanStack Query 风格）
+
+```tsx filename="app/posts/page.tsx"
+import { getQueryClient } from '@/lib/query-client'
+import { dehydrate, Hydrate } from '@tanstack/react-query'
+
+export default async function PostsPage() {
+  const queryClient = getQueryClient()
+
+  await queryClient.prefetchQuery({
+    queryKey: ['posts'],
+    queryFn: () => fetch('/api/posts').then(r => r.json()),
+  })
+
+  return (
+    <Hydrate state={dehydrate(queryClient)}>
+      <PostList />
+    </Hydrate>
+  )
+}
+```
+
+TanStack Query 在服务端预加载数据、dehydrate 到客户端、客户端立即有初始数据而无 loading。这适用于复杂客户端交互场景。
+
+## 陷阱
+
+### 不要用 `fetch` 调用自己的 API Route
+
+```tsx
+// ✗ 反模式
+export default async function Page() {
+  const data = await fetch('http://localhost:3000/api/posts').then(r => r.json())
+  // 额外的 HTTP 开销 + 无缓存共享 + 本地依赖
+}
+```
+
+Server Components 不调用自己的 Route Handler——直接共享函数调用：
+
+```tsx
+// ✓
+import { getPosts } from '@/lib/data'
+
+export default async function Page() {
+  const data = await getPosts()
+}
+```
+
+### 没有 await → 静默错误
+
+```tsx
+// ✗ 无效 — 没有 await 的 Promise 不会被等待
+const posts = db.post.findMany()
+return <PostList posts={posts} />  // posts 是 Promise，不是数据
+```
+
+TypeScript 通常能捕获这类问题，但非严格模式下可能放过。
+
+### 在 Client Component 中 import Server 专属模块
+
+```tsx
+'use client'
+
+import { db } from '@/lib/db'   // ← 编译报错（如果 db.ts 有 'server-only'）
+```
+
+解决方法：将数据获取函数单独封装（Server Component），将结果作为 props 传入客户端组件。
+
+### `'use cache'` 中依赖运行时参数被忽略
+
+```tsx
+'use cache'
+
+// 被缓存的函数用 request context 做 key
+async function getUserData() {
+  const cookie = (await cookies()).get('token')?.value
+  return db.user.findFirst({ ... })
+}
+```
+
+`'use cache'` 会试图将 cookies/headers 的值作为缓存 key——但这极易产生大量缓存 entry 且不安全。避免在 `'use cache'` 中使用请求上下文。
+
+## 小结
+
+- Server Components 中的 `fetch` 和 ORM 调用替代了传统的 `useEffect` + `fetch`；
+- `React.cache()` 去重同 render 的重复调用（适用于 ORM）；
+- `'use cache'`（Next.js 16）持久化 ORM 查询结果，跨请求共享；
+- 用 `Promise.all` 并行获取，避免串行等待；
+- 客户端数据获取通过 Route Handler + SWR / Server Action 实现。

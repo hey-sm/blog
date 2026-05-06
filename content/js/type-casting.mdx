@@ -1,0 +1,301 @@
+---
+title: 类型转换
+description: 隐式转换与显式转换的规则、ToPrimitive / ToNumber / ToString 抽象操作
+---
+
+# 类型转换
+
+JavaScript 是**弱类型语言**：在大多数运算中，引擎会按规范定义的抽象操作自动将值转换为期望的类型。这种转换称为 **类型强制（type coercion）**。同时，开发者也可以通过 `Number()` / `String()` / `Boolean()` 等构造器进行显式转换。
+
+理解类型转换的关键，是理解规范层面三个核心抽象操作：
+
+- `ToPrimitive(input, hint)`：对象 → 原始值
+- `ToNumber(value)`：值 → Number
+- `ToString(value)`：值 → String
+
+## Type Conversion vs Type Coercion
+
+| 维度 | 显式转换（Conversion） | 隐式转换（Coercion） |
+| ---- | ---------------------- | -------------------- |
+| 触发方式 | 主动调用 `Number(x)` / `String(x)` / `Boolean(x)` 等 | 由运算符或上下文自动触发 |
+| 可读性 | 高，意图明确 | 低，依赖记忆运算符规则 |
+| 风险 | 低 | 高，常成为 Bug 源头 |
+| 规范层调用 | 同样会调用底层抽象操作 | 同样会调用底层抽象操作 |
+
+两者执行的底层算法完全相同，区别仅在调用方是开发者还是运行时。
+
+## 显式类型转换
+
+### 转换为 String
+
+```js
+String(123)                                   // → '123'
+String(true)                                  // → 'true'
+String(null)                                  // → 'null'
+String(undefined)                             // → 'undefined'
+String(Symbol('x'))                           // → 'Symbol(x)'
+String([1, 2, 3])                             // → '1,2,3'        Array.prototype.join(',')
+String({ a: 1 })                              // → '[object Object]'
+String({ toString: () => 'custom' })          // → 'custom'
+
+// 替代写法
+;(123).toString()                             // → '123'
+;(255).toString(16)                           // → 'ff'           指定基数
+```
+
+### 转换为 Number
+
+```js
+Number('42')                                  // → 42
+Number('  42  ')                              // → 42             首尾空白被忽略
+Number('')                                    // → 0
+Number('  ')                                  // → 0
+Number('0xff')                                // → 255
+Number('1e3')                                 // → 1000
+Number('abc')                                 // → NaN
+Number('12abc')                               // → NaN            整体不是合法数字字面量
+
+Number(true)                                  // → 1
+Number(false)                                 // → 0
+Number(null)                                  // → 0
+Number(undefined)                             // → NaN
+Number([])                                    // → 0              [].toString() === ''
+Number([42])                                  // → 42             [42].toString() === '42'
+Number([1, 2])                                // → NaN            '1,2' 无法转
+Number({})                                    // → NaN
+```
+
+#### `parseInt` 与 `parseFloat`
+
+`parseInt` / `parseFloat` 行为不同于 `Number`：会**尽可能解析前缀**，遇到非法字符即停止。
+
+```js
+parseInt('12abc')                             // → 12
+parseFloat('3.14text')                        // → 3.14
+parseInt('0x10')                              // → 16
+parseInt('0x10', 10)                          // → 0              指定基数后 'x' 是非法字符
+parseInt('   42px')                           // → 42
+
+// 经典面试题：parseInt 的第二个参数是基数
+['1', '2', '3'].map(parseInt)
+// → [1, NaN, NaN]
+// 原因：map 实际传入 (item, index, array)，相当于
+//   parseInt('1', 0)  // 0 → 默认 10 进制，结果 1
+//   parseInt('2', 1)  // 基数 1 非法，结果 NaN
+//   parseInt('3', 2)  // 二进制中 '3' 非法，结果 NaN
+```
+
+### 转换为 Boolean
+
+```js
+Boolean(0)                                    // → false
+Boolean(-0)                                   // → false
+Boolean(0n)                                   // → false
+Boolean(NaN)                                  // → false
+Boolean('')                                   // → false
+Boolean(null)                                 // → false
+Boolean(undefined)                            // → false
+
+// 上述 7 个值称为 falsy；其余皆 truthy
+Boolean({})                                   // → true
+Boolean([])                                   // → true
+Boolean('false')                              // → true   非空字符串是 truthy
+```
+
+`!!value` 是简写：
+
+```js
+!!''                                          // → false
+!!{}                                          // → true
+```
+
+## 隐式类型转换
+
+### `ToPrimitive` 抽象操作
+
+当对象出现在期望原始值的上下文中（如算术运算、字符串拼接），引擎会调用 `ToPrimitive(input, hint)`，按 `hint` 的不同选择不同的方法序列：
+
+| `hint` | 调用顺序 | 触发场景 |
+| ------ | -------- | -------- |
+| `'number'` | `valueOf` → `toString` | `+` 之外的算术、比较、`Number()` |
+| `'string'` | `toString` → `valueOf` | 模板字符串、`String()`、`alert` |
+| `'default'` | `valueOf` → `toString` | `+`、`==` |
+
+可通过 `Symbol.toPrimitive` 自定义：
+
+```js
+const obj = {
+  valueOf() { return 42 },
+  toString() { return 'forty-two' },
+  [Symbol.toPrimitive](hint) {
+    return hint === 'string' ? 'str-hint' : 100
+  }
+}
+
+console.log(+obj)                             // → 100        hint = 'number'
+console.log(`${obj}`)                         // → 'str-hint' hint = 'string'
+console.log(obj + '')                         // → '100'      hint = 'default'
+```
+
+若未定义 `Symbol.toPrimitive`，回落到 `valueOf` / `toString`：
+
+```js
+const o = {
+  valueOf() { return 10 },
+  toString() { return '20' }
+}
+
+o + 1                                         // → 11   hint='default'，valueOf 优先
+`${o}`                                        // → '20' hint='string'，toString 优先
+```
+
+### `+` 运算符
+
+`+` 极其特殊：**只要任一操作数是字符串，就执行字符串拼接**；否则执行算术加法。
+
+```js
+1 + 2                                         // → 3
+1 + '2'                                       // → '12'
+'1' + 2                                       // → '12'
+1 + null                                      // → 1            null → 0
+1 + undefined                                 // → NaN          undefined → NaN
+1 + true                                      // → 2            true → 1
+1 + []                                        // → '1'          [] → ''，触发字符串拼接
+1 + {}                                        // → '1[object Object]'
+[] + []                                       // → ''
+[] + {}                                       // → '[object Object]'
+{} + []                                       // → 0            浏览器中 {} 被解析为代码块；Node REPL 中为 '[object Object]'
+```
+
+`{} + []` 是经典坑题：在语句开始位置 `{}` 被解析为**空块语句**，整体相当于 `+[]`，结果是 `0`。包在括号中即可恢复表达式语义：
+
+```js
+({}) + []                                     // → '[object Object]'
+```
+
+### 比较运算符
+
+#### `<` `>` `<=` `>=`
+
+非字符串比较时，两端都被转换为 `Number`：
+
+```js
+'2' > '12'                                    // → true   字符串字典序比较
+2 > '12'                                      // → false  '12' → 12
+[1] < [2]                                     // → true   '1' < '2'
+[1, 2] < [1, 3]                               // → true   '1,2' < '1,3'
+null > 0                                      // → false  null → 0，0 > 0 为 false
+null == 0                                     // → false  == 不会做数字转换
+null >= 0                                     // → true   ← 反直觉
+```
+
+`null >= 0` 与 `null > 0` / `null == 0` 同时成立中只有一个为 `true`，是因为 `>=` 等价于 `!(<)` 而非 `> || ==`。这种不一致在 JavaScript 中称为"宽松比较的悖论"。
+
+详见 [相等性比较](/js/equality)。
+
+### 模板字符串
+
+模板字符串触发 `ToString`：
+
+```js
+const x = { toString: () => 'X', valueOf: () => 1 }
+console.log(`${x}`)                           // → 'X'   hint = 'string'，toString 优先
+```
+
+### `if` / `while` / 三元 / 逻辑运算符
+
+条件位置触发 `ToBoolean`：
+
+```js
+if ([]) console.log('truthy')                 // 输出（[] 是 truthy，反直觉）
+if ('0') console.log('truthy')                // 输出（非空字符串）
+if (0)  console.log('not output')             // 不输出
+```
+
+逻辑运算符 `&&` / `||` 返回**操作数本身**而非布尔值：
+
+```js
+0 || 'fallback'                               // → 'fallback'
+'value' || 'fallback'                         // → 'value'
+1 && 2 && 3                                   // → 3
+0 && 'never'                                  // → 0
+
+// 空值合并 ?? 仅对 null / undefined 触发
+0 ?? 'fallback'                               // → 0          ← 区别于 ||
+null ?? 'fallback'                            // → 'fallback'
+```
+
+## 抽象操作算法概览
+
+### `ToNumber(v)`
+
+| 输入类型 | 结果 |
+| -------- | ---- |
+| `Undefined` | `NaN` |
+| `Null` | `+0` |
+| `Boolean` | `true` → 1，`false` → 0 |
+| `Number` | 原值 |
+| `String` | 解析字面量；非法 → `NaN`；空白 → 0 |
+| `BigInt` | TypeError |
+| `Symbol` | TypeError |
+| `Object` | `ToPrimitive(v, 'number')` 后递归 |
+
+### `ToString(v)`
+
+| 输入类型 | 结果 |
+| -------- | ---- |
+| `Undefined` | `'undefined'` |
+| `Null` | `'null'` |
+| `Boolean` | `'true'` / `'false'` |
+| `Number` | 数字字面量字符串（特殊：`Infinity`、`NaN`） |
+| `String` | 原值 |
+| `Symbol` | TypeError（必须显式 `String(s)`） |
+| `BigInt` | 数字字面量（不带 `n`） |
+| `Object` | `ToPrimitive(v, 'string')` 后递归 |
+
+### `ToBoolean(v)`
+
+返回 `false` 仅当：`undefined` / `null` / `+0` / `-0` / `NaN` / `''` / `0n`。其余皆为 `true`。
+
+## 实战陷阱
+
+### `[] == ![]`
+
+```js
+[] == ![]                                     // → true
+```
+
+执行步骤：
+
+1. `![]`：`[]` → `true`（truthy），取反得 `false`
+2. `[] == false`：右侧 `false` 转 `Number` 0，左侧 `[]` 转原始值 `''`，再转 `Number` 0
+3. `0 == 0` → `true`
+
+### 数字字符串与数字混合
+
+```js
+'5' - 1                                       // → 4    '-' 不像 '+'，无字符串特例
+'5' + 1                                       // → '51'
+'5' * '2'                                     // → 10
+'5' / '0'                                     // → Infinity
+```
+
+### 始终使用 `===`
+
+```js
+'' == 0                                       // → true
+'0' == 0                                      // → true
+'0' == ''                                     // → false
+[] == false                                   // → true
+[] == 0                                       // → true
+[null] == 0                                   // → true   [null].toString() === ''
+```
+
+`==` 的传递性失效（`'' == 0` 且 `'0' == 0` 但 `'' != '0'`），强烈建议**永远使用 `===`**。例外：`x == null` 用于同时判断 `null` 与 `undefined`。
+
+## 小结
+
+- 显式转换与隐式转换底层调用同一组规范操作；
+- 对象转原始值的核心是 `ToPrimitive` + `Symbol.toPrimitive` / `valueOf` / `toString`；
+- `+` 是字符串与算术的双重运算符，只要一侧是字符串即拼接；
+- 严格使用 `===` 与 `Number()` / `String()` / `Boolean()`，可规避绝大多数转换陷阱。

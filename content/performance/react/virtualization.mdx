@@ -1,0 +1,838 @@
+---
+title: 列表虚拟化
+description: react-window、react-virtuoso、TanStack Virtual 与无限滚动、变高、表格虚拟化
+---
+
+# 列表虚拟化
+
+> 渲染 10000 行数据是任何前端框架的"压力测试"——React 默认会把所有行都渲染到 DOM，浏览器会卡到崩溃。
+
+虚拟化（Virtualization，也称 Windowing）= **只渲染视口可见的少量行**。这是大列表场景的唯一解药。本章覆盖三大主流库（react-window / react-virtuoso / TanStack Virtual）的对比、变高列表、网格、表格、无限滚动等实战。
+
+## 为什么需要虚拟化
+
+```text
+渲染 10000 行（每行 50 px 高度，含图片 + 文字）：
+
+无虚拟化：
+  ├─ 创建 10000 个 React 组件 ──► ~ 500 ms
+  ├─ 创建 10000 个 DOM 节点 ──► ~ 1 s
+  ├─ 加载 10000 张图 ──► 几十 MB 流量
+  ├─ 应用 CSS / Layout ──► ~ 1-2 s
+  └─ 总耗时：3-5 s + 内存占用 200+ MB
+
+虚拟化：
+  ├─ 假设视口高 800 px → 只渲染 ~ 16 行
+  ├─ 创建 16 个组件 + 16 个 DOM ──► ~ 5 ms
+  ├─ 仅加载视口图片 ──► 几百 KB
+  └─ 总耗时：< 30 ms + 内存占用稳定
+```
+
+差距是 **100-200 倍**。
+
+## 虚拟化的工作原理
+
+```text
+            ┌──────────────────┐  ← 视口顶部
+            │                  │
+   ┌────────┤  Item 50 (可见) ├─┐
+   │        │  Item 51 (可见) │ │
+   │        │  Item 52 (可见) │ │ 实际渲染：
+   │ 滚动   │  Item 53 (可见) │ │   <div style="height: 5000px"> ← 占位（总高）
+   │ 容器   │  ...            │ │     <div style="position: absolute; top: 2500px">
+   │        │  Item 65 (可见) │ │       <Item 50 />
+   │        ├──────────────────┤ │       <Item 51 />
+   │        │                  │ │       ...
+   │        └──────────────────┘ │       <Item 65 />
+   │                            │     </div>
+   │                            │   </div>
+   │                            │
+   └─────── 滚动条 ──────────────┘
+```
+
+实现要点：
+
+1. **占位容器**：高度 = 总行数 × 行高（让滚动条正常）
+2. **绝对定位的内容**：根据 scrollTop 计算"应该显示哪几行"
+3. **scroll 监听**：滚动时重新计算 + 重渲染
+4. **缓冲区**：视口外多渲染 5-10 行，减少快速滚动时的白屏
+
+## react-window
+
+[`react-window`](https://github.com/bvaughn/react-window) 是 react-virtualized 的"轻量重写"，作者 Brian Vaughn（前 React 核心团队）。
+
+### 固定高度列表
+
+```jsx
+import { FixedSizeList } from 'react-window'
+
+function MyList({ items }) {
+  return (
+    <FixedSizeList
+      height={600}                    // 容器高度
+      itemCount={items.length}
+      itemSize={50}                   // 每项固定 50 px
+      width="100%"
+    >
+      {({ index, style }) => (
+        <div style={style}>           {/* 必须应用 style */}
+          <UserCard user={items[index]} />
+        </div>
+      )}
+    </FixedSizeList>
+  )
+}
+```
+
+⚠️ 关键：渲染的元素必须**应用 `style`**——它包含 `position: absolute` + `top` 等。
+
+### 变高列表
+
+```jsx
+import { VariableSizeList } from 'react-window'
+import { useRef } from 'react'
+
+function MyList({ items }) {
+  const listRef = useRef()
+  const sizeMap = useRef({})
+
+  const getSize = (index) => sizeMap.current[index] || 80   // 默认 80 px
+
+  const setSize = (index, size) => {
+    sizeMap.current[index] = size
+    listRef.current?.resetAfterIndex(index)                   // 重置已知尺寸
+  }
+
+  return (
+    <VariableSizeList
+      ref={listRef}
+      height={600}
+      itemCount={items.length}
+      itemSize={getSize}
+      width="100%"
+    >
+      {({ index, style }) => (
+        <div style={style}>
+          <DynamicHeightCard
+            data={items[index]}
+            onMeasured={(h) => setSize(index, h)}
+          />
+        </div>
+      )}
+    </VariableSizeList>
+  )
+}
+```
+
+变高列表的复杂度高——`react-virtuoso` 自动处理变高，更友好。
+
+### 网格
+
+```jsx
+import { FixedSizeGrid } from 'react-window'
+
+function PhotoGrid({ photos, columns }) {
+  return (
+    <FixedSizeGrid
+      columnCount={columns}
+      columnWidth={200}
+      rowCount={Math.ceil(photos.length / columns)}
+      rowHeight={200}
+      height={600}
+      width={800}
+    >
+      {({ columnIndex, rowIndex, style }) => {
+        const i = rowIndex * columns + columnIndex
+        if (i >= photos.length) return null
+        return <img src={photos[i].src} style={style} />
+      }}
+    </FixedSizeGrid>
+  )
+}
+```
+
+### 无限加载
+
+`react-window-infinite-loader` 配合 react-window：
+
+```jsx
+import { FixedSizeList } from 'react-window'
+import InfiniteLoader from 'react-window-infinite-loader'
+
+function InfiniteList({ items, hasMore, loadMore }) {
+  const itemCount = hasMore ? items.length + 1 : items.length
+  const isItemLoaded = (i) => !hasMore || i < items.length
+
+  return (
+    <InfiniteLoader
+      isItemLoaded={isItemLoaded}
+      itemCount={itemCount}
+      loadMoreItems={loadMore}
+    >
+      {({ onItemsRendered, ref }) => (
+        <FixedSizeList
+          ref={ref}
+          itemCount={itemCount}
+          onItemsRendered={onItemsRendered}
+          itemSize={50}
+          height={600}
+          width="100%"
+        >
+          {({ index, style }) => (
+            isItemLoaded(index)
+              ? <div style={style}><Item data={items[index]} /></div>
+              : <div style={style}>Loading...</div>
+          )}
+        </FixedSizeList>
+      )}
+    </InfiniteLoader>
+  )
+}
+```
+
+### react-window 的特点
+
+| 维度 | 评价 |
+| ---- | ---- |
+| Bundle | ~ 5 KB（最小） |
+| API | 偏底层 |
+| 变高支持 | 需手动测量 |
+| 网格 | ✅ |
+| 无限加载 | 需配合 infinite-loader |
+| 维护 | 不太活跃（2023 后更新少） |
+
+## react-virtuoso
+
+[`react-virtuoso`](https://virtuoso.dev/) 是另一主流方案，自动处理变高、API 更现代。
+
+### 基础用法
+
+```jsx
+import { Virtuoso } from 'react-virtuoso'
+
+function MyList({ items }) {
+  return (
+    <Virtuoso
+      style={{ height: 600 }}
+      data={items}
+      itemContent={(index, item) => <UserCard user={item} />}
+    />
+  )
+}
+```
+
+注意：
+
+- **不需要指定 itemSize**——自动测量
+- **不需要应用 style**——库内部处理
+- API 更声明式
+
+### 无限滚动
+
+```jsx
+function InfiniteList({ items, hasMore, loadMore }) {
+  return (
+    <Virtuoso
+      style={{ height: 600 }}
+      data={items}
+      endReached={hasMore ? loadMore : undefined}
+      itemContent={(index, item) => <Item data={item} />}
+      components={{
+        Footer: () => hasMore ? <div>Loading...</div> : null
+      }}
+    />
+  )
+}
+```
+
+### 分组列表
+
+```jsx
+import { GroupedVirtuoso } from 'react-virtuoso'
+
+<GroupedVirtuoso
+  groupCounts={[10, 20, 30]}                     // 每组数量
+  groupContent={(index) => <h3>Group {index}</h3>}
+  itemContent={(index, groupIndex) => <Item index={index} />}
+/>
+```
+
+### 网格
+
+```jsx
+import { VirtuosoGrid } from 'react-virtuoso'
+
+<VirtuosoGrid
+  data={items}
+  totalCount={items.length}
+  itemContent={(index, item) => <Card data={item} />}
+  components={{
+    Item: ({ children, ...props }) => (
+      <div {...props} style={{ width: '33%', display: 'inline-block' }}>{children}</div>
+    )
+  }}
+/>
+```
+
+### 表格
+
+```jsx
+import { TableVirtuoso } from 'react-virtuoso'
+
+<TableVirtuoso
+  data={users}
+  fixedHeaderContent={() => (
+    <tr>
+      <th>Name</th>
+      <th>Email</th>
+      <th>Role</th>
+    </tr>
+  )}
+  itemContent={(index, user) => (
+    <>
+      <td>{user.name}</td>
+      <td>{user.email}</td>
+      <td>{user.role}</td>
+    </>
+  )}
+/>
+```
+
+### react-virtuoso 的特点
+
+| 维度 | 评价 |
+| ---- | ---- |
+| Bundle | ~ 35 KB |
+| API | 高度抽象，开箱即用 |
+| 变高支持 | ✅ 自动 |
+| 网格 / 表格 / 分组 | ✅ |
+| SSR | ✅ |
+| 维护 | 活跃 |
+
+## TanStack Virtual
+
+[`@tanstack/react-virtual`](https://tanstack.com/virtual)（前 react-virtual）来自 TanStack 团队（Query / Table / Form）。
+
+### 基础用法
+
+```jsx
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { useRef } from 'react'
+
+function MyList({ items }) {
+  const parentRef = useRef()
+
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 50,
+    overscan: 5
+  })
+
+  return (
+    <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>
+      <div style={{
+        height: virtualizer.getTotalSize(),
+        position: 'relative'
+      }}>
+        {virtualizer.getVirtualItems().map(virtualRow => (
+          <div
+            key={virtualRow.key}
+            data-index={virtualRow.index}
+            ref={virtualizer.measureElement}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${virtualRow.start}px)`
+            }}
+          >
+            <UserCard user={items[virtualRow.index]} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+```
+
+代码量比 Virtuoso 多，但**完全可控**——可以做任何自定义。
+
+### 变高 + 自动测量
+
+```jsx
+const virtualizer = useVirtualizer({
+  count: items.length,
+  getScrollElement: () => parentRef.current,
+  estimateSize: () => 80,                  // 初始估计
+})
+
+// 渲染时
+<div ref={virtualizer.measureElement}>     {/* 自动测量真实高度 */}
+  {/* content */}
+</div>
+```
+
+### 横向虚拟化
+
+```jsx
+const virtualizer = useVirtualizer({
+  horizontal: true,                        // 改为横向
+  count: items.length,
+  getScrollElement: () => parentRef.current,
+  estimateSize: () => 200
+})
+```
+
+### 网格（手动实现）
+
+TanStack Virtual 不直接提供 Grid——需要嵌套两个 virtualizer：
+
+```jsx
+function Grid({ data, columns }) {
+  const parentRef = useRef()
+  const rowVirtualizer = useVirtualizer({
+    count: data.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 200
+  })
+  const columnVirtualizer = useVirtualizer({
+    horizontal: true,
+    count: columns,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 200
+  })
+
+  return (
+    <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>
+      <div style={{
+        height: rowVirtualizer.getTotalSize(),
+        width: columnVirtualizer.getTotalSize(),
+        position: 'relative'
+      }}>
+        {rowVirtualizer.getVirtualItems().map(row =>
+          columnVirtualizer.getVirtualItems().map(col => (
+            <div
+              key={`${row.key}-${col.key}`}
+              style={{
+                position: 'absolute',
+                top: row.start, left: col.start,
+                width: col.size, height: row.size
+              }}
+            >
+              <Cell data={data[row.index][col.index]} />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+```
+
+### 与 TanStack Table 协同
+
+虚拟化大表格的官方方案：
+
+```jsx
+import { useReactTable, getCoreRowModel } from '@tanstack/react-table'
+import { useVirtualizer } from '@tanstack/react-virtual'
+
+function VirtualTable({ data, columns }) {
+  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+  const { rows } = table.getRowModel()
+
+  const parentRef = useRef()
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 50
+  })
+
+  return (
+    <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>
+      <table>
+        <thead>
+          {table.getHeaderGroups().map(headerGroup => (
+            <tr key={headerGroup.id}>
+              {headerGroup.headers.map(header => <th>{header.column.columnDef.header}</th>)}
+            </tr>
+          ))}
+        </thead>
+        <tbody style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+          {virtualizer.getVirtualItems().map(virtualRow => {
+            const row = rows[virtualRow.index]
+            return (
+              <tr
+                key={row.id}
+                style={{
+                  position: 'absolute',
+                  transform: `translateY(${virtualRow.start}px)`
+                }}
+              >
+                {row.getVisibleCells().map(cell => (
+                  <td key={cell.id}>{cell.renderValue()}</td>
+                ))}
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+```
+
+这是**最强大**的表格虚拟化组合——可排序、过滤、分组、虚拟化。
+
+### TanStack Virtual 的特点
+
+| 维度 | 评价 |
+| ---- | ---- |
+| Bundle | ~ 6 KB |
+| API | 中等抽象（hook 优先） |
+| 变高 | ✅ 自动测量 |
+| 网格 | 手动嵌套 |
+| 横向 | ✅ |
+| 完全可控 | ✅ |
+| 维护 | 活跃 |
+
+## 对比与选型
+
+| 维度 | react-window | react-virtuoso | TanStack Virtual |
+| ---- | ------------ | -------------- | ---------------- |
+| Bundle | 5 KB | 35 KB | 6 KB |
+| 上手 | 容易 | 最容易 | 中等 |
+| 自定义 | 中 | 中 | 完全 |
+| 变高 | 手动 | 自动 | 自动 |
+| 表格 | 需手动 | 内建 | 配 TanStack Table |
+| 网格 | 内建 | 内建 | 手动 |
+| SSR | 部分 | ✅ | ✅ |
+| 维护 | 减少 | 活跃 | 活跃 |
+
+### 选型建议
+
+```text
+快速集成 / 简单列表 ──► react-virtuoso
+最小 bundle / 固定高度 ──► react-window
+复杂表格（排序/过滤/虚拟化） ──► TanStack Virtual + Table
+完全自定义渲染 ──► TanStack Virtual
+```
+
+## 常见陷阱
+
+### 1. 容器高度未指定
+
+```jsx
+// ❌ 容器无明确高度 → 虚拟化失败（看到所有行）
+<Virtuoso data={items} />
+
+// ✅ 必须显式设置
+<Virtuoso style={{ height: 600 }} data={items} />
+```
+
+### 2. 滚动容器选错
+
+虚拟化库需要知道"哪个元素的滚动决定显示什么"——这通常是**直接父容器**：
+
+```jsx
+// ❌ 如果整页滚动（window），传错滚动元素
+<div style={{ height: 'auto' }}>
+  <Virtuoso style={{ height: 600 }} data={items} />
+</div>
+
+// ✅ 用 useWindowVirtualizer 或 customScrollParent
+<Virtuoso
+  customScrollParent={document.documentElement}
+  data={items}
+/>
+```
+
+### 3. 行内嵌套 Suspense
+
+```jsx
+// ❌ 每行 Suspense 让大量水合压力集中
+itemContent={(index, item) => (
+  <Suspense fallback={<Spinner />}>
+    <ExpensiveCard item={item} />
+  </Suspense>
+)}
+
+// ✅ Suspense 提到列表外
+<Suspense fallback={<Spinner />}>
+  <Virtuoso itemContent={...} />
+</Suspense>
+```
+
+### 4. memo 子组件
+
+```jsx
+// ❌ 每次滚动都重渲染所有可见行
+itemContent={(index, item) => <UserCard user={item} />}
+
+// ✅ memo 行组件 + 引用稳定的 item
+const UserCard = React.memo(function UserCard({ user }) { ... })
+```
+
+### 5. 无限加载的去重
+
+```jsx
+async function loadMore() {
+  const newItems = await fetch(`/api/items?cursor=${cursor}`).then(r => r.json())
+  // ❌ 网络重试可能导致重复加入
+  setItems(prev => [...prev, ...newItems])
+
+  // ✅ 用 Map 或 Set 去重
+  setItems(prev => {
+    const existing = new Set(prev.map(x => x.id))
+    return [...prev, ...newItems.filter(x => !existing.has(x.id))]
+  })
+}
+```
+
+### 6. 滚动还原
+
+切回页面时希望保留滚动位置：
+
+```jsx
+// 1. 保存
+const handleScroll = useCallback(({ scrollOffset }) => {
+  sessionStorage.setItem('list-scroll', scrollOffset)
+}, [])
+
+// 2. 还原
+const initialOffset = Number(sessionStorage.getItem('list-scroll')) || 0
+
+<FixedSizeList
+  initialScrollOffset={initialOffset}
+  onScroll={handleScroll}
+  ...
+/>
+```
+
+## 高级场景
+
+### 锚定到元素
+
+跳转到某项并居中：
+
+```jsx
+const ref = useRef()
+
+ref.current?.scrollToItem(500, 'center')      // react-window
+ref.current?.scrollToIndex({ index: 500, align: 'center' })   // virtuoso
+virtualizer.scrollToIndex(500, { align: 'center' })           // tanstack
+```
+
+### 动画移除项
+
+虚拟化与动画的协同复杂——库通常不内建。需要自定义：
+
+```jsx
+// 用 framer-motion + AnimatePresence
+import { motion, AnimatePresence } from 'framer-motion'
+
+itemContent={(index, item) => (
+  <AnimatePresence mode="popLayout">
+    <motion.div
+      key={item.id}
+      layout
+      exit={{ opacity: 0, x: -100 }}
+    >
+      <Item data={item} />
+    </motion.div>
+  </AnimatePresence>
+)}
+```
+
+但虚拟化 + 复杂动画通常体验有妥协——慎用。
+
+### 动态变化的列表（实时数据）
+
+```jsx
+// WebSocket 推送新项
+useEffect(() => {
+  ws.on('newItem', (item) => {
+    setItems(prev => [item, ...prev])
+  })
+}, [])
+```
+
+`react-virtuoso` 内置 `followOutput="smooth"` 自动滚到新项。
+
+### 高度变化的项（评论展开 / 收起）
+
+```jsx
+// react-virtuoso：内部自动重测
+const [expanded, setExpanded] = useState(new Set())
+itemContent={(index, item) => (
+  <Comment
+    data={item}
+    expanded={expanded.has(item.id)}
+    onToggle={() => setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(item.id) ? next.delete(item.id) : next.add(item.id)
+      return next
+    })}
+  />
+)}
+```
+
+`react-window` 需手动 `resetAfterIndex(index)`。
+
+## 性能监控
+
+### 快速诊断"列表卡"
+
+```js
+// DevTools Performance 面板录制滚动
+// 关注：
+//   - 主线程长任务（黄色）→ React 渲染慢
+//   - Style/Layout（紫色）→ CSS 慢
+//   - Paint（绿色）→ 像素绘制慢
+
+// 如果有 60+ ms 的长任务出现 → 虚拟化未生效或子组件太重
+```
+
+### React DevTools Profiler
+
+录制滚动时的 commit：
+
+```text
+看每次 commit：
+  - 渲染了多少个 Item？
+    - < 30 个 → 虚拟化生效
+    - > 100 个 → 虚拟化失效
+  - 单个 Item 渲染时间？
+    - > 5 ms → 子组件需要 memo / 拆分
+```
+
+### `requestAnimationFrame` 测帧率
+
+```js
+let lastTime = performance.now()
+function tick() {
+  const now = performance.now()
+  const fps = 1000 / (now - lastTime)
+  lastTime = now
+  if (fps < 50) console.warn('FPS:', fps.toFixed(1))
+  requestAnimationFrame(tick)
+}
+requestAnimationFrame(tick)
+```
+
+滚动期间 FPS < 50 = 卡顿。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 1000+ 行直接 map | 渲染卡死 | 虚拟化 |
+| 容器无 height | 虚拟化失效 | 显式高度或 customScrollParent |
+| 行组件不 memo | 滚动时全部重渲 | React.memo + 稳定 props |
+| 内联函数 / 对象作 props | memo 失效 | useCallback / useMemo |
+| 行内 Suspense | 水合压力 | Suspense 提到列表外 |
+| 滚动监听 onScroll 重计算 | 主线程阻塞 | 用库内置 + memo |
+| 无限加载不去重 | 重复项 | id 去重 |
+| 无 key 或用 index 作 key | 状态错位 | 稳定 ID |
+| 大量行内 useEffect | 性能黑洞 | 提到列表层级 |
+
+## 与代码分割的协同
+
+虚拟化库本身不大，但**行内组件**可能很复杂——用 lazy 拆分：
+
+```jsx
+const HeavyRow = lazy(() => import('./HeavyRow'))
+
+<Virtuoso
+  itemContent={(index, item) => (
+    <Suspense fallback={<RowSkeleton />}>
+      <HeavyRow data={item} />
+    </Suspense>
+  )}
+/>
+```
+
+但通常不推荐——会引发 N 次代码分割请求。仅当行内有大型库（如 chart.js）时才合理。
+
+## 实战：万行表格 + 排序 + 过滤 + 虚拟化
+
+```jsx
+import { useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel } from '@tanstack/react-table'
+import { useVirtualizer } from '@tanstack/react-virtual'
+
+function BigTable({ data, columns }) {
+  const [sorting, setSorting] = useState([])
+  const [filter, setFilter] = useState('')
+  const parentRef = useRef()
+
+  const table = useReactTable({
+    data,
+    columns,
+    state: { sorting, globalFilter: filter },
+    onSortingChange: setSorting,
+    onGlobalFilterChange: setFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel()
+  })
+
+  const { rows } = table.getRowModel()
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 40,
+    overscan: 10
+  })
+
+  return (
+    <>
+      <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Search..." />
+      <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>
+        <table>
+          <thead>
+            {table.getHeaderGroups().map(group => (
+              <tr key={group.id}>
+                {group.headers.map(header => (
+                  <th key={header.id} onClick={header.column.getToggleSortingHandler()}>
+                    {header.column.columnDef.header}
+                    {header.column.getIsSorted() === 'asc' && ' ▲'}
+                    {header.column.getIsSorted() === 'desc' && ' ▼'}
+                  </th>
+                ))}
+              </tr>
+            ))}
+          </thead>
+          <tbody style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+            {virtualizer.getVirtualItems().map(vRow => {
+              const row = rows[vRow.index]
+              return (
+                <tr key={row.id} style={{ position: 'absolute', top: vRow.start, width: '100%' }}>
+                  {row.getVisibleCells().map(cell => (
+                    <td key={cell.id}>{cell.renderValue()}</td>
+                  ))}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )
+}
+```
+
+实测：10 万行 + 排序 + 过滤 + 滚动，60 FPS 稳定。
+
+## 小结
+
+- 虚拟化是大列表（500+ 行）的唯一解药——不虚拟化的 10000 行能让浏览器崩溃；
+- react-window 最轻量但偏底层，适合固定高度场景；
+- react-virtuoso 开箱即用，自动处理变高、表格、分组、网格——日常项目首选；
+- TanStack Virtual 完全可控，配 TanStack Table 是大表格的最强组合；
+- 虚拟化生效的前提：容器有明确高度、滚动父级正确、行组件 memo 化；
+- 行内组件保持轻量——昂贵子组件可以 lazy + Suspense（但慎用）；
+- 滚动还原、动态变高、动画移除是常见进阶需求，需库 + 自定义配合；
+- 虚拟化与无限加载是天然搭档，但要做好去重、滚动锚定、骨架屏占位。

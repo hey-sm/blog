@@ -1,0 +1,710 @@
+---
+title: React 性能工具
+description: React DevTools Profiler、React Scan、Why Did You Render、Bundle 分析、内存定位
+---
+
+# React 性能工具
+
+> 优化前必须先测量——盲目重构是 React 性能的头号陷阱。
+
+本章覆盖 React 专属的性能工具：DevTools Profiler 的火焰图深读、React Scan 的视觉化重渲染高亮、Why Did You Render 的根因定位、Profiler API 的代码级埋点、内存泄漏排查，以及如何把工具结果翻译为可执行的优化方案。
+
+## 工具矩阵
+
+```text
+何时用什么工具：
+
+┌─ 开发期排查 ──────────────────────────────┐
+│  React DevTools Profiler  火焰图、渲染原因  │
+│  React Scan               视觉高亮重渲染   │
+│  Why Did You Render        控制台告警      │
+│  Profiler API（代码级）     生产监控嵌入    │
+└──────────────────────────────────────────┘
+
+┌─ Bundle 分析 ─────────────────────────────┐
+│  rollup-plugin-visualizer  Vite/Rollup    │
+│  webpack-bundle-analyzer   webpack         │
+│  source-map-explorer       任意构建产物    │
+│  Next.js bundle analyzer   Next.js 专用    │
+└──────────────────────────────────────────┘
+
+┌─ 内存与泄漏 ──────────────────────────────┐
+│  Chrome DevTools Memory    Heap snapshot   │
+│  Performance + Memory       带内存曲线录制 │
+└──────────────────────────────────────────┘
+
+┌─ 生产监控 ────────────────────────────────┐
+│  web-vitals + INP/CLS      用户体验指标    │
+│  Sentry / Datadog          性能 + 错误     │
+│  Profiler onRender          自定义埋点     │
+└──────────────────────────────────────────┘
+```
+
+## React DevTools Profiler
+
+最权威的 React 性能工具——直接来自 React 团队。
+
+### 安装
+
+[React Developer Tools](https://chrome.google.com/webstore/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi) Chrome / Firefox 扩展。
+
+DevTools 中会出现两个新面板：
+
+- **Components**：组件树 + props / state / hooks 检查
+- **Profiler**：渲染性能分析
+
+### 录制流程
+
+```text
+1. Profiler 面板 → 设置图标（齿轮）→ 勾选：
+   ☑ Record why each component rendered while profiling
+   ☑ Highlight updates when components render
+2. 点蓝色圆形按钮开始录制
+3. 操作页面（输入、点击、滚动）
+4. 点停止
+5. 查看每次提交的火焰图
+```
+
+### 火焰图阅读
+
+```text
+顶部时间轴：每次 commit 的时间线
+  柱状高度 = 耗时
+  颜色：黄色（快） → 红色（慢）
+
+下方组件树：
+  - 横条：组件
+  - 横条长度：渲染时间
+  - 颜色：
+    🟢 绿色：首次渲染
+    🔵 蓝色（深）：渲染时间长
+    🔵 蓝色（浅）：渲染时间短
+    ⚪ 灰色：本次未渲染（被 memo 化）
+```
+
+### "Why did this render?"
+
+DevTools Profiler 设置 → 勾选 "Record why each component rendered"。
+
+录制后，点击任意组件，右侧显示渲染原因：
+
+```text
+ProductCard rendered because:
+  ✓ Hooks changed:
+    - State 1 (useState): { name: 'A' } → { name: 'B' }
+  ✓ Props changed:
+    - data: { id: 1 } → { id: 1 } (different objects)
+    - onClick: () => {} → () => {} (different functions)
+  ✗ Parent component rendered.
+  ✗ Context changed.
+```
+
+实战定位：
+
+- 看到"Parent component rendered" → 父变带动，需 memo 或拆分
+- 看到 "Props changed: callback" → 上层 useCallback 缺失
+- 看到 "Hooks changed" → state 变化合理，看是否过频
+
+### Ranked View
+
+Profiler 顶部切换到 "Ranked"——按本次提交渲染时间倒序：
+
+```text
+1. ProductList     45 ms   ← 最慢
+2. ProductCard×30  各 0.5 ms
+3. Header          0.3 ms
+```
+
+直接定位"瓶颈组件"。
+
+### Component Picker
+
+点击放大镜图标 → 在页面上点击元素 → 跳转到对应组件——当组件名复杂时极其有用。
+
+## React Scan
+
+[React Scan](https://github.com/aidenybai/react-scan) 是新一代视觉化工具——直接在页面上**标出每个重渲染的组件**：
+
+```text
+组件渲染时显示彩色边框：
+🟢 绿色边框 + 数字 1   ← 第 1 次渲染（正常）
+🔵 蓝色边框 + 数字 5    ← 第 5 次渲染（注意）
+🟡 黄色边框 + 数字 20   ← 重渲染过多
+🔴 红色边框 + 数字 100  ← 严重过度渲染
+```
+
+### 安装
+
+```bash
+npm install react-scan
+```
+
+```jsx
+// main.tsx（必须在 React 之前 import）
+import { scan } from 'react-scan'
+
+scan({
+  enabled: process.env.NODE_ENV === 'development',
+  log: true                             // 控制台同时打印
+})
+
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App'
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+```
+
+### CDN 试用（无需安装）
+
+```html
+<script src="//unpkg.com/react-scan/dist/auto.global.js"></script>
+```
+
+任何 React 应用即可使用——开发期 / 排查时极有用。
+
+### 配置
+
+```jsx
+scan({
+  enabled: true,
+  log: false,                                 // 是否打印控制台
+  showToolbar: true,                          // 显示工具栏
+  animationSpeed: 'fast',                     // 动画速度
+  trackUnnecessaryRenders: true               // 标识"无必要"渲染
+})
+```
+
+`trackUnnecessaryRenders: true` 会进一步区分：
+
+- 必要渲染（state / context 真的变了）
+- 无必要渲染（props 没变但因父变重渲染）
+
+后者就是优化目标。
+
+### React DevTools vs React Scan
+
+| 工具 | 强项 | 弱项 |
+| ---- | ---- | ---- |
+| DevTools Profiler | 精确度量、火焰图、Why-render | 需录制/停止/分析 |
+| React Scan | 实时视觉反馈、零配置 | 不显示具体耗时 |
+
+**组合使用**：React Scan 快速定位 → DevTools Profiler 深入分析。
+
+## Why Did You Render
+
+[`@welldone-software/why-did-you-render`](https://github.com/welldone-software/why-did-you-render) 在控制台告警"无必要重渲染"：
+
+```jsx
+// wdyr.js
+import React from 'react'
+if (process.env.NODE_ENV === 'development') {
+  const whyDidYouRender = require('@welldone-software/why-did-you-render')
+  whyDidYouRender(React, {
+    trackAllPureComponents: true,
+    trackHooks: true,
+    logOnDifferentValues: true
+  })
+}
+
+// main.tsx 顶部
+import './wdyr'
+import React from 'react'
+// ...
+```
+
+控制台输出：
+
+```text
+[wdyr] ProductCard
+  Re-rendered because of props changes:
+    different objects but values are equal:
+    - props.data
+      before: { id: 1, name: 'A' }
+      after:  { id: 1, name: 'A' }   ← 引用变了但值相同
+  Re-rendered because of hooks changes:
+    [useState 1]
+      before: 0
+      after:  0                       ← state 也没变
+```
+
+精确指出"哪个 prop 引用变了"——补 `useMemo` 还是 `useCallback` 一目了然。
+
+### 标记特定组件
+
+```jsx
+function MyComponent() { /* ... */ }
+MyComponent.whyDidYouRender = true
+```
+
+或全局 `trackAllPureComponents: true` 监控所有 memo 组件。
+
+### 何时用
+
+- 项目早期建立性能纪律
+- 明知某组件"应该不渲染但渲染了"
+- 教学场景演示重渲染规则
+
+不建议生产开启——有运行时成本。
+
+## Profiler API
+
+React 内置 `<Profiler>` 组件——可以在代码中嵌入测量：
+
+```jsx
+import { Profiler } from 'react'
+
+function App() {
+  return (
+    <Profiler id="App" onRender={onRender}>
+      <Header />
+      <Profiler id="Main" onRender={onRender}>
+        <Main />
+      </Profiler>
+      <Footer />
+    </Profiler>
+  )
+}
+
+function onRender(id, phase, actualDuration, baseDuration, startTime, commitTime) {
+  console.log(`[${id}] ${phase}: ${actualDuration.toFixed(1)}ms`)
+}
+```
+
+参数：
+
+| 参数 | 含义 |
+| ---- | ---- |
+| `id` | Profiler 标识 |
+| `phase` | `'mount'` / `'update'` / `'nested-update'` |
+| `actualDuration` | 实际渲染耗时（含子组件） |
+| `baseDuration` | 估算的不优化时耗时（无 memo 的成本） |
+| `startTime` | 渲染开始时间戳 |
+| `commitTime` | commit 时间戳 |
+
+### 上报到生产监控
+
+```jsx
+function onRender(id, phase, actualDuration) {
+  if (actualDuration > 16) {           // 超过一帧
+    analytics.track('slow-render', {
+      componentId: id,
+      phase,
+      duration: actualDuration
+    })
+  }
+}
+```
+
+```jsx
+// 在生产环境监控关键路径
+<Profiler id="ProductList" onRender={onRender}>
+  <ProductList />
+</Profiler>
+```
+
+⚠️ Profiler 本身有少量开销——仅在确实需要的关键路径用，不要全局包裹。
+
+## Bundle 分析工具
+
+### Vite + rollup-plugin-visualizer
+
+```bash
+npm install -D rollup-plugin-visualizer
+```
+
+```js
+// vite.config.js
+import { visualizer } from 'rollup-plugin-visualizer'
+
+export default {
+  plugins: [
+    visualizer({
+      open: true,
+      gzipSize: true,
+      brotliSize: true,
+      template: 'treemap'             // 或 'sunburst' / 'network'
+    })
+  ]
+}
+```
+
+构建后自动打开可视化页面——按文件大小渲染矩形：
+
+```text
+┌─ vendor.abc.js (350 KB) ────────────┐
+│ ┌─ react-dom (150 KB) ─┐ ┌─ react ─┐│
+│ │                      │ │  (80 KB)││
+│ └──────────────────────┘ └─────────┘│
+│ ┌─ lodash (70 KB) ─┐ ┌─ axios ─┐    │
+│ └──────────────────┘ └─────────┘    │
+└─────────────────────────────────────┘
+┌─ main.def.js (120 KB) ──────────────┐
+│ ┌─ src/components ─┐ ┌─ src/utils ─┐│
+│ └──────────────────┘ └─────────────┘│
+└─────────────────────────────────────┘
+```
+
+### Next.js Bundle Analyzer
+
+```bash
+npm install -D @next/bundle-analyzer
+```
+
+```js
+// next.config.js
+const withBundleAnalyzer = require('@next/bundle-analyzer')({
+  enabled: process.env.ANALYZE === 'true'
+})
+
+module.exports = withBundleAnalyzer({})
+```
+
+```bash
+ANALYZE=true npm run build
+```
+
+显示 client / server / edge 三个 bundle 的构成。
+
+### source-map-explorer
+
+不依赖打包器配置——任何已构建产物都能分析：
+
+```bash
+npx source-map-explorer 'dist/**/*.js'
+```
+
+## 内存定位
+
+### Heap Snapshot
+
+DevTools → Memory → Heap snapshot：
+
+```text
+1. 操作前 → Take snapshot #1
+2. 操作（如打开 modal → 关闭，进入路由 → 退出）
+3. 点击垃圾桶按钮（强制 GC）
+4. Take snapshot #2
+5. 选 snapshot #2 → 顶部下拉选 "Comparison"
+6. 看 # Delta 列正值的对象
+```
+
+例如：
+
+```text
+Constructor      # New   # Deleted   # Delta
+HTMLDivElement     150         100        +50    ← 50 个 div 没被回收
+SomeComponent       80          70        +10    ← 10 个组件残留
+```
+
+正 Delta 表示对象在两次操作间增长——可能泄漏。
+
+### Retainer 链
+
+选中可疑对象 → 下方 "Retainers" 面板显示**它被谁持有**：
+
+```text
+HTMLDivElement
+  ↑ children
+  HTMLDivElement
+  ↑ in container
+  Object (Component instance)
+  ↑ in window
+  window
+```
+
+逆向追溯到 GC 根，找出"本不该持有它的"引用。
+
+### 常见 React 内存泄漏
+
+#### 1. 未清理的 timer / listener
+
+```jsx
+// ❌ 组件卸载后 setInterval 仍在跑
+useEffect(() => {
+  setInterval(() => doSomething(), 1000)
+}, [])
+
+// ✅ 清理
+useEffect(() => {
+  const id = setInterval(() => doSomething(), 1000)
+  return () => clearInterval(id)
+}, [])
+```
+
+#### 2. 未清理的订阅
+
+```jsx
+useEffect(() => {
+  const unsub = store.subscribe(handler)
+  return unsub                   // ✅ 卸载时取消
+}, [])
+```
+
+#### 3. 闭包持有大对象
+
+```jsx
+function Comp() {
+  const hugeData = useMemo(() => loadHuge(), [])
+
+  // ❌ callback 永远闭包持有 hugeData
+  useEffect(() => {
+    const handler = () => console.log(hugeData[0])
+    window.addEventListener('click', handler)
+    return () => window.removeEventListener('click', handler)
+  }, [])
+}
+```
+
+如果 `hugeData` 是几十 MB——即使组件卸载，闭包还在 → 全部留在堆里。
+
+#### 4. ref 链
+
+```jsx
+function Comp() {
+  const ref = useRef()
+
+  // ❌ ref 持有 DOM，DOM 持有事件，事件持有闭包，闭包持有...
+  // 卸载时如果 ref.current 仍在某全局集合里，整条链都不释放
+}
+```
+
+### Allocation Timeline
+
+```text
+Memory → Allocation instrumentation on timeline → Start
+─ 操作页面
+─ Stop
+─ 时间线上：
+  - 蓝色柱：仍存活的分配 ← 可疑
+  - 灰色柱：已被 GC ← 正常
+```
+
+蓝色柱代表"持续存在的分配"——配 Retainer 链定位泄漏来源。
+
+### Performance + Memory
+
+DevTools Performance 面板录制时勾选 "Memory"——时间线下方显示堆曲线：
+
+```text
+JS Heap：
+  锯齿状下降：正常 GC（健康）
+  持续单调上升：可疑（泄漏）
+  GC 后基线越来越高：可疑（每轮 GC 没清完）
+```
+
+## 生产监控
+
+### web-vitals 集成
+
+```js
+// 上报 React 相关指标
+import { onINP, onLCP, onCLS } from 'web-vitals'
+
+onINP(metric => {
+  if (metric.value > 200) {
+    analytics.track('slow-inp', {
+      value: metric.value,
+      element: metric.entries[0]?.target?.tagName
+    })
+  }
+})
+```
+
+详见 [性能指标与预算](/performance/metrics)。
+
+### Sentry Performance
+
+```js
+import * as Sentry from '@sentry/react'
+
+Sentry.init({
+  dsn: '...',
+  integrations: [Sentry.reactRouterV6BrowserTracingIntegration({ ... })],
+  tracesSampleRate: 0.1
+})
+```
+
+自动追踪：
+
+- 路由切换性能
+- 组件渲染时间（开启 React profiler 集成）
+- 用户操作 → 渲染瀑布
+- 错误 + 性能上下文
+
+```jsx
+// 标记关键组件
+import { Profiler } from '@sentry/react'
+
+<Profiler name="Checkout">
+  <CheckoutFlow />
+</Profiler>
+```
+
+### Datadog RUM
+
+类似的企业级方案——细粒度 RUM + Real User Monitoring。
+
+### Vercel Analytics
+
+Next.js 部署到 Vercel 时一键开启：
+
+```jsx
+// app/layout.tsx
+import { Analytics } from '@vercel/analytics/react'
+
+export default function Layout({ children }) {
+  return <html><body>{children}<Analytics /></body></html>
+}
+```
+
+显示页面 / 设备 / 国家维度的 Core Web Vitals。
+
+## 实战诊断流程
+
+### 场景 1："首页打开慢"
+
+```text
+1. PageSpeed Insights → 看 LCP
+   ├─ TTFB 慢？──► 检查 SSR / 服务器
+   ├─ JS bundle 大？──► visualizer 分析
+   └─ 关键资源没 preload？──► 见 [资源预加载]
+
+2. Lighthouse → 看 "Reduce JavaScript execution time"
+   └─ 跳到代码分割 / RSC / Tree Shaking
+```
+
+### 场景 2："输入卡顿"
+
+```text
+1. 复现：DevTools Performance 录制输入过程
+2. 找长任务（红条 > 50 ms）
+3. 跳到调用栈 → 找到 React 渲染哪个组件
+4. React DevTools Profiler 录制同样操作
+   ├─ 看哪个组件渲染时间长？
+   ├─ Why did this render? 看原因
+   └─ 修复：useTransition / useDeferredValue / 列表虚拟化
+```
+
+### 场景 3："列表滚动卡"
+
+```text
+1. DevTools Performance 录制滚动 5 秒
+2. 看主线程：长任务多 → React 太频繁渲染
+   ├─ 列表是否虚拟化？──► 跳到 [列表虚拟化]
+   └─ 行组件是否 memo？──► 用 React Scan 看哪些行重渲
+
+3. 看 GPU / Composite：
+   └─ 帧率低 + 大量 Layout/Paint → CSS 不合规（用了 left/top 等）
+```
+
+### 场景 4："使用一段时间后变慢"
+
+```text
+1. Memory 面板 → 操作前后两次 Heap Snapshot
+2. Comparison 看 Delta 大的 Constructor
+3. Retainers 链找根因
+4. 通常是：
+   ├─ 未清理的 listener / timer
+   ├─ 闭包持有大对象
+   └─ 全局集合（数组 / Map）持续增长
+```
+
+## 性能预算与 CI
+
+### Lighthouse CI
+
+```yaml
+# .github/workflows/lhci.yml
+- run: npm ci && npm run build
+- run: npm install -g @lhci/cli
+- run: lhci autorun
+```
+
+```json
+// lighthouserc.json
+{
+  "ci": {
+    "assert": {
+      "assertions": {
+        "categories:performance": ["error", { "minScore": 0.9 }],
+        "interactive": ["error", { "maxNumericValue": 3500 }],
+        "total-blocking-time": ["warn", { "maxNumericValue": 200 }]
+      }
+    }
+  }
+}
+```
+
+### bundle-size 检查
+
+```yaml
+- uses: andresz1/size-limit-action@v1
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+PR 中若 bundle 超 200 KB 自动拦截。
+
+详见 [通用性能工具链](/performance/tools)。
+
+## 常见误读
+
+### 1. "Profiler 显示 5 ms 是慢吗？"
+
+不一定。看 commit 总时间——如果一次 commit 总耗时 50 ms 但有 1000 个组件，平均 0.05 ms 就很正常。**关注异常值**。
+
+### 2. "Why did this render 没显示原因？"
+
+可能是因为：
+
+- 没勾选 "Record why each component rendered"
+- 组件确实没渲染（被 memo 跳过）
+- 是 mount，不是 update
+
+### 3. "Bundle 分析只看到 main.js 大"
+
+需要 source map 才能看到内部构成。确保构建配 `sourcemap: true`。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 不测就优化 | 优化错位置 | Profiler 先量化 |
+| 只看本机 Lighthouse | 数字偏好 | 用 PSI 看 CrUX |
+| 不看 INP 只看 LCP | 漏掉交互问题 | INP 是 React 应用的关键 |
+| 生产环境开 Why-DiD-You-Render | 性能损失 | 仅开发期 |
+| 一切都用 Sentry Profiler | 监控成本高 | 仅关键组件 |
+| Bundle visualizer 只看一次 | 后续劣化 | 集成到 CI |
+| 用 console.time 测组件 | 不准（异步） | 用 Profiler API |
+| 不集成 web-vitals | 真实用户表现盲区 | 必接 RUM |
+
+## 工具组合的"日常工作流"
+
+```text
+开发期（每个 PR）：
+  ├─ React Scan 实时观察重渲染
+  ├─ 写完功能用 Profiler 录制一次
+  └─ 上传前 visualizer 看 bundle
+
+提 PR 时：
+  ├─ Lighthouse CI 自动跑
+  ├─ size-limit 检查 bundle
+  └─ Code Reviewer 看 Why-render 截图（如果 PR 涉及性能）
+
+部署后：
+  ├─ web-vitals 上报 RUM
+  ├─ Sentry 追踪慢渲染
+  └─ 每周看 P75 趋势
+```
+
+## 小结
+
+- React DevTools Profiler 是 React 性能诊断的核心工具——火焰图 + Why-did-this-render 是排查重渲染的标配；
+- React Scan 提供实时视觉反馈，零配置即可定位重渲染热点，是 Profiler 的最佳搭档；
+- Why Did You Render 在控制台告警"无必要重渲染"，开发期对建立性能纪律有用；
+- Profiler API（`<Profiler onRender>`）是代码级埋点，可上报生产监控；
+- Bundle 分析（visualizer / source-map-explorer）回答"为什么 bundle 这么大"；
+- 内存泄漏排查靠 Heap Snapshot Comparison + Retainers 链，常见根因是未清理的 listener / timer；
+- 生产监控用 web-vitals + Sentry / Datadog——实验室数据无法替代真实用户体验；
+- 性能优化的"工作流"是：测量 → 定位 → 优化 → 再次测量验证，没有任何步骤可以跳过。

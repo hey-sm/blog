@@ -1,0 +1,283 @@
+---
+title: 循环与迭代
+description: for / while / do-while / for-of / for-in 与迭代协议
+---
+
+# 循环与迭代
+
+JavaScript 的循环语法分为两类：
+
+- **基于计数 / 条件的传统循环**：`for`、`while`、`do...while`
+- **基于迭代协议的语法**：`for...of`、`for...in`、`Array` / `Map` / `Set` 上的高阶方法
+
+理解后者必须先理解 **迭代协议（Iteration Protocol）**。
+
+## `for`
+
+```js
+for (initialization; condition; afterthought) {
+  // body
+}
+```
+
+```js
+for (let i = 0; i < 5; i++) {
+  console.log(i)
+}
+// → 0 1 2 3 4
+```
+
+三个表达式都可省略，等价于 `while (true)`：
+
+```js
+for (;;) {
+  if (Date.now() > deadline) break
+}
+```
+
+支持多变量：
+
+```js
+for (let i = 0, j = 10; i < j; i++, j--) {
+  console.log(i, j)
+}
+```
+
+#### `for` 中的闭包陷阱
+
+```js
+const fns = []
+for (var i = 0; i < 3; i++) {
+  fns.push(() => i)
+}
+console.log(fns.map(f => f()))                // → [3, 3, 3]   var 共享一个 i
+
+const fns2 = []
+for (let i = 0; i < 3; i++) {
+  fns2.push(() => i)
+}
+console.log(fns2.map(f => f()))               // → [0, 1, 2]   let 每轮新绑定
+```
+
+ECMAScript 规范明确：**`for (let x = ...)` 每次迭代会重新创建 `x` 的绑定**。
+
+## `while` / `do...while`
+
+```js
+let n = 0
+while (n < 3) {
+  console.log(n++)
+}
+// → 0 1 2
+
+let m = 5
+do {
+  console.log(m)                              // 至少执行一次
+  m++
+} while (m < 3)                               // 条件不满足，循环结束
+// → 5
+```
+
+`while` 适用于不确定迭代次数、由条件控制的循环；`do...while` 比 `while` 多一次"先做后判"的语义。
+
+## `for...of`
+
+ES6 引入。遍历**任何实现了迭代协议的对象**——包括 `Array`、`String`、`Map`、`Set`、`TypedArray`、生成器、`arguments`、DOM 集合等。
+
+```js
+for (const ch of 'abc') console.log(ch)       // → a b c
+
+for (const n of new Set([1, 2, 3])) console.log(n)
+
+for (const [k, v] of new Map([['a', 1], ['b', 2]])) {
+  console.log(k, v)
+}
+
+const obj = { a: 1, b: 2 }
+for (const [k, v] of Object.entries(obj)) {
+  console.log(k, v)
+}
+```
+
+#### 与 `for...in` 的区别
+
+```js
+const arr = ['a', 'b', 'c']
+arr.foo = 'bar'
+
+for (const v of arr) console.log(v)           // → a b c           （只迭代值，跳过自定义属性）
+for (const k in arr) console.log(k)           // → 0 1 2 foo       （迭代键，包括自定义/继承）
+```
+
+## `for...in`
+
+`for...in` 遍历**对象自身及原型链上的可枚举字符串键**，**不应**用于数组：
+
+```js
+const obj = { a: 1, b: 2 }
+for (const key in obj) {
+  console.log(key, obj[key])                  // → a 1, b 2
+}
+
+// 屏蔽继承属性
+for (const key in obj) {
+  if (Object.hasOwn(obj, key)) {              // ES2022 推荐写法
+    console.log(key)
+  }
+}
+```
+
+不推荐用 `for...in` 遍历数组的原因：
+
+1. 顺序不保证（虽然现代引擎按 `[[OwnPropertyKeys]]` 规范顺序）；
+2. 会迭代继承的可枚举属性；
+3. 键是字符串而非数字。
+
+## 迭代协议
+
+### 可迭代协议（Iterable Protocol）
+
+对象实现了 `[Symbol.iterator]()` 方法，调用后返回一个**迭代器**：
+
+```js
+const range = {
+  from: 1,
+  to: 3,
+  [Symbol.iterator]() {
+    let cur = this.from
+    return {
+      next: () => cur <= this.to
+        ? { value: cur++, done: false }
+        : { value: undefined, done: true }
+    }
+  }
+}
+
+for (const n of range) console.log(n)         // → 1 2 3
+console.log([...range])                       // → [1, 2, 3]
+console.log(Array.from(range))                // → [1, 2, 3]
+```
+
+### 迭代器协议（Iterator Protocol）
+
+迭代器是任何实现了 `next()` 方法、返回 `{ value, done }` 对象的值。
+
+```js
+const it = ['a', 'b'][Symbol.iterator]()
+it.next()                                     // → { value: 'a', done: false }
+it.next()                                     // → { value: 'b', done: false }
+it.next()                                     // → { value: undefined, done: true }
+```
+
+### 生成器：迭代器的语法糖
+
+```js
+function* range(from, to) {
+  for (let i = from; i <= to; i++) yield i
+}
+
+for (const n of range(1, 3)) console.log(n)   // → 1 2 3
+console.log([...range(1, 5)])                 // → [1, 2, 3, 4, 5]
+```
+
+详见 [迭代器、类与 API](/js/iterators-classes)。
+
+## 数组高阶方法
+
+| 方法 | 作用 |
+| ---- | ---- |
+| `forEach(fn)` | 遍历，无返回值 |
+| `map(fn)` | 转换 → 新数组 |
+| `filter(pred)` | 过滤 → 新数组 |
+| `find(pred)` / `findIndex(pred)` | 找第一个匹配 |
+| `findLast(pred)` / `findLastIndex(pred)` | 反向查找（ES2023） |
+| `some(pred)` / `every(pred)` | 是否存在 / 全部满足 |
+| `reduce(fn, init)` / `reduceRight` | 折叠 |
+| `flat(depth)` / `flatMap(fn)` | 展平 |
+
+```js
+;[1, 2, 3].forEach(n => console.log(n))
+
+;[1, 2, 3].map(n => n * 2)                    // → [2, 4, 6]
+;[1, 2, 3].filter(n => n > 1)                 // → [2, 3]
+;[1, 2, 3].reduce((acc, n) => acc + n, 0)     // → 6
+
+// 多步数据流
+const total = orders
+  .filter(o => o.status === 'paid')
+  .map(o => o.amount)
+  .reduce((s, n) => s + n, 0)
+```
+
+#### `forEach` vs `for...of`
+
+| 维度 | `forEach` | `for...of` |
+| ---- | --------- | ---------- |
+| 异步 | **无法 await**（回调中的 await 不会被等待） | 支持 await |
+| `break` / `continue` | ❌（用 `return` 仅相当于 continue） | ✅ |
+| 索引 | 第二参数 | 配合 `entries()` |
+| 性能 | 略慢 | 略快 |
+
+```js
+// ✗ forEach 内部 await 不被等待，函数会立即结束
+async function badPaginate() {
+  pages.forEach(async page => {
+    await fetchPage(page)
+  })
+}
+
+// ✓ for...of 串行
+async function goodPaginateSerial() {
+  for (const page of pages) {
+    await fetchPage(page)
+  }
+}
+
+// ✓ Promise.all 并行
+async function goodPaginateConcurrent() {
+  await Promise.all(pages.map(p => fetchPage(p)))
+}
+```
+
+## 跳转：`break` / `continue`
+
+```js
+for (let i = 0; i < 5; i++) {
+  if (i === 3) break                          // 跳出循环
+  if (i % 2 === 0) continue                   // 跳过本次
+  console.log(i)                              // → 1
+}
+```
+
+`break` / `continue` 不能用于 `forEach`、`map` 等高阶方法。需要中途退出时改用 `for...of` 或 `some` / `every`：
+
+```js
+// 用 some 模拟 break：返回 true 即停止
+arr.some(item => {
+  if (matchesCondition(item)) {
+    process(item)
+    return true
+  }
+})
+```
+
+## 性能与可读性
+
+引擎对常见循环已高度优化，写法间的性能差异在多数业务场景中可忽略。**优先选择最贴合语义的写法**：
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 已知次数 / 索引 | `for` |
+| 集合元素遍历 | `for...of` 或高阶方法 |
+| 对象键遍历 | `Object.keys` / `entries` + `for...of` |
+| 数据转换流水线 | `map` / `filter` / `reduce` 链式 |
+| 异步串行 | `for...of` + `await` |
+| 异步并行 | `Promise.all(arr.map(...))` |
+
+## 小结
+
+- 传统循环靠条件控制，高阶迭代靠迭代协议；
+- `for...in` 是对象键迭代器，不要用于数组；
+- 生成器是创建迭代器的最便利方式；
+- 在数组方法中无法 `break`，需要改用 `for...of` 或 `some` / `every`；
+- 异步循环必须区分串行（`for...of` + `await`）与并行（`Promise.all`）。

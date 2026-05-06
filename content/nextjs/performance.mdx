@@ -1,0 +1,290 @@
+---
+title: 性能优化
+description: Bundle 分析、动态导入与代码分割、useReportWebVitals、Turbopack 优势、内存与网络优化
+---
+
+# 性能优化
+
+Next.js 默认做了大量性能优化（路由分割、图片/字体优化、缓存），但完全发挥性能潜力需要针对项目的数据、打包和运行时做针对性工作。
+
+## 代码分割与动态导入
+
+### `next/dynamic`
+
+```tsx filename="app/page.tsx"
+import dynamic from 'next/dynamic'
+
+const HeavyChart = dynamic(() => import('./HeavyChart'), {
+  loading: () => <div className="h-64 animate-pulse rounded bg-gray-200" />,
+  ssr: false,                        // 完全跳过服务端渲染（需客户端）
+})
+
+export default function Dashboard() {
+  return <HeavyChart />
+}
+```
+
+### 不同加载模式
+
+```tsx
+// 1. 带 loading 占位
+const Component = dynamic(() => import('./BigComponent'), {
+  loading: () => <Skeleton />,
+})
+
+// 2. 禁用 SSR（组件仅在客户端渲染）
+const ClientOnly = dynamic(() => import('./ClientOnlyComponent'), {
+  ssr: false,
+})
+
+// 3. 命名导出
+const { Button } = dynamic(() => import('./ComplexModule'), {
+  loading: () => <div>Loading...</div>,
+})
+```
+
+## 分析 Bundle 大小
+
+### `@next/bundle-analyzer`
+
+```bash
+pnpm add -D @next/bundle-analyzer
+```
+
+```ts filename="next.config.ts"
+import type { NextConfig } from 'next'
+import withBundleAnalyzer from '@next/bundle-analyzer'
+
+const nextConfig: NextConfig = { ... }
+
+export default withBundleAnalyzer({
+  enabled: process.env.ANALYZE === 'true',
+})(nextConfig)
+```
+
+```bash
+ANALYZE=true pnpm build
+```
+
+### 减少 Bundle 的常见手法
+
+| 问题 | 检查 | 修复 |
+| ---- | ---- | ---- |
+| 某个库的整个包被引入 | `import { debounce } from 'lodash'` | `import debounce from 'lodash/debounce'` |
+| 大型图标库全部 inject | `import { X } from 'lucide-react'` | tree-shaking 应该自动解决，验证 ESM 版本 |
+| moment.js 被引入 | `import moment from 'moment'` | → `date-fns` 或 `dayjs` |
+| 重库在服务端不必要 | 在 `'use client'` 中引入 | 移到 Server Component（不发送到浏览器） |
+
+## 动态导入的边界选择
+
+```tsx
+// ✓ 好的选择：动态导入叶子节点（最重的组件）
+import dynamic from 'next/dynamic'
+
+const VideoPlayer = dynamic(() => import('./VideoPlayer'))
+const CodeEditor = dynamic(() => import('./CodeEditor'))
+
+export default function Page() {
+  return (
+    <div>
+      <Header />
+      <VideoPlayer src="..." />      {/* 只在需要时加载 */}
+      <CodeEditor defaultValue="..." />
+      <Footer />
+    </div>
+  )
+}
+```
+
+```tsx
+// ✗ 不好的选择：动态导入整个页面
+const WholePage = dynamic(() => import('./WholePage'))
+// 首屏仍需加载 Header + 内容，延迟得不到利用
+```
+
+## `useReportWebVitals`
+
+```tsx filename="components/VitalsReporter.tsx"
+'use client'
+
+import { useReportWebVitals } from 'next/web-vitals'
+
+export function VitalsReporter() {
+  useReportWebVitals((metric) => {
+    // 发送到分析服务
+    console.log(metric)
+
+    // metric.name 可以是:
+    // CLS, FCP, FID, INP, LCP, TTFB
+    // metric.value, metric.rating ('good' | 'needs-improvement' | 'poor')
+  })
+
+  return null
+}
+```
+
+## 数据优化
+
+### 避免不必要的 client fetch
+
+```tsx
+// ✗ 页面已由 Server Component 渲染，但挂载后再次 fetch
+'use client'
+
+export function Page({ initialPosts }: { initialPosts: Post[] }) {
+  const [posts, setPosts] = useState(initialPosts)
+
+  useEffect(() => {
+    fetch('/api/posts').then(r => r.json()).then(setPosts)
+    // 没有新数据但重复请求，覆盖了 initialPosts
+  }, [])
+
+  return <PostList posts={posts} />
+}
+```
+
+```tsx
+// ✓ 接收服务端数据 + 仅在用户操作后 fetch
+'use client'
+
+export function Page({ initialPosts }: { initialPosts: Post[] }) {
+  const [posts, setPosts] = useState(initialPosts)
+
+  const refresh = async () => {
+    const res = await fetch('/api/posts')
+    setPosts(await res.json())
+  }
+
+  return (
+    <div>
+      <button onClick={refresh}>Refresh</button>
+      <PostList posts={posts} />
+    </div>
+  )
+}
+```
+
+## 图片优化深进
+
+- 照片用 `<Image>`（WebP/AVIF 自动）
+- 插图用 `<img>` + `fetchpriority="high"` 或 SVG（跳过不必要的优化 pipeline）
+- 非关键图片加 `loading="lazy"`（`<Image>` 默认懒加载）
+- **永远不要** 在客户端 fetch 大图后设置 `src`（会被下载两次：HTML 中的原 URL 和 JS 中的 fetch URL）
+
+## 内存管理
+
+### 小心页面级 useEffect 的内存泄漏
+
+```tsx
+'use client'
+
+import { useEffect, useState } from 'react'
+
+export function DataFeed() {
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // 获取新数据...
+    }, 5000)
+
+    // 忘记清理 = 页面卸载后 interval 仍在运行
+    return () => clearInterval(interval)
+  }, [])
+}
+```
+
+### 大列表的虚拟化
+
+```bash
+pnpm add @tanstack/react-virtual
+```
+
+```tsx
+'use client'
+
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { useRef } from 'react'
+
+export function VirtualList({ items }: { items: Item[] }) {
+  const parentRef = useRef<HTMLDivElement>(null)
+
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 50,
+  })
+
+  return (
+    <div ref={parentRef} className="h-[600px] overflow-auto">
+      <div style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map(v => (
+          <div
+            key={v.key}
+            style={{
+              position: 'absolute',
+              top: v.start,
+              height: v.size,
+            }}
+          >
+            {items[v.index].name}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+```
+
+## Turbopack 性能
+
+| 特性 | Webpack (Next.js 15-) | Turbopack (Next.js 16) |
+| ---- | --------------------- | ---------------------- |
+| 热模块替换 (HMR) | 200ms - 2s | < 100ms |
+| 首次 dev 启动 | 10-30s | 2-5s |
+| 类型检查方式 | 阻塞编译 | 非阻塞（独立进程） |
+| 缓存 | 内存（restart 丢失） | 磁盘 + 内存 |
+| 生产构建方式 | Webpack (Next.js 15) | Turbopack (Next.js 16 默认) |
+
+Next.js 16 默认开启 Turbo，无需配置。
+
+## 性能预算
+
+| 指标 | 目标 | 测量方式 |
+| ---- | ---- | -------- |
+| FCP (First Contentful Paint) | < 1.8s | Lighthouse / Web Vitals |
+| LCP (Largest Contentful Paint) | < 2.5s | Lighthouse / Web Vitals |
+| TBT (Total Blocking Time) | < 200ms | Lighthouse |
+| INP (Interaction to Next Paint) | < 200ms | Web Vitals (field) |
+| CLS (Cumulative Layout Shift) | < 0.1 | Lighthouse / Web Vitals |
+| 首页 JS 大小 | < 150 KB (gzipped) | Bundle Analyzer |
+
+## 陷阱
+
+### 不是所有的动态导入都有用
+
+```tsx
+const SmallButton = dynamic(() => import('./SmallButton'))
+// SmallButton 只有 2KB — 动态导入的开销比省下的更大
+```
+
+`next/dynamic` 只在组件 > 20KB (gzipped) 时有显著的性能收益。小组件让它们内联在路由 chunk 中。
+
+### 生产模式下的 `useReportWebVitals` 在生产中不自动上报
+
+`useReportWebVitals` 只是一个**报告管道**——你需要实际的发送逻辑（Google Analytics、Vercel Analytics、自定义 endpoint）。
+
+### 交错 `'use cache'` 与 `noStore()` 的页面
+
+混合使用静态与动态 fetch 在同一页面上时，可能因为一个 `noStore()` 破坏了整个路由缓存——导致所有并行 fetch 都被重新执行。将真正的动态数据与可缓存数据分开，在 `<Suspense>` 中包裹动态部分。
+
+### 开发模式下的性能指标不能代表生产
+
+dev 模式有 React 的 double-invocation、未压缩的 JS、未开启的缓存。一切性能指标只在 `next build && next start` 后有效。
+
+## 小结
+
+- `next/dynamic` 对 >20KB 的组件实现按需加载，支持 loading 回退、SSR 跳过；
+- `@next/bundle-analyzer` 可视化 bundle 组成，指导分拆策略；
+- `useReportWebVitals` 收集真实用户的核心性能指标；
+- 数据获取尽量在 Server Component 中完成，客户端仅在交互后请求；
+- Next.js 16 默认 Turbopack，HMR < 100ms，启动 < 5s；
+- 大列表用虚拟化（TanStack Virtual），避免渲染成千上万的 DOM 节点。

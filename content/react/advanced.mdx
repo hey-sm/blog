@@ -1,0 +1,567 @@
+---
+title: 高级主题
+description: Suspense、Error Boundary、Portals、Server Components 与并发渲染
+---
+
+# 高级主题
+
+本章覆盖 React 中**频率不高但难度集中**的进阶 API：
+
+- **Suspense**：声明式异步边界
+- **Error Boundary**：声明式错误边界
+- **Portals**：跳出 React 树的渲染目标
+- **Server Components / Server Actions**：React 19 的服务端范式
+- **并发渲染深入**：`startTransition` / `useDeferredValue` 的运行模型
+
+## Suspense
+
+`<Suspense>` 是 React 16.6 引入的一个特殊组件，用于**声明子树在异步等待时的 fallback**。React 18+ 全面拥抱 Suspense 作为数据获取与代码分割的统一抽象。
+
+### 与代码分割
+
+```tsx
+import { lazy, Suspense } from 'react'
+
+const Reports = lazy(() => import('./Reports'))
+
+function App() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Reports />
+    </Suspense>
+  )
+}
+```
+
+`lazy` 接受返回 Promise 的函数；Promise 完成前，`<Suspense>` 显示 fallback；完成后渲染真实组件。
+
+### 与数据获取（React 19 `use`）
+
+```tsx
+import { use, Suspense } from 'react'
+
+function UserProfile({ userPromise }: { userPromise: Promise<User> }) {
+  const user = use(userPromise)               // 抛 Promise → 触发 Suspense
+  return <h1>{user.name}</h1>
+}
+
+function Page({ id }: { id: string }) {
+  const userPromise = useMemo(() => fetchUser(id), [id])
+  return (
+    <Suspense fallback={<Spinner />}>
+      <UserProfile userPromise={userPromise} />
+    </Suspense>
+  )
+}
+```
+
+`use(promise)` 在 Promise pending 时**抛出该 Promise**——React 沿组件树向上找到最近的 `<Suspense>`，渲染其 fallback；等 Promise resolve 后再继续渲染。
+
+### 与 TanStack Query（推荐）
+
+```tsx
+import { useSuspenseQuery } from '@tanstack/react-query'
+
+function UserProfile({ id }: { id: string }) {
+  const { data } = useSuspenseQuery({
+    queryKey: ['user', id],
+    queryFn: () => fetchUser(id)
+  })
+  // data 始终可用，不需要 isLoading 判断
+  return <h1>{data.name}</h1>
+}
+
+<Suspense fallback={<Spinner />}>
+  <UserProfile id="1" />
+</Suspense>
+```
+
+详见 [数据请求](/react/api-calls#suspense-模式)。
+
+### 嵌套与并行
+
+多个 `<Suspense>` 边界可以嵌套，实现"先显示外层，再显示内层"的渐进式骨架屏：
+
+```tsx
+<Suspense fallback={<PageSkeleton />}>
+  <Header />
+  <Suspense fallback={<SidebarSkeleton />}>
+    <Sidebar />
+  </Suspense>
+  <Suspense fallback={<MainSkeleton />}>
+    <Main />
+  </Suspense>
+</Suspense>
+```
+
+执行流程：
+
+1. Header 同步加载完毕，立即显示
+2. Sidebar 与 Main 并行加载，谁先完成谁先显示
+3. 各自独立的 fallback 不会阻塞其他子树
+
+### `useTransition` 与 Suspense
+
+```tsx
+function Tabs() {
+  const [tab, setTab] = useState('a')
+  const [isPending, startTransition] = useTransition()
+
+  return (
+    <>
+      <button onClick={() => startTransition(() => setTab('a'))}>A</button>
+      <button onClick={() => startTransition(() => setTab('b'))}>B</button>
+
+      <div style={{ opacity: isPending ? 0.5 : 1 }}>
+        <Suspense fallback={<Spinner />}>
+          {tab === 'a' ? <TabA /> : <TabB />}
+        </Suspense>
+      </div>
+    </>
+  )
+}
+```
+
+`startTransition` 标记"这次更新不紧急"——React 在新内容准备好之前**保留旧内容**，避免立即跳到 fallback。这就是 React 18 解决"切换 tab 一闪 spinner 一闪"问题的核心机制。
+
+### Suspense 的限制
+
+- `<Suspense>` 仅响应"渲染过程中抛出的 Promise"——不能用 `try/catch` 捕获 Promise reject，需要配合 [Error Boundary](#error-boundary)
+- 单纯的 `useEffect + useState` 取数据不会触发 Suspense；必须使用 `use` / `useSuspenseQuery` 等 Suspense-aware API
+- SSR 流式渲染（streaming SSR）依赖 Suspense；不带 Suspense 的页面无法分块输出 HTML
+
+## Error Boundary
+
+`<Suspense>` 处理"还没好"，`<ErrorBoundary>` 处理"坏掉了"。
+
+React 目前**仅支持 class 实现**的 Error Boundary。这是函数组件 + Hook 时代仍需 class 的唯一场景。
+
+```tsx
+class ErrorBoundary extends React.Component<
+  { fallback: (props: { error: Error; reset: () => void }) => React.ReactNode; children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    reportError(error, info)                  // 上报到 Sentry / Bugsnag
+  }
+
+  render() {
+    if (this.state.error) {
+      return this.props.fallback({
+        error: this.state.error,
+        reset: () => this.setState({ error: null })
+      })
+    }
+    return this.props.children
+  }
+}
+```
+
+### react-error-boundary
+
+[`react-error-boundary`](https://github.com/bvaughn/react-error-boundary) 提供更便捷的 API：
+
+```bash
+pnpm add react-error-boundary
+```
+
+```tsx
+import { ErrorBoundary } from 'react-error-boundary'
+
+function FallbackUI({ error, resetErrorBoundary }: FallbackProps) {
+  return (
+    <div role="alert">
+      <p>Something went wrong:</p>
+      <pre>{error.message}</pre>
+      <button onClick={resetErrorBoundary}>Try again</button>
+    </div>
+  )
+}
+
+<ErrorBoundary
+  FallbackComponent={FallbackUI}
+  onReset={() => navigateHome()}
+  onError={(error, info) => reportError(error, info)}
+>
+  <App />
+</ErrorBoundary>
+```
+
+### 边界的捕捉范围
+
+Error Boundary 只能捕获：
+
+- 子组件的**渲染异常**
+- 子组件的**生命周期 / Effect 中的同步异常**
+
+**不能**捕获：
+
+- 事件处理器中的异常（`onClick={() => { throw ... }}`）
+- 异步代码中的异常（setTimeout、Promise reject）
+- 服务端渲染中的异常
+- 自身（边界内）抛出的异常
+
+事件处理器需要自己 `try/catch`：
+
+```tsx
+async function onClick() {
+  try {
+    await save()
+  } catch (err) {
+    setError(err as Error)
+  }
+}
+```
+
+### 与 Suspense 配合
+
+数据获取错误同样会被 Error Boundary 捕获——因为 `use` 在 Promise reject 时抛出错误：
+
+```tsx
+<ErrorBoundary fallback={<NetworkError />}>
+  <Suspense fallback={<Spinner />}>
+    <UserProfile id={id} />
+  </Suspense>
+</ErrorBoundary>
+```
+
+边界放置原则：**让出错的部分独立 fallback，避免整页崩溃**。
+
+## Portals
+
+`createPortal` 将子节点渲染到**当前组件树之外**的 DOM 节点：
+
+```tsx
+import { createPortal } from 'react-dom'
+
+function Modal({ children }: { children: React.ReactNode }) {
+  return createPortal(
+    <div className="modal">{children}</div>,
+    document.body
+  )
+}
+```
+
+视觉上 Modal 出现在 `<body>` 末尾，但**事件冒泡仍按 React 树**——也就是说点击 Modal 内的按钮，`onClick` 仍能冒泡到 Modal 的 React 父组件。这是 Portal 与"自己 createElement + appendChild"的关键差异。
+
+#### 为什么需要 Portal
+
+避免父级 `overflow: hidden` / `transform` / `z-index` 截断或层级冲突：
+
+```css
+.parent { overflow: hidden; transform: scale(1); }
+/* 子元素的 position: fixed 仍受 transform 限制 */
+```
+
+把模态、Toast、下拉菜单等"想要逃出父级"的元素 portal 到 `<body>` 是干净的解决方案。
+
+Radix UI 的所有 overlay 组件（Dialog、Tooltip、Popover）都内置 Portal——见 [样式方案](/react/styling#radix-ui-示例)。
+
+### Portal 与 SSR
+
+服务端渲染时 `document` 不存在，需要做特征检测：
+
+```tsx
+function Modal({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
+  if (!mounted) return null
+  return createPortal(<div>{children}</div>, document.body)
+}
+```
+
+或使用 framework 提供的 SSR-safe Portal（Next.js / Radix）。
+
+## Server Components
+
+React Server Components（RSC）是 React 19 稳定的核心新范式：**部分组件在服务端渲染、序列化为特殊的 wire format、客户端不打包不执行**。
+
+```tsx filename="app/UserProfile.tsx"
+// Server Component（默认）
+import { db } from '@/lib/db'
+
+export default async function UserProfile({ id }: { id: string }) {
+  const user = await db.user.findUnique({ where: { id } })
+  return <h1>{user.name}</h1>
+}
+```
+
+```tsx filename="app/Counter.tsx"
+'use client'                                   // ← 标记为 Client Component
+
+import { useState } from 'react'
+
+export default function Counter() {
+  const [n, setN] = useState(0)
+  return <button onClick={() => setN(n + 1)}>{n}</button>
+}
+```
+
+### 关键差异
+
+| 特性 | Server Component | Client Component |
+| ---- | ---------------- | ---------------- |
+| 运行位置 | 服务端 | 浏览器（含 SSR 阶段） |
+| 可用 API | Node API、数据库、文件系统、`async/await` | DOM、浏览器 API、状态、effect |
+| 可用 Hook | ❌ 无 useState / useEffect 等 | ✅ |
+| 包含到客户端 bundle | ❌ 否 | ✅ 是 |
+| 可作为 Client 组件的 children | ✅ | ✅ |
+| 可 import Client Component | ✅ | ✅ |
+| Client 可 import Server Component | ❌（编译错误） | — |
+| 序列化 props | 必须可序列化（不能传函数 / Date 之类的非纯数据） | 任意 |
+
+### 心智模型
+
+```text
+              ┌─────────────────────┐
+              │   Server (Node)     │
+              │                     │
+              │  Server Component   │
+              │  ─ async data fetch │
+              │  ─ DB queries       │
+              │  ─ secrets          │
+              │                     │
+              │       ↓ 渲染输出      │
+              │  ─ HTML (SSR)        │
+              │  ─ RSC payload (序列化的组件树) │
+              └──────────┬──────────┘
+                         │
+              ┌──────────▼──────────┐
+              │   Client (Browser)  │
+              │                     │
+              │  Client Component   │
+              │  ─ useState         │
+              │  ─ event handlers   │
+              │  ─ DOM API          │
+              └─────────────────────┘
+```
+
+Server Component 的输出**不只是 HTML**，还有特殊的 RSC payload——React 用它在客户端"重建"虚拟 DOM 树，让 Server Component 与 Client Component 在客户端并存。
+
+### 数据获取的根本简化
+
+Server Component 把"数据获取"压回到组件渲染阶段：
+
+```tsx
+// 不再需要 useEffect / useState / TanStack Query
+export default async function PostList() {
+  const posts = await db.posts.findMany({ orderBy: { createdAt: 'desc' } })
+  return (
+    <ul>
+      {posts.map(p => <li key={p.id}>{p.title}</li>)}
+    </ul>
+  )
+}
+```
+
+- 没有 loading / error 状态机
+- 没有客户端 fetch（数据直接来自数据库）
+- API 凭据 / SQL 都不会泄漏到客户端 bundle
+
+但客户端交互（按钮、输入、动画）仍必须放 Client Component。常见 pattern：
+
+```tsx
+// Server: 数据获取 + 静态内容
+export default async function PostPage({ params }: { params: { id: string } }) {
+  const post = await db.posts.findUnique({ where: { id: params.id } })
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>{post.body}</p>
+      <LikeButton postId={post.id} initialLikes={post.likes} />   {/* Client Component */}
+    </article>
+  )
+}
+```
+
+```tsx filename="LikeButton.tsx"
+'use client'
+
+export default function LikeButton({ postId, initialLikes }: Props) {
+  const [likes, setLikes] = useState(initialLikes)
+  return <button onClick={() => setLikes(l => l + 1)}>👍 {likes}</button>
+}
+```
+
+### Server Actions
+
+`'use server'` 标记的函数可以在客户端"调用"——实际上 React 把调用转换为 RPC，函数体只在服务端执行：
+
+```tsx
+// app/actions.ts
+'use server'
+
+export async function createPost(formData: FormData) {
+  const title = formData.get('title') as string
+  await db.posts.create({ data: { title } })
+}
+```
+
+```tsx filename="app/NewPost.tsx"
+import { createPost } from './actions'
+
+export default function NewPost() {
+  return (
+    <form action={createPost}>
+      <input name="title" />
+      <button type="submit">Post</button>
+    </form>
+  )
+}
+```
+
+`<form action={createPost}>` 是 React 19 内建语义——表单提交自动调用该 action。配合 `useActionState` / `useFormStatus` / `useOptimistic`（见 [Hooks](/react/hooks#react-19-新-hook)）能写出极简的提交流程。
+
+### Server Components 的限制
+
+- 必须搭配支持 RSC 的框架（Next.js App Router、Waku、Tanstack Start）；纯 Vite SPA 暂不支持
+- Server / Client 边界一旦穿过，props 必须可序列化
+- 调试与心智模型变复杂——文件系统约定、`'use client'` / `'use server'` 标记、bundling 行为等都要熟悉
+
+详见 [框架](/react/frameworks#nextjs-app-router) 中 Next.js App Router 的具体使用。
+
+## 并发渲染深入
+
+React 18 的并发模式让 Render 阶段可被打断、丢弃、重做。这背后由 **Lane 模型** 与 **可中断的协作式调度** 实现。
+
+### Lane 模型简介
+
+每次 setState 都被分配一个 lane（优先级层）。Lane 是一个 32 位整数的位掩码：
+
+```text
+SyncLane:           0b00000000000000000000000000000001   立即执行（事件回调内）
+InputContinuousLane: 0b00000000000000000000000000000100   连续输入（拖拽、滚动）
+DefaultLane:         0b00000000000000000000000000010000   普通更新
+TransitionLane:      0b00000000000000000000000010000000   transition
+IdleLane:            0b01000000000000000000000000000000   idle
+```
+
+调度时按 lane 优先级处理；高优先级 lane 可打断低优先级 lane。这就是 `startTransition` 标记的更新可被任何输入打断的原理。
+
+### `startTransition`
+
+```tsx
+const [isPending, startTransition] = useTransition()
+
+function onChange(e: React.ChangeEvent<HTMLInputElement>) {
+  setQuery(e.target.value)                    // 高优：立即响应
+
+  startTransition(() => {
+    setResults(searchSync(e.target.value))    // 低优：可被打断
+  })
+}
+```
+
+如果用户在搜索结果还没渲染完时又输入了新字符，React **丢弃**正在进行的低优渲染，从新值重新开始。这避免了 UI 卡顿与"陈旧结果一闪而过"的问题。
+
+### `useDeferredValue`
+
+```tsx
+function ResultsList({ query }: { query: string }) {
+  const deferred = useDeferredValue(query)
+  const isStale = query !== deferred
+  return (
+    <div style={{ opacity: isStale ? 0.5 : 1 }}>
+      <Heavy items={search(deferred)} />
+    </div>
+  )
+}
+```
+
+与 `useTransition` 的差异：
+
+- `useTransition`：你**控制 setter 调用**，把状态更新标记为低优
+- `useDeferredValue`：你**接收外部 props / context**，让该值在更新时滞后
+
+### `<StrictMode>` 下的双调用
+
+开发模式下 React 故意双调用：
+
+- 组件函数（render）
+- `useState` / `useReducer` 的初始化器
+- `useEffect` 的 setup → cleanup → setup
+- `useMemo` / `useCallback` 的工厂
+
+这是为了**暴露副作用错误**——纯函数应能被多次调用而不破坏行为。生产构建中只会执行一次。
+
+如果你的 effect 在双调用下行为异常（比如打两条日志、发起两次重复请求），通常意味着：
+
+- 没写 cleanup
+- cleanup 不完整
+- 副作用泄漏到了 render
+
+## 性能优化建议
+
+### React DevTools Profiler
+
+录制一段交互 → 火焰图显示每次渲染各组件的耗时与原因（state change / props change / parent render）。优化前必先 profile。
+
+### `React.memo`
+
+```tsx
+const ExpensiveChild = React.memo(function ExpensiveChild({ data }: Props) {
+  // 仅在 data 引用变化时重渲染
+  return ...
+})
+```
+
+注意：
+
+- props 中的对象 / 函数若每次 render 都是新引用，`memo` 失效
+- 配合 `useMemo` / `useCallback` 稳定引用
+
+### State 下沉
+
+```tsx
+// ✗ Counter 状态在 App 中，每次输入都让整个 App 重渲染
+function App() {
+  const [count, setCount] = useState(0)
+  return (
+    <>
+      <ExpensiveTree />
+      <Counter count={count} onInc={() => setCount(c => c + 1)} />
+    </>
+  )
+}
+
+// ✓ 状态下沉到 Counter
+function App() {
+  return <><ExpensiveTree /><Counter /></>
+}
+function Counter() {
+  const [count, setCount] = useState(0)
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>
+}
+```
+
+### Children 模式打破 props 链
+
+```tsx
+// 让 ExpensiveTree 通过 children 传入，跳过中间层重渲染
+function App() {
+  return <Layout><ExpensiveTree /></Layout>
+}
+function Layout({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState('light')
+  // theme 变化时，Layout 重渲染，但 children 引用未变，不会重渲染 ExpensiveTree
+  return <div className={theme}>{children}</div>
+}
+```
+
+### React Compiler（实验性）
+
+React Compiler（先前代号 React Forget）能在编译期分析依赖、自动 memo 化——理论上免去手写 `useMemo` / `useCallback`。当前为实验性，已在 Meta 内部使用，2026 年趋于稳定。
+
+## 小结
+
+- `<Suspense>` 是异步边界，`<ErrorBoundary>` 是错误边界，二者搭配是健壮 UI 的基础；
+- Portals 让子节点跳出 React 树渲染，事件仍按 React 树冒泡；
+- Server Components 让数据获取与 UI 渲染合并在服务端，是 React 19 的核心新范式；
+- 并发渲染的 Lane 模型让高优更新打断低优更新，`startTransition` / `useDeferredValue` 是其用户态 API；
+- 性能优化的第一原则是先 profile，再决策；State 下沉与 children 模式比 `memo` 更治本。

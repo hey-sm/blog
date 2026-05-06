@@ -1,0 +1,311 @@
+---
+title: Metadata 与 SEO
+description: generateMetadata、动态 OG Image、viewport 配置、sitemap 与 robots.ts、JSON-LD 结构化数据
+---
+
+# Metadata 与 SEO
+
+Next.js App Router 的 Metadata API 在服务端生成所有 `<head>` 内容——无需 `<Head>` 组件或客户端注入。
+
+## 静态 Metadata
+
+```tsx filename="app/layout.tsx"
+import type { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  title: {
+    template: '%s | My Blog',       // 子页面标题插入 %s
+    default: 'My Blog',             // 没有 title 的子页面使用此
+  },
+  description: 'A blog about web development',
+  metadataBase: new URL('https://example.com'),
+  alternates: {
+    canonical: '/',
+  },
+  openGraph: {
+    title: 'My Blog',
+    description: 'A blog about web development',
+    url: 'https://example.com',
+    siteName: 'My Blog',
+    locale: 'zh_CN',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'My Blog',
+    description: 'A blog about web development',
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      'max-video-preview': -1,
+      'max-image-preview': 'large',
+      'max-snippet': -1,
+    },
+  },
+}
+```
+
+## 动态 `generateMetadata`
+
+```tsx filename="app/posts/[slug]/page.tsx"
+import type { Metadata } from 'next'
+import { getPost } from '@/lib/data'
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}): Promise<Metadata> {
+  const { slug } = await params
+  const post = await getPost(slug)
+
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: {
+      title: post.title,
+      description: post.excerpt,
+      images: [post.coverImage],
+      type: 'article',
+      publishedTime: post.createdAt,
+    },
+  }
+}
+
+export default async function PostPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)
+  return <article>{post.content}</article>
+}
+```
+
+`generateMetadata` 与 `page` 组件中相同的 fetch 会被自动去重（`getPost(slug)` 只调用一次）。
+
+## `viewport` 配置（Next.js 16 独立导出）
+
+Next.js 16 将 viewport 从 `metadata` 拆分为独立的导出：
+
+```tsx filename="app/layout.tsx"
+import type { Viewport } from 'next'
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: 'white' },
+    { media: '(prefers-color-scheme: dark)', color: '#0a0a0a' },
+  ],
+}
+```
+
+旧方式（`metadata.viewport`）仍可工作但已弃用。
+
+## Dynamic OG Image
+
+```tsx filename="app/posts/[slug]/opengraph-image.tsx"
+import { ImageResponse } from 'next/og'
+
+export const size = { width: 1200, height: 630 }
+export const contentType = 'image/png'
+export const runtime = 'edge'            // 推荐：OG 图片生成极快
+
+export default async function OGImage({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)
+
+  return new ImageResponse(
+    (
+      <div
+        style={{
+          width: 1200,
+          height: 630,
+          backgroundColor: '#1a1a2e',
+          color: 'white',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          justifyContent: 'center',
+          padding: 80,
+          fontFamily: 'Inter',
+        }}
+      >
+        <p style={{ fontSize: 24, color: '#888', marginBottom: 20 }}>
+          My Blog
+        </p>
+        <h1 style={{ fontSize: 64, fontWeight: 700, lineHeight: 1.1 }}>
+          {post.title}
+        </h1>
+      </div>
+    ),
+    { width: 1200, height: 630 }
+  )
+}
+```
+
+## Sitemap
+
+```tsx filename="app/sitemap.ts"
+import type { MetadataRoute } from 'next'
+import { getPosts } from '@/lib/data'
+
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  const posts = await getPosts()
+
+  const postEntries: MetadataRoute.Sitemap = posts.map(p => ({
+    url: `https://example.com/posts/${p.slug}`,
+    lastModified: p.updatedAt,
+    changeFrequency: 'weekly',
+    priority: 0.8,
+  }))
+
+  return [
+    {
+      url: 'https://example.com',
+      lastModified: new Date(),
+      changeFrequency: 'monthly',
+      priority: 1,
+    },
+    {
+      url: 'https://example.com/about',
+      lastModified: new Date(),
+      changeFrequency: 'monthly',
+      priority: 0.5,
+    },
+    ...postEntries,
+  ]
+}
+```
+
+访问 `/sitemap.xml` 时自动生成。
+
+## Robots
+
+```ts filename="app/robots.ts"
+import type { MetadataRoute } from 'next'
+
+export default function robots(): MetadataRoute.Robots {
+  return {
+    rules: {
+      userAgent: '*',
+      allow: '/',
+      disallow: ['/admin/', '/api/'],
+    },
+    sitemap: 'https://example.com/sitemap.xml',
+  }
+}
+```
+
+## JSON-LD 结构化数据
+
+```tsx filename="app/posts/[slug]/page.tsx"
+import type { Article, WithContext } from 'schema-dts'
+
+export default async function PostPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)
+
+  const jsonLd: WithContext<Article> = {
+    '@context': 'https://schema.org',
+    '@type': 'Article',
+    headline: post.title,
+    description: post.excerpt,
+    datePublished: post.createdAt,
+    author: {
+      '@type': 'Person',
+      name: post.author.name,
+    },
+  }
+
+  return (
+    <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+      <article>{post.content}</article>
+    </>
+  )
+}
+```
+
+或使用 `@next/third-parties/google` 封装 Google 特定标签。
+
+## Metadata 继承
+
+子页面的 metadata 与父 layout 自动深度合并：
+
+```tsx
+// 父 layout
+export const metadata: Metadata = {
+  openGraph: { siteName: 'My Blog' },
+  robots: { index: true },
+}
+
+// 子 page
+export const generateMetadata = () => ({
+  title: 'About',
+  openGraph: { title: 'About Us' },
+})
+
+// 合并结果:
+// { title: 'About',
+//   openGraph: { siteName: 'My Blog', title: 'About Us' },
+//   robots: { index: true } }
+```
+
+`title.template` 在父 layout 定义，子 page 只需提供 `title` 字符串。
+
+## 陷阱
+
+### `metadataBase` 缺失导致 OG Image 路径不完整
+
+```tsx
+// ✗ 输出 <meta property="og:image" content="/og-image.png" />
+export const metadata: Metadata = {
+  openGraph: { images: ['/og-image.png'] },
+}
+
+// ✓ 先设 metadataBase
+export const metadata: Metadata = {
+  metadataBase: new URL('https://example.com'),
+  openGraph: { images: ['/og-image.png'] },
+}
+```
+
+### `viewport` 和 `generateViewport`
+
+`viewport` 可以是静态的导出或动态的 `generateViewport` 函数。但 layout 级和 page 级同时存在时，page 级会覆盖 layout 级（而不是合并）。
+
+### `generateMetadata` 中使用 `headers()` 不缓存
+
+使用了 `headers()` 的 `generateMetadata` 会让该路由的元数据每次都重新生成。对于静态博客等场景，不要让 metadata 依赖于请求上下文。
+
+### `<Head>` 组件在 App Router 中不工作
+
+Pages Router 的 `<Head>` 来自 `next/head`。在 App Router 中**不生效**。使用 `metadata` 导出或 `generateMetadata` 代替。
+
+## 小结
+
+- `metadata` 导出 + `generateMetadata` 函数覆盖静态和动态 SEO 需求；
+- `viewport` 独立导出（Next.js 16），不与 metadata 混在一起；
+- `opengraph-image.tsx` + `next/og` 的 `ImageResponse` 生成动态社交卡片；
+- `sitemap.ts` 和 `robots.ts` 是 App Router 的文件约定，自动生成 XML；
+- JSON-LD 通过 `dangerouslySetInnerHTML` 注入结构化数据；
+- Metadata 自动继承合并，子页面与父 layout 的配置叠加。

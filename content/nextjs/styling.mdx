@@ -1,0 +1,255 @@
+---
+title: 样式方案
+description: Next.js 16 中的 CSS Modules、Tailwind CSS v4、styled-jsx、条件类名与 CSS-in-JS 兼容性
+---
+
+# 样式方案
+
+Next.js 支持多种 CSS 方案，且与 Turbopack 集成。16.x 默认使用 Tailwind CSS v4（CSS-first 配置），零 JS 运行时。
+
+## 全局样式
+
+```css filename="src/app/globals.css"
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #3b82f6;
+  --color-secondary: #8b5cf6;
+  --font-heading: 'Inter', sans-serif;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+```
+
+在根 layout 中 import：
+
+```tsx filename="src/app/layout.tsx"
+import './globals.css'
+```
+
+## CSS Modules
+
+```css filename="src/components/Button.module.css"
+.button {
+  padding: 0.5rem 1rem;
+  border-radius: 0.375rem;
+  font-weight: 500;
+  transition: background-color 150ms;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.primary {
+  background-color: var(--color-primary);
+  color: white;
+}
+
+.secondary {
+  background-color: transparent;
+  border: 1px solid currentColor;
+}
+```
+
+```tsx filename="src/components/Button.tsx"
+import styles from './Button.module.css'
+
+type ButtonProps = {
+  variant?: 'primary' | 'secondary'
+  children: React.ReactNode
+}
+
+export function Button({ variant = 'primary', children, ...props }: ButtonProps) {
+  const classes = [styles.button, styles[variant]].join(' ')
+
+  return (
+    <button className={classes} {...props}>
+      {children}
+    </button>
+  )
+}
+```
+
+CSS Modules 在 Next.js 中是零配置：
+- `*.module.css` → 类型安全的 import（类名自动补全）
+- 自带 scope（构建时加 hash），不污染全局
+- Turbopack 完全支持
+
+## Tailwind CSS v4
+
+Next.js 16 默认使用 Tailwind v4。与 v3 的关键差异：
+
+| 维度 | Tailwind v3 | Tailwind v4 |
+| ---- | ----------- | ----------- |
+| 配置 | `tailwind.config.ts` | CSS-first (`@theme`) |
+| 预设 | 固定的颜色/间距 scale | 任意值原生支持 (`mt-[17px]`) |
+| 性能 | JIT 引擎 | Oxide 引擎（Rust） |
+| `@apply` | 可用 | 可用但推荐直接用 utility |
+| 与 Turbopack | 需要兼容层 | 原生支持 |
+
+### CSS-first 配置示例
+
+```css filename="src/app/globals.css"
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #0066ff;
+  --color-brand-dark: #0044cc;
+  --spacing-page: 1.5rem;
+  --breakpoint-tablet: 768px;
+}
+
+/* 自定义 utility */
+@utility content-auto {
+  content-visibility: auto;
+}
+```
+
+Tailwind v4 不需要 `tailwind.config.ts`。所有自定义在 CSS 中完成。
+
+### 与 clsx / cn 配合
+
+```ts
+import clsx, { type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+```
+
+```tsx
+import { cn } from '@/lib/utils'
+
+<h1 className={cn('text-lg font-bold', isActive && 'text-blue-600')}>
+  Title
+</h1>
+```
+
+`twMerge` 确保后面的 Tailwind class 覆盖前面的（解决优先级冲突）。
+
+## `styled-jsx`
+
+```tsx
+export default function Page() {
+  return (
+    <div>
+      <p className="description">Scoped</p>
+
+      <style jsx>{`
+        .description {
+          color: blue;
+          font-size: 1.25rem;
+        }
+      `}</style>
+
+      {/* 样式仅对本组件生效 */}
+    </div>
+  )
+}
+```
+
+也支持全局模式：
+
+```tsx
+<style jsx global>{`
+  body {
+    margin: 0;
+  }
+`}</style>
+```
+
+## 条件与动态样式
+
+```tsx
+// 最佳实践：cn() + 静态类名
+<div className={cn(
+  'rounded-lg px-4 py-2',
+  variant === 'primary' && 'bg-blue-600 text-white',
+  variant === 'secondary' && 'border border-gray-300',
+  disabled && 'opacity-50 cursor-not-allowed'
+)} />
+
+// 而非：动态 style prop（失去原子化 CSS 的性能优化）
+<div style={{ backgroundColor: variant === 'primary' ? 'blue' : 'gray' }} />
+```
+
+## 暗色模式
+
+```tsx filename="app/layout.tsx"
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="zh-CN" className="dark">
+      {/* 或 class 中动态添加 'dark' */}
+      <body className="bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+        {children}
+      </body>
+    </html>
+  )
+}
+```
+
+配合 Tailwind：`dark:` 前缀在 `dark` class 存在时生效。
+
+## CSS-in-JS 兼容性
+
+运行时 CSS-in-JS（styled-components、emotion）与 Server Components **不兼容**：
+
+```tsx
+// ✗ Server Component 中不可用
+import styled from 'styled-components'
+
+const Title = styled.h1`
+  color: red;
+`
+```
+
+理由：Server Components 在服务端执行，不产生 DOM（是序列化的 RSC Payload）。运行时 CSS-in-JS 依赖执行时 DOM/样式注入。
+
+处理方案：
+1. 将 styled-components 组件标记为 `'use client'`，并注册 `useServerInsertedHTML`
+2. 迁移到零运行时方案（CSS Modules / Tailwind）
+3. 使用 Panda CSS / StyleX 等编译时方案
+
+## 陷阱
+
+### 不要在 `_app.tsx` 中 import global CSS
+
+App Router 中没有 `_app.tsx`。全局样式在根 layout (`app/layout.tsx`) 中 import。
+
+### Tailwind v4 的 `@theme` 与 v3 `tailwind.config.ts` 冲突
+
+如果项目从 v3 升级，`tailwind.config.ts` 中的配置不会被 v4 自动读取。需要将自定义 theme 迁移到 CSS 中的 `@theme` 块。
+
+### 大块 CSS Modules + 动态 props 容易产生无意义的变体
+
+```css
+/* 大量变体 CSS — 写到不会管理的边缘 */
+.primary { ... }
+.secondary { ... }
+.danger { ... }
+/* ...再加 20 个 */
+```
+
+这等于是"内存中的 CSS-in-JS，但手写"。切换到 Tailwind 的 utility-first 模式能降低此类复杂度。
+
+### Server Components 中不能引用 `globalThis` 的样式 DOM
+
+```tsx
+// ✗ — document 不可用
+if (document.documentElement.classList.contains('dark')) { ... }
+```
+
+用 `<html className="dark">` 然后由 Tailwind 的 `dark:` 前缀自动处理。
+
+## 小结
+
+- Tailwind CSS v4 是 Next.js 16 默认方案，CSS-first 配置、Turbo 原生支持；
+- CSS Modules 零配置可用，自带 scope，适合组件级样式；
+- `styled-jsx` 支持组件级 scoped CSS（Vercel 内置，无需安装）；
+- 运行时 CSS-in-JS 需 `'use client'` + SSR 适配，推荐迁移到零运行时方案；
+- `cn()`（clsx + tailwind-merge）用于条件类名合并，避免优先级冲突。

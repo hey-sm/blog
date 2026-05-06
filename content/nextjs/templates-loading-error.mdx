@@ -1,0 +1,248 @@
+---
+title: 模板、加载与错误处理
+description: template.tsx、loading.tsx、error.tsx、global-error.tsx、not-found.tsx 的协作机制
+---
+
+# 模板、加载与错误处理
+
+Next.js 通过文件约定自动处理三种 UI 状态：加载中、出错、未找到。这些文件与 `page.tsx` 同目录，形成逐级回退（progressive fallback）机制。
+
+## `loading.tsx` —— 加载状态
+
+```tsx filename="app/posts/loading.tsx"
+export default function PostsLoading() {
+  return (
+    <div className="grid gap-4">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div key={i} className="h-24 animate-pulse rounded-lg bg-gray-200" />
+      ))}
+    </div>
+  )
+}
+```
+
+### 工作原理
+
+`loading.tsx` 自动被包裹在 `<Suspense>` 边界中：
+
+```text
+app/posts/
+├── layout.tsx
+├── loading.tsx          ← Suspense fallback for page.tsx
+└── page.tsx
+```
+
+等价的显式写法：
+
+```tsx
+// Next.js 将这个自动注入
+<Suspense fallback={<PostsLoading />}>
+  <PostsPage />
+</Suspense>
+```
+
+导航行为：
+- 首次访问 → `loading.tsx` 立即显示 → `page.tsx` 渲染完毕 → 切换
+- 子路由间导航 → `loading.tsx` 显示直到新 `page.tsx` 渲染完成
+
+### 嵌套 loading
+
+```text
+app/
+├── loading.tsx          # 根级 loading（极少用）
+└── posts/
+    ├── loading.tsx      # /posts 的 loading
+    └── [slug]/
+        ├── loading.tsx  # /posts/:slug 的 loading
+        └── page.tsx
+```
+
+## `error.tsx` —— 错误边界
+
+```tsx filename="app/posts/error.tsx"
+'use client'
+
+export default function PostsError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string }
+  reset: () => void
+}) {
+  return (
+    <div className="flex flex-col items-center gap-4 py-12">
+      <h2 className="text-xl font-bold">Something went wrong!</h2>
+      <p className="text-gray-500">{error.message}</p>
+      <button
+        onClick={() => reset()}
+        className="rounded bg-blue-600 px-4 py-2 text-white"
+      >
+        Try again
+      </button>
+    </div>
+  )
+}
+```
+
+要点：
+- **必须是 Client Component**（`'use client'` 必需）
+- `error.message` 在生产环境中不包含敏感信息，只显示通用消息
+- `error.digest` 是服务端错误的哈希，可在日志中搜索对应错误
+- `reset()` 尝试重新渲染 `page.tsx`（不会重载页面）
+
+### 错误传播规则
+
+```text
+┌────────────────────────────────────────────────────┐
+│                     error.tsx 传播                   │
+│                                                     │
+│  error.tsx 捕获的边界：                              │
+│  ✓ page.tsx                                         │
+│  ✓ page.tsx 的子组件                                │
+│  ✗ layout.tsx（同目录或父 layout）                  │
+│  ✗ error.tsx 自身                                   │
+│                                                     │
+│  向上传播直到被捕获：                                │
+│  app/blog/error.tsx 捕获不到 → app/error.tsx         │
+│  app/error.tsx 捕获不到 → app/global-error.tsx      │
+└────────────────────────────────────────────────────┘
+```
+
+`error.tsx` **不捕获自身所在目录和上一级的 `layout.tsx` 错误**。Layout 错误只被 `global-error.tsx` 捕获。
+
+## `global-error.tsx` —— 根错误边界
+
+```tsx filename="app/global-error.tsx"
+'use client'
+
+export default function GlobalError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string }
+  reset: () => void
+}) {
+  return (
+    <html>
+      <body>
+        <div className="grid min-h-screen place-items-center">
+          <div className="text-center">
+            <h1 className="text-2xl font-bold">Something went wrong</h1>
+            <button
+              onClick={() => reset()}
+              className="mt-4 rounded bg-blue-600 px-4 py-2 text-white"
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      </body>
+    </html>
+  )
+}
+```
+
+- **只在生产环境触发**（dev 模式下错误直接暴露）
+- **必须包含 `<html>` 和 `<body>`**（此时根 layout 已崩溃）
+- **必须是 Client Component**
+
+## `not-found.tsx` —— 404
+
+```tsx filename="app/not-found.tsx"
+import Link from 'next/link'
+
+export default function NotFound() {
+  return (
+    <main className="grid min-h-[60vh] place-items-center">
+      <div className="text-center">
+        <h1 className="text-6xl font-bold">404</h1>
+        <p className="mt-4 text-gray-500">Page not found</p>
+        <Link href="/" className="mt-6 inline-block text-blue-600 underline">
+          Go home
+        </Link>
+      </div>
+    </main>
+  )
+}
+```
+
+### 触发方式
+
+```tsx filename="app/posts/[slug]/page.tsx"
+import { notFound } from 'next/navigation'
+
+export default async function PostPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)
+
+  if (!post) notFound()       // 触发最近的 not-found.tsx
+
+  return <article>{post.content}</article>
+}
+```
+
+`notFound()` 抛出 `NEXT_NOT_FOUND` 错误，Next.js 捕获后渲染最近的 `not-found.tsx`。
+
+## 文件约定协作
+
+```text
+app/posts/[slug]/
+├── layout.tsx       ← 不被 error.tsx 捕获
+├── template.tsx     ← 重新挂载（可选）
+├── loading.tsx      ← Suspense 回退
+├── error.tsx        ← 错误边界（不含 layout）
+├── not-found.tsx    ← 404 页面
+└── page.tsx         ← 主页面
+```
+
+用户访问流程：
+
+```text
+1. 路由匹配 → layout 渲染（缓存/保持）
+2. template 挂载
+3. 如果是首次加载 → loading.tsx 显示
+4. page.tsx 执行
+   ├─ async 解析成功 → 替换 loading，显示页面
+   ├─ notFound()     → 显示 not-found.tsx
+   └─ 抛出 Error     → 显示 error.tsx（reset 可恢复）
+5. 如果 error.tsx 本身也崩了 → global-error.tsx
+```
+
+## 陷阱
+
+### `error.tsx` 的重置不恢复 layout
+
+`reset()` 重新运行 `page.tsx` 和它的 `error.tsx`，**但不重新渲染 parent layout**。如果 layout 内部有错误导致问题，`reset()` 不会修复。
+
+### `loading.tsx` 不包裹 layout
+
+`loading.tsx` 只在 `page.tsx`（及其子组件）外层。Layout 自身的 async 操作（如 `headers()` 调用）可能导致路由切换时的闪烁——如需要，在 layout 内手动使用 `<Suspense>`。
+
+### 服务端错误在生产中被吞掉
+
+```tsx
+// 生产环境 error.message = 'An error occurred during rendering'
+// 看不到真实错误信息！
+console.log(error.message)
+```
+
+在生产中，`error.message` 被替换为通用文案，以防止信息泄漏。调试时需依赖 `error.digest`（在日志中搜索）。
+
+### `not-found.tsx` 不会自动替代无效的 dynamic param
+
+```text
+app/blog/[slug]/page.tsx
+```
+
+访问 `/blog/non-existent` 时，`notFound()` 需要手动调用——Next.js 不会因为数据库查询返回 null 而自动 404。
+
+## 小结
+
+- `loading.tsx` 是 `page.tsx` 的 Suspense 回退，自动包裹；
+- `error.tsx` 是错误边界，要求 `'use client'`，捕获 page 但不捕获 layout；
+- `global-error.tsx` 是最后的兜底，在 layout 崩溃时产生，须含 `<html>` + `<body>`；
+- `not-found.tsx` 通过 `notFound()` 调用触发，逐级回退。

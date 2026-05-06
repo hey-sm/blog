@@ -1,0 +1,724 @@
+---
+title: 基本类型
+description: TypeScript 基本类型系统：string、number、boolean、void、null、undefined、any、unknown、never
+---
+
+# 基本类型
+
+TypeScript 提供了丰富的基本类型系统，用于描述 JavaScript 值的类型。
+
+## 原始类型
+
+### string
+
+字符串类型：
+
+```ts
+let name: string = 'Alice'
+let message: string = `Hello, ${name}!`
+let multiline: string = `
+  Line 1
+  Line 2
+`
+
+// ❌ 错误
+name = 123  // 类型 'number' 不能赋值给类型 'string'
+```
+
+**React 示例**：
+
+```tsx
+interface GreetingProps {
+  name: string
+  message?: string
+}
+
+function Greeting({ name, message = 'Hello' }: GreetingProps) {
+  return <div>{message}, {name}!</div>
+}
+```
+
+### number
+
+数字类型（整数和浮点数）：
+
+```ts
+let age: number = 25
+let price: number = 19.99
+let hex: number = 0xf00d
+let binary: number = 0b1010
+let octal: number = 0o744
+
+// ❌ 错误
+age = '25'  // 类型 'string' 不能赋值给类型 'number'
+```
+
+**React 示例**：
+
+```tsx
+interface CounterProps {
+  initialCount: number
+  step?: number
+}
+
+function Counter({ initialCount, step = 1 }: CounterProps) {
+  const [count, setCount] = useState(initialCount)
+  
+  return (
+    <div>
+      <p>{count}</p>
+      <button onClick={() => setCount(count + step)}>+{step}</button>
+    </div>
+  )
+}
+```
+
+### boolean
+
+布尔类型：
+
+```ts
+let isActive: boolean = true
+let isCompleted: boolean = false
+
+// ❌ 错误
+isActive = 1  // 类型 'number' 不能赋值给类型 'boolean'
+```
+
+**React 示例**：
+
+```tsx
+interface ToggleProps {
+  isOn: boolean
+  onToggle: () => void
+}
+
+function Toggle({ isOn, onToggle }: ToggleProps) {
+  return (
+    <button onClick={onToggle}>
+      {isOn ? 'ON' : 'OFF'}
+    </button>
+  )
+}
+```
+
+## 特殊类型
+
+### null 和 undefined
+
+```ts
+let n: null = null
+let u: undefined = undefined
+
+// strictNullChecks: false
+let name: string = null  // ✅ 允许
+
+// strictNullChecks: true
+let name: string = null  // ❌ 错误
+let name: string | null = null  // ✅ 正确
+```
+
+**React 示例**：
+
+```tsx
+interface UserProfileProps {
+  user: User | null
+}
+
+function UserProfile({ user }: UserProfileProps) {
+  // ✅ 类型守卫
+  if (!user) {
+    return <div>Loading...</div>
+  }
+  
+  return <div>{user.name}</div>
+}
+
+// ✅ 可选链
+function UserProfile({ user }: UserProfileProps) {
+  return <div>{user?.name ?? 'Guest'}</div>
+}
+```
+
+### void
+
+表示没有返回值的函数：
+
+```ts
+function log(message: string): void {
+  console.log(message)
+  // 不返回任何值
+}
+
+// ❌ 错误
+function getValue(): void {
+  return 123  // 类型 'number' 不能赋值给类型 'void'
+}
+```
+
+**React 示例**：
+
+```tsx
+interface ButtonProps {
+  onClick: () => void  // 不关心返回值
+  label: string
+}
+
+function Button({ onClick, label }: ButtonProps) {
+  return <button onClick={onClick}>{label}</button>
+}
+
+// 使用
+<Button 
+  onClick={() => {
+    console.log('clicked')
+    // 不需要返回值
+  }}
+  label="Click me"
+/>
+```
+
+### any
+
+任意类型，**绕过类型检查**：
+
+```ts
+let value: any = 'hello'
+value = 123        // ✅ 允许
+value = true       // ✅ 允许
+value.foo.bar.baz  // ✅ 允许（运行时可能报错）
+
+// ⚠️ 失去类型安全
+function process(data: any) {
+  return data.value  // 没有类型检查
+}
+```
+
+**何时使用 any**：
+- 迁移 JavaScript 代码
+- 第三方库没有类型定义
+- 动态内容（但优先考虑 `unknown`）
+
+**React 示例**：
+
+```tsx
+// ❌ 避免使用 any
+interface Props {
+  data: any  // 失去类型安全
+}
+
+// ✅ 使用具体类型
+interface Props {
+  data: {
+    id: number
+    name: string
+  }
+}
+
+// ✅ 或使用泛型
+interface Props<T> {
+  data: T
+}
+```
+
+### unknown
+
+类型安全的 `any`：
+
+```ts
+let value: unknown = 'hello'
+value = 123        // ✅ 允许
+value = true       // ✅ 允许
+
+// ❌ 不能直接使用
+value.toUpperCase()  // 错误
+
+// ✅ 需要类型检查
+if (typeof value === 'string') {
+  value.toUpperCase()  // ✅ 正确
+}
+```
+
+**React 示例**：
+
+```tsx
+interface ErrorBoundaryState {
+  error: unknown
+}
+
+class ErrorBoundary extends React.Component<{}, ErrorBoundaryState> {
+  state = { error: null }
+  
+  static getDerivedStateFromError(error: unknown) {
+    return { error }
+  }
+  
+  render() {
+    if (this.state.error) {
+      // 类型守卫
+      const message = this.state.error instanceof Error
+        ? this.state.error.message
+        : 'Unknown error'
+      
+      return <div>Error: {message}</div>
+    }
+    
+    return this.props.children
+  }
+}
+```
+
+### never
+
+永远不会发生的类型：
+
+```ts
+// 函数永远不会返回
+function throwError(message: string): never {
+  throw new Error(message)
+}
+
+function infiniteLoop(): never {
+  while (true) {}
+}
+
+// 穷尽性检查
+type Shape = 'circle' | 'square'
+
+function getArea(shape: Shape): number {
+  switch (shape) {
+    case 'circle':
+      return Math.PI * 10 * 10
+    case 'square':
+      return 10 * 10
+    default:
+      const _exhaustive: never = shape  // 确保处理所有情况
+      return _exhaustive
+  }
+}
+```
+
+**React 示例**：
+
+```tsx
+type Status = 'loading' | 'success' | 'error'
+
+function StatusIndicator({ status }: { status: Status }) {
+  switch (status) {
+    case 'loading':
+      return <div>Loading...</div>
+    case 'success':
+      return <div>Success!</div>
+    case 'error':
+      return <div>Error!</div>
+    default:
+      // 穷尽性检查
+      const _exhaustive: never = status
+      return _exhaustive
+  }
+}
+```
+
+## 数组类型
+
+### 基本数组
+
+```ts
+// 方式 1：类型[]
+let numbers: number[] = [1, 2, 3]
+let names: string[] = ['Alice', 'Bob']
+
+// 方式 2：Array<类型>
+let numbers: Array<number> = [1, 2, 3]
+let names: Array<string> = ['Alice', 'Bob']
+
+// ❌ 错误
+numbers.push('4')  // 类型 'string' 不能赋值给类型 'number'
+```
+
+**React 示例**：
+
+```tsx
+interface TodoListProps {
+  todos: Array<{
+    id: number
+    text: string
+    completed: boolean
+  }>
+}
+
+function TodoList({ todos }: TodoListProps) {
+  return (
+    <ul>
+      {todos.map(todo => (
+        <li key={todo.id}>{todo.text}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+### 只读数组
+
+```ts
+let numbers: readonly number[] = [1, 2, 3]
+let names: ReadonlyArray<string> = ['Alice', 'Bob']
+
+// ❌ 错误：只读数组不能修改
+numbers.push(4)
+numbers[0] = 10
+```
+
+**React 示例**：
+
+```tsx
+interface Props {
+  items: readonly string[]  // 不能修改
+}
+
+function List({ items }: Props) {
+  // ❌ 错误
+  items.push('new')  // 只读数组不能修改
+  
+  // ✅ 正确：创建新数组
+  const newItems = [...items, 'new']
+  
+  return (
+    <ul>
+      {items.map((item, i) => (
+        <li key={i}>{item}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+## 元组类型
+
+固定长度和类型的数组：
+
+```ts
+// 基本元组
+let tuple: [string, number] = ['Alice', 25]
+
+// ❌ 错误
+tuple = [25, 'Alice']  // 类型顺序错误
+tuple = ['Alice']      // 长度错误
+
+// 访问元素
+let name = tuple[0]  // string
+let age = tuple[1]   // number
+
+// 可选元素
+let tuple: [string, number?] = ['Alice']
+
+// 剩余元素
+let tuple: [string, ...number[]] = ['Alice', 1, 2, 3]
+```
+
+**React 示例**：
+
+```tsx
+// useState 返回元组
+function Counter() {
+  const [count, setCount] = useState(0)
+  // count: number
+  // setCount: (value: number) => void
+  
+  return (
+    <div>
+      <p>{count}</p>
+      <button onClick={() => setCount(count + 1)}>+1</button>
+    </div>
+  )
+}
+
+// 自定义 Hook 返回元组
+function useToggle(initialValue: boolean): [boolean, () => void] {
+  const [value, setValue] = useState(initialValue)
+  const toggle = () => setValue(!value)
+  return [value, toggle]
+}
+
+function Component() {
+  const [isOn, toggle] = useToggle(false)
+  
+  return <button onClick={toggle}>{isOn ? 'ON' : 'OFF'}</button>
+}
+```
+
+## 枚举类型
+
+### 数字枚举
+
+```ts
+enum Direction {
+  Up,      // 0
+  Down,    // 1
+  Left,    // 2
+  Right    // 3
+}
+
+let dir: Direction = Direction.Up
+
+// 自定义起始值
+enum Status {
+  Pending = 1,
+  Success,  // 2
+  Error     // 3
+}
+```
+
+### 字符串枚举
+
+```ts
+enum Direction {
+  Up = 'UP',
+  Down = 'DOWN',
+  Left = 'LEFT',
+  Right = 'RIGHT'
+}
+
+let dir: Direction = Direction.Up  // 'UP'
+```
+
+### 常量枚举
+
+```ts
+const enum Direction {
+  Up,
+  Down,
+  Left,
+  Right
+}
+
+let dir = Direction.Up
+
+// 编译后
+let dir = 0  // 内联值
+```
+
+**React 示例**：
+
+```tsx
+enum ButtonVariant {
+  Primary = 'primary',
+  Secondary = 'secondary',
+  Danger = 'danger'
+}
+
+interface ButtonProps {
+  variant: ButtonVariant
+  label: string
+}
+
+function Button({ variant, label }: ButtonProps) {
+  return (
+    <button className={`btn-${variant}`}>
+      {label}
+    </button>
+  )
+}
+
+// 使用
+<Button variant={ButtonVariant.Primary} label="Click" />
+```
+
+**推荐使用字符串字面量类型代替枚举**：
+
+```tsx
+type ButtonVariant = 'primary' | 'secondary' | 'danger'
+
+interface ButtonProps {
+  variant: ButtonVariant
+  label: string
+}
+
+// 使用
+<Button variant="primary" label="Click" />
+```
+
+## 字面量类型
+
+### 字符串字面量
+
+```ts
+let direction: 'up' | 'down' | 'left' | 'right'
+
+direction = 'up'     // ✅
+direction = 'down'   // ✅
+direction = 'north'  // ❌ 错误
+```
+
+**React 示例**：
+
+```tsx
+interface ButtonProps {
+  size: 'small' | 'medium' | 'large'
+  variant: 'primary' | 'secondary'
+}
+
+function Button({ size, variant }: ButtonProps) {
+  return (
+    <button className={`btn-${size} btn-${variant}`}>
+      Click
+    </button>
+  )
+}
+```
+
+### 数字字面量
+
+```ts
+let dice: 1 | 2 | 3 | 4 | 5 | 6
+
+dice = 3  // ✅
+dice = 7  // ❌ 错误
+```
+
+### 布尔字面量
+
+```ts
+let isTrue: true = true
+let isFalse: false = false
+
+// ❌ 错误
+isTrue = false
+```
+
+## 类型断言
+
+告诉编译器"我知道这是什么类型"：
+
+```ts
+// 方式 1：as 语法（推荐）
+let value: unknown = 'hello'
+let length = (value as string).length
+
+// 方式 2：尖括号语法（不推荐，与 JSX 冲突）
+let length = (<string>value).length
+```
+
+**React 示例**：
+
+```tsx
+function handleEvent(e: Event) {
+  // 类型断言
+  const input = e.target as HTMLInputElement
+  console.log(input.value)
+}
+
+// 或使用类型守卫
+function handleEvent(e: Event) {
+  if (e.target instanceof HTMLInputElement) {
+    console.log(e.target.value)
+  }
+}
+```
+
+### 非空断言
+
+```ts
+let name: string | null = getName()
+
+// ❌ 错误
+console.log(name.toUpperCase())
+
+// ✅ 非空断言（确定不为 null）
+console.log(name!.toUpperCase())
+
+// ✅ 更安全：可选链
+console.log(name?.toUpperCase())
+```
+
+## 类型推断
+
+TypeScript 会自动推断类型：
+
+```ts
+// 推断为 number
+let count = 0
+
+// 推断为 string
+let name = 'Alice'
+
+// 推断为 (a: number, b: number) => number
+const add = (a: number, b: number) => a + b
+
+// 推断为 string[]
+let names = ['Alice', 'Bob']
+
+// 推断为 { name: string; age: number }
+let user = { name: 'Alice', age: 25 }
+```
+
+**React 示例**：
+
+```tsx
+function Counter() {
+  // 推断为 number
+  const [count, setCount] = useState(0)
+  
+  // 推断为 string
+  const [name, setName] = useState('Alice')
+  
+  // 推断为 boolean
+  const [isActive, setIsActive] = useState(false)
+  
+  return <div>{count}</div>
+}
+```
+
+## 最佳实践
+
+### ✅ 优先使用类型推断
+
+```ts
+// ❌ 不必要的类型注解
+const count: number = 0
+const name: string = 'Alice'
+
+// ✅ 让 TypeScript 推断
+const count = 0
+const name = 'Alice'
+```
+
+### ✅ 使用 unknown 代替 any
+
+```ts
+// ❌ 避免
+function process(data: any) {}
+
+// ✅ 推荐
+function process(data: unknown) {
+  if (typeof data === 'string') {
+    // 类型守卫
+  }
+}
+```
+
+### ✅ 使用字面量类型代替枚举
+
+```ts
+// ❌ 枚举
+enum Status {
+  Pending,
+  Success,
+  Error
+}
+
+// ✅ 字面量类型
+type Status = 'pending' | 'success' | 'error'
+```
+
+### ✅ 启用 strictNullChecks
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "strictNullChecks": true
+  }
+}
+```
+
+下一章 [对象类型](/ts/object-types) 介绍接口、类型别名和对象类型。

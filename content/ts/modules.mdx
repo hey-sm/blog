@@ -1,0 +1,374 @@
+---
+title: 模块系统
+description: TypeScript 模块系统：ES Modules、import type、模块解析策略 moduleResolution、.d.ts 声明文件与路径别名
+---
+
+# 模块系统
+
+模块（Modules）是组织和封装代码的基本方式。TypeScript 在 JavaScript 模块基础上增加了类型系统的支持。
+
+## ES Modules 基础
+
+### 导出（export）
+
+```ts
+// ✅ 导出类型
+export interface User {
+  id: number
+  name: string
+}
+
+// ✅ 导出值
+export function createUser(name: string): User {
+  return { id: Math.random(), name }
+}
+
+// ✅ 导出类型别名
+export type Status = 'active' | 'inactive'
+
+// ✅ 默认导出
+export default class ApiClient {}
+```
+
+### 导入（import）
+
+```ts
+// ✅ 导入类型
+import type { User } from './user'
+
+// ✅ 导入值
+import { createUser } from './user'
+
+// ✅ 混合导入
+import { type Status, createUser } from './user'
+
+// ✅ 默认导入
+import ApiClient from './api-client'
+
+// ✅ 导入 + 重命名
+import { type User as UserModel } from './user'
+```
+
+## import type
+
+`import type` 确保导入的内容只用于类型检查，编译后被完全移除：
+
+```ts
+// ✅ import type 只在类型层面存在
+import type { ComponentProps } from './component'
+
+// 编译后：不留任何痕迹，不产生运行时依赖
+
+// ✅ 内联 import type（TypeScript 4.5+）
+import { type User, type Post, fetchData } from './api'
+
+// ✅ 混合使用
+import { createUser, type User } from './user'
+```
+
+### 何时使用 import type
+
+```ts
+// ✅ 仅作为类型使用时
+import type { ButtonProps } from './Button'
+
+function createButton(props: ButtonProps) {
+  // 在类型注解中使用
+}
+
+// ✅ 避免循环依赖
+// A.ts
+import type { B } from './B'  // 仅类型导入，不会产生运行时循环
+
+export interface A {
+  b: B
+}
+
+// ✅ 减小打包体积
+// import type 的模块不会出现在产出中
+```
+
+## 模块解析策略
+
+### moduleResolution 选项
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler"  // 推荐（适用于现代打包工具）
+  }
+}
+```
+
+| 策略 | 行为 | 适用场景 |
+|------|------|---------|
+| `node16` / `nodenext` | 严格遵循 Node.js 模块解析 | Node.js 项目 |
+| `bundler` | 类似 node16 但更宽松 | Vite、Webpack、esbuild |
+| `classic` | TS 1.x 旧规则（淘汰） | 不推荐 |
+
+### 路径别名的类型检查
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@components/*": ["./src/components/*"],
+      "@utils/*": ["./src/utils/*"]
+    }
+  }
+}
+```
+
+```ts
+// ✅ 使用别名导入，类型检查正常
+import { Button } from '@components/Button'
+import { formatDate } from '@utils/date'
+```
+
+### 扩展名处理
+
+```ts
+// ✅ TypeScript 会尝试解析 .ts / .tsx / .d.ts 文件
+import { helper } from './utils'  // 自动查找 utils.ts、utils/index.ts 等
+
+// ✅ ESM 要求显式扩展名
+import { helper } from './utils.js'  // ✅ 即使源码是 .ts
+```
+
+## 声明文件（.d.ts）
+
+### 全局类型声明
+
+```ts filename="src/types/global.d.ts"
+// ✅ 声明全局可用的类型
+declare const APP_VERSION: string
+
+declare function trackEvent(name: string, data?: Record<string, unknown>): void
+
+declare namespace App {
+  interface Config {
+    apiBaseUrl: string
+    theme: string
+  }
+}
+```
+
+### 模块类型声明
+
+```ts filename="src/types/express.d.ts"
+// ✅ 为第三方模块补充类型
+declare module 'express' {
+  interface Request {
+    user?: {
+      id: number
+      role: string
+    }
+  }
+}
+```
+
+### 为非 JS 文件声明类型
+
+```ts filename="src/types/assets.d.ts"
+// ✅ 声明图片导入的类型
+declare module '*.svg' {
+  const content: React.FunctionComponent<React.SVGProps<SVGSVGElement>>
+  export default content
+}
+
+declare module '*.png' {
+  const content: string
+  export default content
+}
+
+declare module '*.css' {
+  const content: Record<string, string>
+  export default content
+}
+
+// ✅ 支持 ?raw 后缀（Vite 特性）
+declare module '*?raw' {
+  const content: string
+  export default content
+}
+```
+
+## 模块与类型隔离
+
+### 文件是模块还是脚本
+
+```ts
+// 有 import/export 语句 → 模块（作用域隔离）
+import { useState } from 'react'
+export function Counter() {}  // 这是模块
+
+// 没有 import/export → 脚本（全局作用域）
+const globalConfig = {}  // ❌ 这会污染全局作用域
+
+// ✅ 即使不需要 export，也加一个来保持模块隔离
+export {}
+```
+
+## 动态导入的类型推断
+
+```ts
+// ✅ 动态导入也能推断类型
+async function loadChart() {
+  const { Chart } = await import('./chart')
+  // Chart 的类型自动推断
+  return new Chart()
+}
+
+// ✅ 动态导入 + 类型断言
+type ChartModule = typeof import('./chart')
+async function loadChart(): Promise<ChartModule['Chart']> {
+  const { Chart } = await import('./chart')
+  return new Chart()
+}
+```
+
+## React 项目中的模块
+
+### 组件导出策略
+
+```tsx filename="components/Button/index.ts"
+// ✅ Barrel export: 从 index.ts 统一导出
+export { Button } from './Button'
+export { type ButtonProps } from './Button'
+```
+
+### 类型文件组织
+
+```ts filename="src/types/component.d.ts"
+import type React from 'react'
+
+declare module 'react' {
+  // ✅ 增强 React 模块
+  interface CSSProperties {
+    [key: `--${string}`]: string | number
+  }
+}
+```
+
+### 环境变量类型
+
+```ts filename="src/env.d.ts"
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_BASE_URL: string
+  readonly VITE_APP_TITLE: string
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv
+}
+```
+
+## 模块的常见模式
+
+### 1. 侧效导入（Side-effect import）
+
+```ts
+// ✅ 不导入任何值，只执行模块内的副作用
+import 'reflect-metadata'
+import './global.css'
+import './instrumentation'
+```
+
+### 2. 条件导出
+
+```json filename="package.json"
+{
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.mjs"
+    }
+  }
+}
+```
+
+### 3. 模块扩展模式
+
+```ts
+// ✅ 扩展已有模块的类型
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    __requestId?: string
+  }
+}
+
+// 任何 axios 导入都会自动合并此扩展
+import axios from 'axios'
+axios.get('/api', { __requestId: '123' })  // ✅
+```
+
+## 陷阱
+
+### 1. 脚本 vs 模块的作用域混淆
+
+```ts
+// ❌ 全局脚本（无 import/export）
+interface User { name: string }  // 全局可见——可能与其他文件冲突
+
+// ✅ 添加 export {} 使其成为模块
+interface User { name: string }
+export {}
+```
+
+### 2. import type 不能用于值位置
+
+```ts
+import type { createUser } from './user'
+
+// ❌ 错误：import type 不能用于值位置
+const user = createUser('Alice')
+```
+
+### 3. .d.ts 覆盖导致的类型冲突
+
+```ts
+// ❌ 不要覆盖第三方库的已有类型
+declare module 'react' {
+  // 如果定义与 @types/react 冲突，可能导致编译失败
+}
+```
+
+## 最佳实践
+
+### ✅ .d.ts 文件只包含类型声明，不含实现
+
+```ts
+// ✅ 声明文件
+declare function calculate(a: number, b: number): number
+
+// ❌ 不要放实现
+function calculate(a: number, b: number) { return a + b }
+```
+
+### ✅ 使用 import type 减少运行时依赖
+
+```ts
+import { type ComponentType, type PropsWithChildren } from 'react'
+// 这些类型在编译后完全消失
+```
+
+### ✅ 扩展第三方模块时使用 declare module
+
+```ts
+declare module 'next' {
+  interface PageProps {
+    layout?: 'default' | 'auth' | 'admin'
+  }
+}
+```
+
+下一章 [命名空间](/ts/namespaces) 介绍命名空间、模块增强和三斜线指令。

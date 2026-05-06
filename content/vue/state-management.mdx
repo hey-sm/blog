@@ -1,0 +1,631 @@
+---
+title: 状态管理
+description: Pinia、VueUse、组合式函数状态共享与最佳实践
+---
+
+# 状态管理
+
+Pinia 是 Vue 官方推荐的状态管理库，提供类型安全、模块化的状态管理方案。
+
+## Pinia 基础
+
+### 安装与配置
+
+```bash
+npm install pinia
+```
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+
+const pinia = createPinia()
+const app = createApp(App)
+
+app.use(pinia)
+app.mount('#app')
+```
+
+### 定义 Store（Setup 语法）
+
+```ts filename="stores/counter.ts"
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+
+export const useCounterStore = defineStore('counter', () => {
+  // State
+  const count = ref(0)
+  const name = ref('Counter')
+  
+  // Getters
+  const doubleCount = computed(() => count.value * 2)
+  const isPositive = computed(() => count.value > 0)
+  
+  // Actions
+  function increment() {
+    count.value++
+  }
+  
+  function decrement() {
+    count.value--
+  }
+  
+  function incrementBy(amount: number) {
+    count.value += amount
+  }
+  
+  async function fetchCount() {
+    const response = await fetch('/api/count')
+    const data = await response.json()
+    count.value = data.count
+  }
+  
+  function reset() {
+    count.value = 0
+  }
+  
+  return {
+    // State
+    count,
+    name,
+    // Getters
+    doubleCount,
+    isPositive,
+    // Actions
+    increment,
+    decrement,
+    incrementBy,
+    fetchCount,
+    reset
+  }
+})
+```
+
+### 使用 Store
+
+```vue filename="components/Counter.vue"
+<script setup lang="ts">
+import { useCounterStore } from '@/stores/counter'
+import { storeToRefs } from 'pinia'
+
+const counter = useCounterStore()
+
+// ✅ 使用 storeToRefs 保持响应性
+const { count, doubleCount } = storeToRefs(counter)
+
+// ✅ Actions 可以直接解构
+const { increment, decrement } = counter
+</script>
+
+<template>
+  <div>
+    <p>Count: {{ count }}</p>
+    <p>Double: {{ doubleCount }}</p>
+    <button @click="increment">+1</button>
+    <button @click="decrement">-1</button>
+    <button @click="counter.incrementBy(5)">+5</button>
+    <button @click="counter.reset()">Reset</button>
+  </div>
+</template>
+```
+
+### 定义 Store（Options 语法）
+
+```ts filename="stores/user.ts"
+import { defineStore } from 'pinia'
+
+interface User {
+  id: number
+  name: string
+  email: string
+}
+
+interface UserState {
+  user: User | null
+  isLoggedIn: boolean
+}
+
+export const useUserStore = defineStore('user', {
+  state: (): UserState => ({
+    user: null,
+    isLoggedIn: false
+  }),
+  
+  getters: {
+    userName: (state) => state.user?.name ?? 'Guest',
+    userEmail: (state) => state.user?.email ?? '',
+    isAdmin: (state) => state.user?.id === 1
+  },
+  
+  actions: {
+    async login(email: string, password: string) {
+      try {
+        const response = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        })
+        
+        const data = await response.json()
+        
+        this.user = data.user
+        this.isLoggedIn = true
+        
+        return { success: true }
+      } catch (error) {
+        return { success: false, error }
+      }
+    },
+    
+    logout() {
+      this.user = null
+      this.isLoggedIn = false
+    },
+    
+    updateProfile(updates: Partial<User>) {
+      if (this.user) {
+        this.user = { ...this.user, ...updates }
+      }
+    }
+  }
+})
+```
+
+## Store 组合
+
+### 在 Store 中使用其他 Store
+
+```ts filename="stores/cart.ts"
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+import { useUserStore } from './user'
+
+interface CartItem {
+  id: number
+  name: string
+  price: number
+  quantity: number
+}
+
+export const useCartStore = defineStore('cart', () => {
+  const userStore = useUserStore()
+  
+  const items = ref<CartItem[]>([])
+  
+  const total = computed(() => 
+    items.value.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  )
+  
+  const itemCount = computed(() => 
+    items.value.reduce((sum, item) => sum + item.quantity, 0)
+  )
+  
+  function addItem(item: CartItem) {
+    const existingItem = items.value.find(i => i.id === item.id)
+    
+    if (existingItem) {
+      existingItem.quantity += item.quantity
+    } else {
+      items.value.push(item)
+    }
+  }
+  
+  function removeItem(id: number) {
+    const index = items.value.findIndex(i => i.id === id)
+    if (index > -1) {
+      items.value.splice(index, 1)
+    }
+  }
+  
+  async function checkout() {
+    if (!userStore.isLoggedIn) {
+      throw new Error('Please login first')
+    }
+    
+    const response = await fetch('/api/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userStore.user?.id,
+        items: items.value
+      })
+    })
+    
+    if (response.ok) {
+      items.value = []
+    }
+    
+    return response.json()
+  }
+  
+  return {
+    items,
+    total,
+    itemCount,
+    addItem,
+    removeItem,
+    checkout
+  }
+})
+```
+
+## 持久化
+
+### 使用 pinia-plugin-persistedstate
+
+```bash
+npm install pinia-plugin-persistedstate
+```
+
+```ts filename="main.ts"
+import { createPinia } from 'pinia'
+import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
+
+const pinia = createPinia()
+pinia.use(piniaPluginPersistedstate)
+```
+
+```ts filename="stores/settings.ts"
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+
+export const useSettingsStore = defineStore('settings', () => {
+  const theme = ref<'light' | 'dark'>('light')
+  const language = ref('zh')
+  
+  function toggleTheme() {
+    theme.value = theme.value === 'light' ? 'dark' : 'light'
+  }
+  
+  return { theme, language, toggleTheme }
+}, {
+  persist: true  // 启用持久化
+})
+```
+
+### 自定义持久化
+
+```ts filename="stores/auth.ts"
+export const useAuthStore = defineStore('auth', () => {
+  const token = ref('')
+  
+  return { token }
+}, {
+  persist: {
+    key: 'auth-token',
+    storage: sessionStorage,
+    paths: ['token']  // 只持久化 token
+  }
+})
+```
+
+## 订阅 Store
+
+### 订阅 State 变化
+
+```vue
+<script setup lang="ts">
+import { useCounterStore } from '@/stores/counter'
+
+const counter = useCounterStore()
+
+counter.$subscribe((mutation, state) => {
+  console.log('State changed:', mutation.type)
+  console.log('New state:', state)
+  
+  // 保存到 localStorage
+  localStorage.setItem('counter', JSON.stringify(state))
+})
+</script>
+```
+
+### 订阅 Actions
+
+```vue
+<script setup lang="ts">
+import { useCounterStore } from '@/stores/counter'
+
+const counter = useCounterStore()
+
+counter.$onAction(({ name, args, after, onError }) => {
+  console.log(`Action "${name}" called with:`, args)
+  
+  after((result) => {
+    console.log(`Action "${name}" finished with:`, result)
+  })
+  
+  onError((error) => {
+    console.error(`Action "${name}" failed:`, error)
+  })
+})
+</script>
+```
+
+## 重置 Store
+
+```vue
+<script setup lang="ts">
+import { useCounterStore } from '@/stores/counter'
+
+const counter = useCounterStore()
+
+// 重置到初始状态
+counter.$reset()
+</script>
+```
+
+## Pinia 插件
+
+### 创建插件
+
+```ts filename="plugins/pinia-logger.ts"
+import type { PiniaPluginContext } from 'pinia'
+
+export function piniaLogger({ store }: PiniaPluginContext) {
+  store.$subscribe((mutation) => {
+    console.log(`[${store.$id}] ${mutation.type}`)
+  })
+  
+  store.$onAction(({ name, args }) => {
+    console.log(`[${store.$id}] Action: ${name}`, args)
+  })
+}
+```
+
+```ts filename="main.ts"
+import { createPinia } from 'pinia'
+import { piniaLogger } from './plugins/pinia-logger'
+
+const pinia = createPinia()
+pinia.use(piniaLogger)
+```
+
+## VueUse
+
+VueUse 提供了大量实用的组合式函数。
+
+### 安装
+
+```bash
+npm install @vueuse/core
+```
+
+### 常用功能
+
+```vue filename="components/VueUseDemo.vue"
+<script setup lang="ts">
+import {
+  useLocalStorage,
+  useSessionStorage,
+  useMouse,
+  useOnline,
+  useWindowSize,
+  useDark,
+  useToggle,
+  useClipboard,
+  useTitle
+} from '@vueuse/core'
+
+// 本地存储
+const name = useLocalStorage('name', 'Alice')
+
+// 会话存储
+const token = useSessionStorage('token', '')
+
+// 鼠标位置
+const { x, y } = useMouse()
+
+// 网络状态
+const online = useOnline()
+
+// 窗口大小
+const { width, height } = useWindowSize()
+
+// 暗色模式
+const isDark = useDark()
+const toggleDark = useToggle(isDark)
+
+// 剪贴板
+const { text, copy, copied } = useClipboard()
+
+// 页面标题
+useTitle('My App')
+</script>
+
+<template>
+  <div>
+    <p>Name: <input v-model="name"></p>
+    <p>Mouse: {{ x }}, {{ y }}</p>
+    <p>Online: {{ online }}</p>
+    <p>Window: {{ width }} x {{ height }}</p>
+    <button @click="toggleDark()">Toggle Dark Mode</button>
+    <button @click="copy('Hello')">Copy</button>
+    <p v-if="copied">Copied!</p>
+  </div>
+</template>
+```
+
+### 请求相关
+
+```vue
+<script setup lang="ts">
+import { useFetch, useAsyncState } from '@vueuse/core'
+
+// useFetch
+const { data, error, isFetching } = useFetch('/api/users').json()
+
+// useAsyncState
+const { state, isReady, isLoading, execute } = useAsyncState(
+  async () => {
+    const response = await fetch('/api/data')
+    return response.json()
+  },
+  null,
+  { immediate: false }
+)
+</script>
+
+<template>
+  <div v-if="isFetching">Loading...</div>
+  <div v-else-if="error">Error: {{ error }}</div>
+  <div v-else>{{ data }}</div>
+</template>
+```
+
+## 组合式函数状态共享
+
+### 创建共享状态
+
+```ts filename="composables/useSharedState.ts"
+import { ref, computed } from 'vue'
+
+// 模块级别的状态（所有组件共享）
+const count = ref(0)
+
+export function useSharedCounter() {
+  const doubleCount = computed(() => count.value * 2)
+  
+  function increment() {
+    count.value++
+  }
+  
+  function decrement() {
+    count.value--
+  }
+  
+  return {
+    count,
+    doubleCount,
+    increment,
+    decrement
+  }
+}
+```
+
+```vue filename="components/ComponentA.vue"
+<script setup lang="ts">
+import { useSharedCounter } from '@/composables/useSharedState'
+
+const { count, increment } = useSharedCounter()
+</script>
+
+<template>
+  <div>
+    <p>Component A: {{ count }}</p>
+    <button @click="increment">+1</button>
+  </div>
+</template>
+```
+
+```vue filename="components/ComponentB.vue"
+<script setup lang="ts">
+import { useSharedCounter } from '@/composables/useSharedState'
+
+const { count, decrement } = useSharedCounter()
+</script>
+
+<template>
+  <div>
+    <p>Component B: {{ count }}</p>
+    <button @click="decrement">-1</button>
+  </div>
+</template>
+```
+
+## 最佳实践
+
+### ✅ 使用 storeToRefs 保持响应性
+
+```vue
+<!-- ❌ 错误：失去响应性 -->
+<script setup lang="ts">
+const { count } = useCounterStore()
+</script>
+
+<!-- ✅ 正确 -->
+<script setup lang="ts">
+import { storeToRefs } from 'pinia'
+
+const { count } = storeToRefs(useCounterStore())
+</script>
+```
+
+### ✅ 按功能模块划分 Store
+
+```text
+stores/
+├── user.ts          # 用户相关
+├── cart.ts          # 购物车
+├── products.ts      # 商品
+└── settings.ts      # 设置
+```
+
+### ✅ 使用 TypeScript
+
+```ts filename="stores/typed-store.ts"
+import { defineStore } from 'pinia'
+
+interface Product {
+  id: number
+  name: string
+  price: number
+}
+
+interface ProductState {
+  products: Product[]
+  loading: boolean
+  error: string | null
+}
+
+export const useProductStore = defineStore('product', {
+  state: (): ProductState => ({
+    products: [],
+    loading: false,
+    error: null
+  }),
+  
+  getters: {
+    productCount: (state): number => state.products.length,
+    
+    getProductById: (state) => {
+      return (id: number): Product | undefined => 
+        state.products.find(p => p.id === id)
+    }
+  },
+  
+  actions: {
+    async fetchProducts(): Promise<void> {
+      this.loading = true
+      this.error = null
+      
+      try {
+        const response = await fetch('/api/products')
+        this.products = await response.json()
+      } catch (e) {
+        this.error = (e as Error).message
+      } finally {
+        this.loading = false
+      }
+    }
+  }
+})
+```
+
+### ❌ 避免直接修改 State
+
+```vue
+<!-- ❌ 错误 -->
+<script setup lang="ts">
+const counter = useCounterStore()
+counter.count++  // 直接修改
+</script>
+
+<!-- ✅ 正确：使用 Actions -->
+<script setup lang="ts">
+const counter = useCounterStore()
+counter.increment()
+</script>
+```
+
+下一章 [样式方案](/vue/styling) 介绍 CSS 解决方案。

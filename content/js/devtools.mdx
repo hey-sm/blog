@@ -1,0 +1,324 @@
+---
+title: 开发者工具
+description: 浏览器 DevTools 的断点调试、内存泄漏定位与性能剖析
+---
+
+# 开发者工具
+
+DevTools 是现代 JavaScript 开发不可或缺的诊断工具。本章覆盖三类高频使用场景：**断点调试**、**内存泄漏定位**、**性能剖析**。以 Chromium DevTools 为参照，Firefox / Safari 的对应面板大体一致。
+
+## 调试基础
+
+### 断点类型
+
+| 类型 | 触发位置 | 设置方式 |
+| ---- | -------- | -------- |
+| 行断点 | 指定源文件某行 | Sources 面板点击行号 |
+| 条件断点 | 表达式为 truthy 时 | 右键行号 → "Add conditional breakpoint" |
+| 日志点（logpoint） | 命中时打印而非暂停 | 右键行号 → "Add logpoint" |
+| DOM 断点 | 子树修改 / 属性修改 / 节点移除 | Elements 面板右键 → "Break on" |
+| XHR / fetch 断点 | 包含某 URL 的请求发起时 | Sources → XHR/fetch Breakpoints |
+| 事件监听器断点 | 某事件触发时 | Sources → Event Listener Breakpoints |
+| 异常断点 | 抛出未捕获 / 任何异常 | Sources 面板顶部按钮 |
+
+### `debugger` 语句
+
+最简单粗暴的断点：
+
+```js
+function buggy(input) {
+  const parsed = parse(input)
+  debugger                                    // DevTools 打开时会暂停
+  return process(parsed)
+}
+```
+
+线上代码必须移除 `debugger` 语句——它可能导致 DevTools 用户体验异常。
+
+### 单步操作
+
+| 快捷键（Win） | 操作 |
+| ------------- | ---- |
+| `F8` | 继续运行 |
+| `F10` | 单步跳过（不进入函数） |
+| `F11` | 单步进入 |
+| `Shift+F11` | 单步跳出 |
+| `F9` | 切换断点 |
+
+### Source maps
+
+打包后的代码（min.js / chunk-xxx.js）与源代码差异巨大。Source map 让 DevTools 把行列映射回源文件：
+
+```js
+// webpack.config.js
+module.exports = {
+  devtool: 'source-map'                       // 开发推荐 'eval-source-map'
+}
+```
+
+生产 source map 需考虑：
+
+- 是否上传到错误监控（Sentry、Bugsnag）
+- 是否暴露在公网（小公司常见做法是仅上传到错误平台不发布到 CDN）
+
+### Console API
+
+```js
+// 基本
+console.log(obj)
+console.error('failed:', err)
+console.warn('deprecated')
+console.info('starting...')
+
+// 表格化
+console.table([{ a: 1, b: 2 }, { a: 3, b: 4 }])
+
+// 分组
+console.group('parsing')
+console.log('step 1')
+console.groupEnd()
+
+// 计时
+console.time('fetch')
+await fetch('/api')
+console.timeEnd('fetch')                      // → fetch: 213ms
+
+// 计数
+console.count('hit')                          // → hit: 1
+console.count('hit')                          // → hit: 2
+
+// 断言
+console.assert(arr.length > 0, 'array empty')
+
+// 调用栈
+console.trace('here we are')
+
+// 性能时间
+console.profile('parse')                      // 同 Performance 面板录制
+console.profileEnd('parse')
+```
+
+### `console.dir` vs `console.log`
+
+```js
+const el = document.body
+console.log(el)                               // 显示 DOM 元素的 HTML 结构
+console.dir(el)                               // 显示 JS 对象的属性视图
+```
+
+调试 DOM 元素的 JS 属性时使用 `console.dir`。
+
+## 排查内存泄漏
+
+详见 [内存管理](/js/memory#测量与诊断) 中的方法论。本节专注于 DevTools 操作步骤。
+
+### Heap Snapshot
+
+定位"未被释放的对象"。
+
+1. **Memory 面板 → Heap snapshot → Take snapshot**
+2. 操作页面（打开弹窗 → 关闭，进入路由 → 退出，等等）
+3. 强制 GC（垃圾桶按钮）后再次拍快照
+4. 在第二个快照的下拉菜单选 **Comparison**
+5. 关注 **# Delta** 列为正的构造函数
+
+#### 如何看 Retainers
+
+选中可疑对象 → 下方 **Retainers** 标签显示**它被谁持有**：从泄漏对象逆向追溯到 GC 根，找到第一个本不该持有它的引用。
+
+### Allocation Timeline
+
+定位"持续分配内存的代码段"。
+
+1. **Memory → Allocation instrumentation on timeline → Start**
+2. 操作页面
+3. 停止 → 时间线上的蓝色柱代表分配，灰色代表已被回收的部分
+4. 选中蓝色柱（持续存在的分配）→ 下方查看构造函数与调用栈
+
+### Allocation Sampling
+
+低开销的采样剖析，适合对生产/类生产环境的轻量分析。比 Allocation Timeline 精度低但消耗小。
+
+### Performance Memory 曲线
+
+**Performance 面板** 录制时勾选 "Memory" 选项，时间线下方会显示：
+
+- JS Heap（蓝）
+- Documents / Nodes / Listeners 数量
+
+锯齿状下降是正常 GC；持续单调上升或 GC 后基线越来越高即可疑。
+
+## 性能剖析
+
+### Performance 面板
+
+通用流程：
+
+1. **Performance 面板**点击录制
+2. 操作要分析的场景（如页面首屏、列表滚动、复杂交互）
+3. 停止 → 浏览器汇总火焰图
+
+火焰图（Flame Chart）中：
+
+- 横轴是时间，纵轴是调用栈深度
+- 黄色 = JS 执行；紫色 = Layout；绿色 = Paint；蓝色 = HTML 解析；灰色 = Idle
+- 顶部的红色条 = 长任务（> 50ms，会阻塞交互）
+
+### 定位长任务
+
+长任务是首屏与交互卡顿的最常见原因。
+
+1. 在火焰图中找出红色长任务
+2. 点击 → 下方 **Bottom-Up** 视图按累计时间排序
+3. 折叠到具体函数 → 跳转到源码
+
+```js
+// 使用 PerformanceObserver 在生产中监听
+new PerformanceObserver(list => {
+  for (const entry of list.getEntries()) {
+    if (entry.duration > 100) {
+      report({ name: entry.name, duration: entry.duration })
+    }
+  }
+}).observe({ type: 'longtask', buffered: true })
+```
+
+### Web Vitals 指标
+
+Chromium 内置三项核心 Web Vitals：
+
+| 指标 | 含义 | 良好阈值 |
+| ---- | ---- | -------- |
+| LCP（Largest Contentful Paint） | 最大内容绘制 | ≤ 2.5s |
+| INP（Interaction to Next Paint） | 交互到下一次绘制 | ≤ 200ms |
+| CLS（Cumulative Layout Shift） | 累计布局偏移 | ≤ 0.1 |
+
+在 **Performance Insights / Lighthouse** 面板中可直接看到。
+
+```js
+// 上报 CWV 到分析平台
+import { onLCP, onINP, onCLS } from 'web-vitals'
+
+onLCP(metric => report('lcp', metric))
+onINP(metric => report('inp', metric))
+onCLS(metric => report('cls', metric))
+```
+
+### Coverage 面板
+
+诊断"未使用的 JS / CSS 占比"，指导代码分割：
+
+1. **Command Menu (Ctrl/Cmd+Shift+P)** → "Show Coverage"
+2. 录制 → 操作页面 → 停止
+3. 列表显示每个文件的未使用比例
+
+未使用的 CSS 与 JS 是常见的"加载即浪费"。结合 [模块](/js/modules) 中的动态 `import()` 做按需加载。
+
+### Network 面板
+
+排查请求层面的问题：
+
+- **Waterfall**：每个请求的 DNS / Connect / SSL / TTFB / Content Download 阶段耗时
+- **Disable cache**：复现冷启动场景
+- **Throttling**：模拟 Slow 3G / 弱网
+- **Initiator**：定位发起请求的代码栈
+- **HAR 导出**：分享给同事或离线分析
+
+### Memory + Performance 联用
+
+诊断"既慢又泄漏"：
+
+1. Performance 面板录制（带 Memory 选项）
+2. 同时关注 Heap 曲线与火焰图
+3. Heap 曲线持续上升的窗口期对应火焰图中的代码即问题源
+
+## 远程调试
+
+### Chrome 桌面端
+
+```bash
+# Windows
+chrome.exe --remote-debugging-port=9222
+
+# 启动后访问 http://localhost:9222
+```
+
+### Android Chrome
+
+设备启用 USB 调试 → 打开 Chrome → 桌面 Chrome 访问 `chrome://inspect/#devices` → 选择目标 tab。
+
+### Node.js
+
+```bash
+node --inspect app.js
+# 输出： Debugger listening on ws://127.0.0.1:9229/...
+
+# 桌面 Chrome 访问 chrome://inspect → 添加 localhost:9229
+```
+
+## 实用技巧
+
+### `$` / `$$` / `$0` / `$_`
+
+DevTools Console 内置变量：
+
+```js
+$_                                            // 上一次表达式的结果
+$0                                            // Elements 面板当前选中的元素
+$1                                            // 上一个选中元素
+$('selector')                                 // 同 document.querySelector
+$$('selector')                                // 同 document.querySelectorAll，返回数组
+$x('//div')                                   // XPath 查询
+```
+
+### Live Expression
+
+Console 顶部 "Live expression" 按钮 → 输入表达式，每秒自动求值。例如实时观察 `performance.memory.usedJSHeapSize`。
+
+### `monitor` / `monitorEvents`
+
+```js
+function add(a, b) { return a + b }
+monitor(add)                                  // 后续每次调用都打印参数
+add(1, 2)
+// → function add called with arguments: 1, 2
+
+monitorEvents(document.body, 'click')         // 监听并打印所有 click 事件
+unmonitorEvents(document.body)                // 取消
+```
+
+### `copy(value)`
+
+将任意值复制到剪贴板：
+
+```js
+copy(JSON.stringify(largeObject, null, 2))
+copy(document.documentElement.outerHTML)
+```
+
+### `getEventListeners(node)`
+
+```js
+getEventListeners(document.body)
+// → { click: [...], mouseover: [...] }
+```
+
+排查"按钮点击没反应"时极其有用。
+
+### Conditional logging via logpoint
+
+不打开编辑器修改源码也能加日志：
+
+```text
+Right-click line number → Add logpoint → 'i =', i, 'len =', arr.length
+```
+
+不会暂停执行，仅打印。
+
+## 小结
+
+- 断点 + 单步 + 条件断点是日常调试三件套；
+- 内存问题用 Heap Snapshot Comparison 与 Allocation Timeline 定位；
+- 性能问题用 Performance 火焰图找长任务，结合 Bottom-Up 视图收敛；
+- Web Vitals 是衡量用户体感的标准指标，配合 PerformanceObserver 可在生产环境采集；
+- 熟练运用 `monitor` / `getEventListeners` / `copy` 等 Console 工具能显著提升排错效率。

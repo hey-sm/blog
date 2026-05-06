@@ -1,0 +1,621 @@
+---
+title: 类型守卫与收窄
+description: TypeScript 类型守卫 typeof、instanceof、in、自定义类型谓词 is、断言函数与类型收窄完整指南
+---
+
+# 类型守卫与收窄
+
+类型收窄（Type Narrowing）是 TypeScript 根据运行时检查，将宽泛的类型缩小为更具体类型的过程。类型守卫是实现收窄的核心机制。
+
+## 控制流收窄
+
+### typeof 类型守卫
+
+```ts
+function process(value: string | number) {
+  if (typeof value === 'string') {
+    // value 收窄为 string
+    return value.toUpperCase()
+  }
+
+  // value 收窄为 number
+  return value.toFixed(2)
+}
+```
+
+**可用的 typeof 判断**：
+
+```ts
+type TypeGuardMap = {
+  string:     string
+  number:     number
+  bigint:     bigint
+  boolean:    boolean
+  symbol:     symbol
+  undefined:  undefined
+  object:     object | null  // ⚠️ typeof null === 'object'
+  function:   (...args: unknown[]) => unknown
+}
+
+function handleValue(value: unknown) {
+  if (typeof value === 'function') {
+    value()  // ✅ 收窄为可调用
+  }
+
+  if (typeof value === 'object') {
+    // ⚠️ value 可能是 null！
+    // value.toString()  // 运行时可能报错
+    if (value !== null) {
+      value.toString()  // ✅
+    }
+  }
+}
+```
+
+### 真值检查
+
+```ts
+function processString(value: string | null | undefined) {
+  if (value) {
+    // value 收窄为 string（排除了 null 和 undefined，因为 '' 也是 falsy）
+    return value.toUpperCase()
+  }
+
+  // value 可能是 ''、null 或 undefined
+  return 'default'
+}
+```
+
+**React 示例**：
+
+```tsx
+interface User {
+  name: string
+  avatar?: string
+}
+
+function UserAvatar({ user }: { user: User | null }) {
+  // 真值守卫
+  if (!user) {
+    return <div>Guest</div>
+  }
+
+  return (
+    <div>
+      {/* user 已收窄为 User */}
+      <span>{user.name}</span>
+      {/* 可选链：不需要守卫 */}
+      {user.avatar && <img src={user.avatar} alt={user.name} />}
+    </div>
+  )
+}
+```
+
+### 等值检查
+
+```ts
+function compare(x: string | number, y: string | boolean) {
+  if (x === y) {
+    // x 和 y 都收窄为 string（只有 string 是公共类型）
+    x.toUpperCase()
+    y.toUpperCase()
+  }
+}
+```
+
+## instanceof 类型守卫
+
+用于检查类实例（和原型链）：
+
+```ts
+class ApiError extends Error {
+  statusCode: number
+  constructor(message: string, statusCode: number) {
+    super(message)
+    this.statusCode = statusCode
+  }
+}
+
+class NetworkError extends Error {
+  constructor(message: string) {
+    super(message)
+  }
+}
+
+function handleError(error: Error) {
+  if (error instanceof ApiError) {
+    // error 收窄为 ApiError，可以访问 statusCode
+    console.error(`API ${error.statusCode}: ${error.message}`)
+  } else if (error instanceof NetworkError) {
+    console.error(`Network: ${error.message}`)
+  } else {
+    console.error(`Unknown: ${error.message}`)
+  }
+}
+```
+
+**React 示例——ErrorBoundary**：
+
+```tsx
+class ValidationError extends Error {
+  fields: string[]
+  constructor(message: string, fields: string[]) {
+    super(message)
+    this.fields = fields
+  }
+}
+
+function ErrorDisplay({ error }: { error: unknown }) {
+  if (error instanceof ValidationError) {
+    return (
+      <div>
+        <h4>Validation Failed</h4>
+        <ul>
+          {error.fields.map(field => (
+            <li key={field}>{field}: invalid</li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  if (error instanceof Error) {
+    return <div>Error: {error.message}</div>
+  }
+
+  return <div>Unknown error occurred</div>
+}
+```
+
+## in 运算符类型守卫
+
+Check 属性是否存在于对象上：
+
+```ts
+interface Bird {
+  fly: () => void
+  layEggs: () => void
+}
+
+interface Fish {
+  swim: () => void
+  layEggs: () => void
+}
+
+function move(pet: Bird | Fish) {
+  if ('fly' in pet) {
+    pet.fly()  // ✅ pet 收窄为 Bird
+  } else {
+    pet.swim() // ✅ pet 收窄为 Fish
+  }
+}
+```
+
+**React 示例**：
+
+```tsx
+type BaseProps = {
+  className?: string
+}
+
+type ButtonProps = BaseProps & {
+  onClick: () => void
+  label: string
+}
+
+type LinkProps = BaseProps & {
+  href: string
+  label: string
+  target?: string
+}
+
+type ActionProps = ButtonProps | LinkProps
+
+function Action(props: ActionProps) {
+  if ('href' in props) {
+    return (
+      <a href={props.href} target={props.target} className={props.className}>
+        {props.label}
+      </a>
+    )
+  }
+
+  return (
+    <button onClick={props.onClick} className={props.className}>
+      {props.label}
+    </button>
+  )
+}
+```
+
+## 自定义类型谓词（is）
+
+`parameterName is Type` 定义一个返回布尔值的函数为类型守卫：
+
+```ts
+interface Cat {
+  name: string
+  meow: () => void
+}
+
+interface Dog {
+  name: string
+  bark: () => void
+}
+
+// 自定义类型守卫
+function isCat(animal: Cat | Dog): animal is Cat {
+  return (animal as Cat).meow !== undefined
+}
+
+function handleAnimal(animal: Cat | Dog) {
+  if (isCat(animal)) {
+    animal.meow()  // ✅ 收窄为 Cat
+  } else {
+    animal.bark()  // ✅ 收窄为 Dog
+  }
+}
+```
+
+### 过滤数组
+
+```ts
+// 过滤 null/undefined
+function isNonNullable<T>(value: T): value is NonNullable<T> {
+  return value !== null && value !== undefined
+}
+
+const arr = [1, null, 2, undefined, 3]
+const filtered: number[] = arr.filter(isNonNullable)
+// ✅ [1, 2, 3] 并且类型正确为 number[]
+```
+
+### 判断特定形状
+
+```ts
+interface ApiErrorResponse {
+  error: {
+    code: number
+    message: string
+  }
+}
+
+interface ApiSuccessResponse<T> {
+  data: T
+}
+
+type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse
+
+function isErrorResponse<T>(response: ApiResponse<T>): response is ApiErrorResponse {
+  return 'error' in response
+}
+
+async function handleResponse<T>(response: ApiResponse<T>) {
+  if (isErrorResponse(response)) {
+    throw new Error(response.error.message)
+  }
+  return response.data
+}
+```
+
+**React 示例——类型安全的 useReducer**：
+
+```tsx
+type State =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; data: string[] }
+  | { status: 'error'; error: string }
+
+type Action =
+  | { type: 'FETCH' }
+  | { type: 'RESOLVE'; data: string[] }
+  | { type: 'REJECT'; error: string }
+
+// 类型谓词保证 reducer 返回正确类型
+function isSuccess(state: State): state is { status: 'success'; data: string[] } {
+  return state.status === 'success'
+}
+
+function DataDisplay({ state }: { state: State }) {
+  if (isSuccess(state)) {
+    // ✅ state.data 可用
+    return (
+      <ul>
+        {state.data.map(item => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    )
+  }
+
+  return <div>No data yet</div>
+}
+```
+
+## 断言函数（Assertion Functions）
+
+TypeScript 3.7+ 支持，使用 `asserts` 关键字：
+
+```ts
+// 基本形式：asserts value
+function assert(condition: unknown, message?: string): asserts condition {
+  if (!condition) {
+    throw new Error(message ?? 'Assertion failed')
+  }
+}
+
+let value: unknown = 'hello'
+assert(typeof value === 'string')
+// 此后 value 收窄为 string
+value.toUpperCase()  // ✅
+
+// 带类型的形式：asserts value is Type
+function assertIsString(value: unknown): asserts value is string {
+  if (typeof value !== 'string') {
+    throw new TypeError('Expected string')
+  }
+}
+
+let data: unknown = 'test'
+assertIsString(data)
+data.toUpperCase()  // ✅ 此后 data 为 string
+```
+
+**React 示例——环境变量校验**：
+
+```tsx
+function assertEnvVar(name: string): asserts name is keyof typeof process.env {
+  if (process.env[name] === undefined) {
+    throw new Error(`Missing env variable: ${name}`)
+  }
+}
+
+const API_KEY = 'NEXT_PUBLIC_API_KEY'
+assertEnvVar(API_KEY)
+// 此后 API_KEY 类型收窄为 'NEXT_PUBLIC_API_KEY'
+const apiKey: string = process.env[API_KEY]
+
+// 通用 fetch 中的断言
+function assertResponseOk(response: Response): asserts response is Response & { ok: true } {
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  }
+}
+
+async function fetchJson(url: string) {
+  const response = await fetch(url)
+  assertResponseOk(response)
+  return response.json()  // ✅ 已知 ok 为 true
+}
+```
+
+## Discriminated Unions 的收窄
+
+```ts
+interface Circle {
+  kind: 'circle'
+  radius: number
+}
+
+interface Square {
+  kind: 'square'
+  size: number
+}
+
+type Shape = Circle | Square
+
+function getArea(shape: Shape) {
+  // 使用可辨识属性收窄
+  if (shape.kind === 'circle') {
+    return Math.PI * shape.radius ** 2
+  }
+  return shape.size ** 2
+}
+```
+
+**React 示例——通知组件**：
+
+```tsx
+type Notification =
+  | {
+      type: 'success'
+      message: string
+    }
+  | {
+      type: 'error'
+      message: string
+      details?: string
+    }
+  | {
+      type: 'warning'
+      message: string
+      action?: { label: string; onClick: () => void }
+    }
+
+function NotificationBanner({ notif }: { notif: Notification }) {
+  switch (notif.type) {
+    case 'success':
+      return <div className="bg-green-100">{notif.message}</div>
+    case 'error':
+      return (
+        <div className="bg-red-100">
+          <p>{notif.message}</p>
+          {notif.details && <pre>{notif.details}</pre>}
+        </div>
+      )
+    case 'warning':
+      return (
+        <div className="bg-yellow-100">
+          <p>{notif.message}</p>
+          {notif.action && (
+            <button onClick={notif.action.onClick}>
+              {notif.action.label}
+            </button>
+          )}
+        </div>
+      )
+  }
+}
+```
+
+## 类型守卫组合
+
+```ts
+// 组合多个守卫
+function isUser(obj: unknown): obj is User {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'id' in obj &&
+    'name' in obj &&
+    typeof obj.id === 'number' &&
+    typeof obj.name === 'string'
+  )
+}
+
+// 封装为类型守卫库
+const Guards = {
+  isString: (value: unknown): value is string => typeof value === 'string',
+  isNumber: (value: unknown): value is number => typeof value === 'number' && !Number.isNaN(value),
+  isArrayOf: <T>(value: unknown, guard: (item: unknown) => item is T): value is T[] => {
+    return Array.isArray(value) && value.every(guard)
+  }
+}
+
+const arr: unknown = ['a', 'b', 'c']
+if (Guards.isArrayOf(arr, Guards.isString)) {
+  arr.map(s => s.toUpperCase())  // ✅ arr 为 string[]
+}
+```
+
+## satisfies 确保穷尽性（TS 4.9+）
+
+```ts
+// satisfies 验证类型而保留更精确的推断
+const palette = {
+  red: [255, 0, 0],
+  green: '#00ff00',
+  blue: [0, 0, 255],
+} satisfies Record<string, string | number[]>
+
+// 保留字面量类型
+type Color = keyof typeof palette  // 'red' | 'green' | 'blue'
+
+// palette.green.toUpperCase()  // ❌ 错误：可能是 number[]
+if (typeof palette.green === 'string') {
+  palette.green.toUpperCase()  // ✅
+}
+```
+
+**React 示例**：
+
+```tsx
+const buttonVariants = {
+  primary: 'bg-blue-500 text-white',
+  secondary: 'bg-gray-200 text-gray-800',
+} satisfies Record<string, string>
+
+type Variant = keyof typeof buttonVariants  // 'primary' | 'secondary'
+
+function Button({ variant, label }: { variant: Variant; label: string }) {
+  return <button className={buttonVariants[variant]}>{label}</button>
+}
+```
+
+## 陷阱
+
+### 1. typeof null === 'object'
+
+```ts
+function handle(value: string | object) {
+  if (typeof value === 'object') {
+    // ⚠️ null 也会进入这里！
+  }
+}
+
+// ✅ 显式排除 null
+function handle(value: string | object) {
+  if (value !== null && typeof value === 'object') {
+    // ✅ 确保不为 null
+  }
+}
+```
+
+### 2. 类型谓词可以"撒谎"
+
+```ts
+// ❌ 类型守卫逻辑错误——运行时可能崩溃
+function isNumber(value: unknown): value is number {
+  return typeof value === 'string'  // 逻辑错误！
+}
+
+// ✅ 务必确保守卫逻辑正确
+function isNumber(value: unknown): value is number {
+  return typeof value === 'number' && !Number.isNaN(value)
+}
+```
+
+### 3. switch case 穿透
+
+```ts
+function handle(shape: Shape) {
+  switch (shape.kind) {
+    case 'circle':
+      // 忘记 break 会导致穿透，类型可能不准确
+      // shape 在这里是 Circle
+    case 'square':
+      // 这里 shape 是 Circle | Square（穿透导致）
+  }
+}
+```
+
+## 最佳实践
+
+### ✅ 优先使用 Discriminated Union 而非类型谓词
+
+```ts
+// ✅ 编译器自动检查穷尽性
+type Result<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string }
+
+// ❌ 需要手动写类型谓词
+type Result<T> = { ok: boolean; value?: T; error?: string }
+```
+
+### ✅ 把类型守卫提取为可复用函数
+
+```ts
+// ✅ 一次定义、多处使用
+function isDefined<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined
+}
+
+const items = [1, null, 2, undefined, 3]
+items.filter(isDefined)  // number[]
+
+// 在 React 中
+function UserSection({ user }: { user: User | null }) {
+  if (isDefined(user)) {
+    return <Profile user={user} />
+  }
+  return null
+}
+```
+
+### ✅ unknown 必须先收窄后使用
+
+```ts
+function handle(data: unknown) {
+  // ❌ 错误
+  data.toString()
+
+  // ✅ 先收窄
+  if (typeof data === 'string') {
+    data.toString()
+  }
+}
+```
+
+下一章 [接口](/ts/interfaces) 深入了解 Interface 的声明合并、扩展与高级用法。

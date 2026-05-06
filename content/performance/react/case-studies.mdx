@@ -1,0 +1,1199 @@
+---
+title: 实战场景方案
+description: 电商首页、社交 Feed、Dashboard、富文本、大表单、实时数据、移动端的完整 React 性能方案
+---
+
+# 实战场景方案
+
+前面 11 章覆盖了 React 性能优化的所有"零件"——本章把它们组合起来，应用到具体业务场景。每个场景给出：核心挑战、关键指标、技术方案、参考实现、监控要点。这是把工具变成产出的最后一公里。
+
+## 场景 1：电商首页
+
+### 业务特征
+
+- 首屏含 hero、轮播、推荐、分类、活动、商品列表
+- SEO 关键（Google 搜索流量是核心入口）
+- 全球用户，弱网占比高
+- 个性化（用户登录后看到的内容不同）
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| 首屏图片密集 | LCP 慢 |
+| 商品列表长（30-100 项） | 滚动卡 / 内存高 |
+| 个性化数据（推荐、购物车数量） | 难以静态缓存 |
+| 第三方脚本（埋点、广告、客服） | TBT / INP 损害 |
+
+### 关键指标目标
+
+```text
+LCP   ≤ 2.0 s（P75）
+INP   ≤ 150 ms（P75）
+CLS   ≤ 0.05
+FCP   ≤ 1.5 s
+TTFB  ≤ 600 ms
+```
+
+### 推荐方案：Next.js App Router + PPR
+
+```text
+渲染策略：
+  ├─ 静态 shell：<Header />、<Banner />、<Footer />
+  ├─ ISR：<HotProducts />（热门商品，每小时刷新）
+  ├─ ISR：<Categories />（分类，每天刷新）
+  └─ 流式 SSR：<UserMenu />、<Recommendations />（个性化）
+```
+
+```tsx
+// app/page.tsx
+import { Suspense } from 'react'
+import { headers } from 'next/headers'
+
+async function HotProducts() {
+  const products = await fetch('https://api/products/hot', {
+    next: { revalidate: 3600, tags: ['products'] }
+  }).then(r => r.json())
+  return <ProductGrid products={products} />
+}
+
+async function Recommendations() {
+  const userId = (await headers()).get('x-user-id')
+  if (!userId) return <ProductGrid products={[]} />
+
+  const items = await fetch(`https://api/recs/${userId}`, {
+    cache: 'no-store'
+  }).then(r => r.json())
+  return <ProductGrid products={items} />
+}
+
+export default function HomePage() {
+  return (
+    <>
+      <Header />                           {/* 静态 */}
+      <HeroBanner />                       {/* 静态 */}
+
+      <Suspense fallback={<GridSkeleton />}>
+        <HotProducts />                    {/* ISR */}
+      </Suspense>
+
+      <Suspense fallback={<GridSkeleton />}>
+        <Recommendations />                {/* 流式个性化 */}
+      </Suspense>
+
+      <Footer />                           {/* 静态 */}
+    </>
+  )
+}
+```
+
+### 图片优化
+
+LCP 大概率是 hero 图：
+
+```tsx
+// app/components/HeroBanner.tsx
+import Image from 'next/image'
+
+export default function HeroBanner() {
+  return (
+    <Image
+      src="/hero.jpg"
+      alt="..."
+      width={1920} height={600}
+      priority                              // preload + fetchpriority="high"
+      sizes="100vw"
+      placeholder="blur"
+      blurDataURL="data:image/..."
+    />
+  )
+}
+```
+
+商品图：
+
+```tsx
+function ProductCard({ product }) {
+  return (
+    <div>
+      <Image
+        src={product.image}
+        width={300} height={300}
+        loading="lazy"                       // 视口外懒加载
+        sizes="(min-width: 1024px) 25vw, (min-width: 640px) 33vw, 50vw"
+        alt={product.name}
+      />
+      <h3>{product.name}</h3>
+      <p>{product.price}</p>
+    </div>
+  )
+}
+```
+
+详见 [响应式图片](/performance/image-responsive) / [图片懒加载](/performance/image-lazy)。
+
+### 商品列表
+
+100+ 商品时虚拟化：
+
+```tsx
+'use client'
+import { Virtuoso } from 'react-virtuoso'
+
+export function ProductList({ products }) {
+  return (
+    <Virtuoso
+      style={{ height: '100vh' }}
+      data={products}
+      itemContent={(_, p) => <ProductCard product={p} />}
+      useWindowScroll                       // 整页滚动而非容器滚动
+    />
+  )
+}
+```
+
+> 商品图通常带 lazy load + 虚拟化是双层防护——视口外的图既不加载也不渲染。
+
+### 第三方脚本
+
+```tsx
+import Script from 'next/script'
+
+<Script src="/analytics.js" strategy="afterInteractive" />
+<Script src="/ads.js" strategy="lazyOnload" />
+<Script src="/chat-widget.js" strategy="lazyOnload" />
+```
+
+或用 [Partytown](https://partytown.builder.io/)：
+
+```jsx
+// 把第三方脚本搬到 Web Worker
+<Script src="/gtag.js" strategy="worker" />
+```
+
+详见 [JavaScript 优化 § 第三方脚本](/performance/javascript#第三方脚本性能)。
+
+### 监控要点
+
+- 主图片 LCP 元素是否被正确识别（DevTools Performance 看 LCP element）
+- 商品列表滚动时 FPS（DevTools Performance 录制滚动）
+- 第三方脚本占用主线程时间（Performance 火焰图查找 longtasks）
+- CDN 命中率（Vercel/CDN 仪表盘）
+
+---
+
+## 场景 2：社交 Feed 流
+
+### 业务特征
+
+- 无限滚动（向下滚动加载更多）
+- 帖子内容多样（文本、图、视频、嵌入卡片）
+- 实时性（新帖子、点赞数变化）
+- 移动端使用占主导
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| 内容动态高度（图片、视频、长短文本） | 虚拟化变高 |
+| 视频自动播放（如 TikTok / Twitter Feed） | 流量 + 内存 |
+| 实时更新（新帖、点赞） | UI 频繁刷新 |
+| 列表无限增长（用户可能滚一千项） | 内存爆炸 |
+
+### 关键指标目标
+
+```text
+首屏 LCP   ≤ 2.0 s
+INP         ≤ 200 ms
+滚动 FPS    ≥ 50（P75）
+长会话内存  增长 < 50 MB / 1000 帖子
+```
+
+### 推荐方案：虚拟化 + 数据分页 + IntersectionObserver 视频
+
+```tsx
+'use client'
+import { useInfiniteQuery } from '@tanstack/react-query'
+import { Virtuoso } from 'react-virtuoso'
+
+function Feed() {
+  const { data, fetchNextPage, hasNextPage } = useInfiniteQuery({
+    queryKey: ['feed'],
+    queryFn: ({ pageParam = 0 }) => fetch(`/api/feed?cursor=${pageParam}`).then(r => r.json()),
+    getNextPageParam: (last) => last.nextCursor,
+    initialPageParam: 0
+  })
+
+  const posts = data?.pages.flatMap(p => p.items) ?? []
+
+  return (
+    <Virtuoso
+      style={{ height: '100vh' }}
+      data={posts}
+      endReached={hasNextPage ? fetchNextPage : undefined}
+      itemContent={(_, post) => <PostCard post={post} />}
+      components={{
+        Footer: () => hasNextPage ? <LoadingSpinner /> : null
+      }}
+    />
+  )
+}
+```
+
+### 视频自动播放
+
+```tsx
+function VideoPost({ src }) {
+  const ref = useRef()
+
+  useEffect(() => {
+    const io = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        ref.current.play().catch(() => {})
+      } else {
+        ref.current.pause()
+        // 卸载视频源以释放内存（高级优化）
+        ref.current.removeAttribute('src')
+        ref.current.load()
+      }
+    }, { threshold: 0.5 })
+
+    io.observe(ref.current)
+    return () => io.disconnect()
+  }, [])
+
+  return <video ref={ref} src={src} muted loop playsInline />
+}
+```
+
+视口外视频自动暂停 + 释放视频源——避免 100 个视频同时占用 GPU 内存。
+
+### 实时更新
+
+```tsx
+'use client'
+import { useQueryClient } from '@tanstack/react-query'
+
+function useRealtimeFeed() {
+  const qc = useQueryClient()
+  useEffect(() => {
+    const ws = new WebSocket('wss://api.example.com/feed/live')
+    ws.onmessage = (e) => {
+      const event = JSON.parse(e.data)
+      if (event.type === 'new-post') {
+        qc.setQueryData(['feed'], (old) => ({
+          ...old,
+          pages: [{
+            items: [event.post, ...old.pages[0].items],
+            nextCursor: old.pages[0].nextCursor
+          }, ...old.pages.slice(1)]
+        }))
+      } else if (event.type === 'like-update') {
+        qc.setQueryData(['post', event.postId], (old) => ({
+          ...old,
+          likes: event.likes
+        }))
+      }
+    }
+    return () => ws.close()
+  }, [qc])
+}
+```
+
+### 内存控制
+
+长会话滚 1000 帖子时内存可能爆炸——保持只缓存最近 N 个：
+
+```tsx
+// 限制 query cache 中的页面数
+const { data } = useInfiniteQuery({
+  queryKey: ['feed'],
+  queryFn,
+  maxPages: 10              // 只保留最近 10 页
+})
+```
+
+或自定义滚动回顶时清理：
+
+```tsx
+useEffect(() => {
+  if (scrollY < 100 && posts.length > 200) {
+    qc.setQueryData(['feed'], (old) => ({
+      ...old,
+      pages: old.pages.slice(0, 5)
+    }))
+  }
+}, [scrollY])
+```
+
+### 监控要点
+
+- 滚动 FPS（DevTools Performance 录制滚动 30 秒）
+- 长会话内存曲线（Performance + Memory 录 5 分钟操作）
+- WebSocket 重连频率（业务日志）
+- 视频内存占用（chrome://media-internals）
+
+---
+
+## 场景 3：后台管理 Dashboard
+
+### 业务特征
+
+- 大量图表（10-30 个）
+- 复杂表格（10000+ 行）
+- 多筛选条件
+- 大表单（编辑、配置）
+- 用户网络好（公司内网 / WiFi）
+- 无 SEO 需求
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| Bundle 巨大（图表库 / 表格库 / 编辑器） | 首次加载慢 |
+| 频繁筛选导致全表重渲染 | 操作卡顿 |
+| 多面板 / 多 Tab | 状态管理复杂 |
+| 大表单（100+ 字段） | 输入卡顿 |
+
+### 关键指标目标
+
+```text
+首次加载       ≤ 5 s（公司内网）
+路由切换       ≤ 300 ms
+筛选响应       ≤ 200 ms（INP）
+10000 行滚动   ≥ 50 FPS
+```
+
+### 推荐方案：CSR + 路由分割 + 虚拟化 + react-hook-form
+
+由于无 SEO 需求，**CSR 是合理选择**——避免 SSR 的复杂度：
+
+```tsx
+// 路由级分割
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Reports = lazy(() => import('./pages/Reports'))
+const Users = lazy(() => import('./pages/Users'))
+const Settings = lazy(() => import('./pages/Settings'))
+
+function App() {
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/reports" element={<Reports />} />
+        <Route path="/users" element={<Users />} />
+        <Route path="/settings" element={<Settings />} />
+      </Routes>
+    </Suspense>
+  )
+}
+```
+
+### 图表懒加载
+
+图表库（Chart.js / ECharts / Recharts）通常 100-300 KB——按需加载：
+
+```tsx
+const SalesChart = lazy(() => import('./charts/SalesChart'))
+
+function Dashboard() {
+  const [activeTab, setActiveTab] = useState('overview')
+
+  return (
+    <Tabs value={activeTab} onValueChange={setActiveTab}>
+      <TabsContent value="overview">
+        <Suspense fallback={<ChartSkeleton />}>
+          <SalesChart />
+        </Suspense>
+      </TabsContent>
+      {/* ... */}
+    </Tabs>
+  )
+}
+```
+
+只在用户进入对应 Tab 时才下载图表代码。
+
+### 大表格
+
+```tsx
+import { useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel } from '@tanstack/react-table'
+import { useVirtualizer } from '@tanstack/react-virtual'
+
+function UsersTable({ data }) {
+  const [sorting, setSorting] = useState([])
+  const [filter, setFilter] = useState('')
+  const deferredFilter = useDeferredValue(filter)        // 输入流畅
+
+  const table = useReactTable({
+    data,
+    columns: USER_COLUMNS,
+    state: { sorting, globalFilter: deferredFilter },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel()
+  })
+
+  const parentRef = useRef()
+  const virtualizer = useVirtualizer({
+    count: table.getRowModel().rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 48,
+    overscan: 10
+  })
+
+  return (
+    <>
+      <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Search..." />
+      <div ref={parentRef} style={{ height: 600, overflow: 'auto' }}>
+        <VirtualTable table={table} virtualizer={virtualizer} />
+      </div>
+    </>
+  )
+}
+```
+
+`useDeferredValue` 让搜索输入永远顺滑，结果"赶上来"。详见 [并发特性](/performance/react/concurrent) / [列表虚拟化](/performance/react/virtualization)。
+
+### 大表单
+
+```tsx
+import { useForm, FormProvider } from 'react-hook-form'
+
+function SettingsForm() {
+  const methods = useForm({ defaultValues: existing })
+
+  return (
+    <FormProvider {...methods}>
+      <form onSubmit={methods.handleSubmit(onSave)}>
+        <Section title="Profile">
+          <Field name="firstName" />
+          <Field name="lastName" />
+          <Field name="email" />
+        </Section>
+        <Section title="Preferences">
+          {/* ... 50 个字段 ... */}
+        </Section>
+        <button>Save</button>
+      </form>
+    </FormProvider>
+  )
+}
+
+function Field({ name }) {
+  const { register, formState: { errors } } = useFormContext()
+  return (
+    <>
+      <input {...register(name)} />
+      {errors[name] && <p>{errors[name].message}</p>}
+    </>
+  )
+}
+```
+
+`react-hook-form` 实现"零渲染输入"——输入 100 字符也几乎不重渲染。详见 [动画与表单](/performance/react/animations-forms)。
+
+### 状态管理
+
+Dashboard 通常有大量"跨页面共享状态"（当前组织、筛选条件、用户偏好）：
+
+```tsx
+// 服务器状态：TanStack Query
+const { data: users } = useQuery({ queryKey: ['users'], queryFn: fetchUsers })
+
+// 客户端 UI 状态：Zustand
+const useStore = create((set) => ({
+  selectedOrgId: null,
+  filters: {},
+  setOrg: (id) => set({ selectedOrgId: id }),
+  setFilter: (k, v) => set(s => ({ filters: { ...s.filters, [k]: v } }))
+}))
+
+// URL 状态：useSearchParams
+const [params, setParams] = useSearchParams()
+const page = +params.get('page') || 1
+```
+
+详见 [状态拆分与 Context](/performance/react/state)。
+
+### 监控要点
+
+- 各路由的初始 chunk 大小（visualizer）
+- 表格滚动 FPS
+- 表单输入延迟
+- 慢 API 调用
+
+---
+
+## 场景 4：富文本编辑器（CMS / 协同）
+
+### 业务特征
+
+- 实时输入响应（每字符）
+- 复杂富文本结构（嵌套块、内联样式）
+- 撤销 / 重做
+- 协同编辑（多人 OT/CRDT）
+- 大文档（10000+ 字）
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| 输入延迟（重渲染整个文档树） | 体验崩溃 |
+| 大文档（10MB JSON） | 内存 / 序列化慢 |
+| 协同冲突解决 | 复杂 |
+| 第三方编辑器 SDK 巨大 | bundle 沉重 |
+
+### 关键指标目标
+
+```text
+按键到字符出现   ≤ 50 ms
+文档加载         ≤ 1 s（10K 字）
+撤销响应         ≤ 100 ms
+首屏 LCP        ≤ 2 s
+```
+
+### 推荐方案
+
+#### 编辑器选型
+
+| 编辑器 | bundle | 特点 |
+| ------ | ------ | ---- |
+| Lexical（Meta） | ~ 70 KB | 现代、性能好、CRDT 友好 |
+| Tiptap（基于 ProseMirror） | ~ 100 KB | 功能丰富、生态强 |
+| Slate | ~ 80 KB | 灵活、需自己造轮子 |
+| Draft.js | ~ 60 KB | 已停止维护，不推荐 |
+
+**推荐 Lexical**——Meta（Facebook）出品，性能与扩展性最优。
+
+#### 输入响应优化
+
+```tsx
+import { LexicalComposer } from '@lexical/react/LexicalComposer'
+import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
+
+function Editor({ initialContent, onSave }) {
+  // 防抖保存
+  const debouncedSave = useMemo(
+    () => debounce((state) => onSave(state), 1000),
+    [onSave]
+  )
+
+  return (
+    <LexicalComposer
+      initialConfig={{
+        namespace: 'editor',
+        editorState: initialContent,
+        onError: console.error
+      }}
+    >
+      <RichTextPlugin
+        contentEditable={<ContentEditable />}
+        placeholder={<div>Start typing...</div>}
+        ErrorBoundary={LexicalErrorBoundary}
+      />
+      <OnChangePlugin onChange={(state) => {
+        debouncedSave(state.toJSON())
+      }} />
+    </LexicalComposer>
+  )
+}
+```
+
+### 大文档优化
+
+#### 视口可见块渲染
+
+```tsx
+// 假设文档有 1000 个段落
+// 用 IntersectionObserver 让视口外的段落渲染为占位
+function Paragraph({ block }) {
+  const ref = useRef()
+  const [inView, setInView] = useState(true)   // 首屏假定可见
+
+  useEffect(() => {
+    const io = new IntersectionObserver(
+      ([entry]) => setInView(entry.isIntersecting),
+      { rootMargin: '500px' }                  // 视口外 500px 仍渲染
+    )
+    io.observe(ref.current)
+    return () => io.disconnect()
+  }, [])
+
+  return (
+    <div ref={ref} style={{ minHeight: 24 }}>
+      {inView ? renderBlock(block) : null}
+    </div>
+  )
+}
+```
+
+注意：编辑器场景的虚拟化复杂——选区 / 复制粘贴 / 搜索都依赖完整 DOM。**大多数项目不需要做到这个程度**——10000+ 字的真实文档单文档场景已经很少。
+
+### 协同编辑
+
+```tsx
+import { useY } from 'react-yjs'
+import * as Y from 'yjs'
+import { WebsocketProvider } from 'y-websocket'
+
+function CollabEditor({ docId }) {
+  const ydoc = useMemo(() => new Y.Doc(), [])
+  const provider = useMemo(
+    () => new WebsocketProvider('wss://yjs.example.com', docId, ydoc),
+    [docId, ydoc]
+  )
+
+  // Lexical / Tiptap 都有 Yjs 集成
+  return <LexicalEditor ydoc={ydoc} provider={provider} />
+}
+```
+
+[Yjs](https://yjs.dev/) 是最流行的 CRDT 库——配合 [y-websocket](https://github.com/yjs/y-websocket) 几行代码就能实现 Google Docs 级协同。
+
+### 编辑器懒加载
+
+编辑器 chunk 通常 100-300 KB——首屏不一定需要：
+
+```tsx
+const Editor = lazy(() => import('./Editor'))
+
+function PostPage({ post }) {
+  const [editing, setEditing] = useState(false)
+
+  return (
+    <>
+      <article>{renderHTML(post.content)}</article>
+      {editing ? (
+        <Suspense fallback={<EditorSkeleton />}>
+          <Editor initialContent={post.content} />
+        </Suspense>
+      ) : (
+        <button onClick={() => setEditing(true)}>Edit</button>
+      )}
+    </>
+  )
+}
+```
+
+或预加载（用户 hover Edit 按钮时）：
+
+```tsx
+<button
+  onMouseEnter={() => import('./Editor')}
+  onClick={() => setEditing(true)}
+>Edit</button>
+```
+
+### 监控要点
+
+- 输入延迟（INP）
+- 文档加载时间
+- 协同延迟（OT/CRDT 应用时间）
+- 编辑器内存占用
+
+---
+
+## 场景 5：实时数据展示（监控 / 看板 / 直播）
+
+### 业务特征
+
+- 高频数据更新（每秒甚至每 100ms）
+- 多个数据源同时更新
+- 趋势图、实时计数、动态列表
+- 长会话使用（保持开几小时）
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| 高频 setState 引发频繁渲染 | 主线程被吃光 |
+| 长会话内存累积 | OOM 风险 |
+| WebSocket 多连接 | 浏览器连接限制 |
+| 图表持续重绘 | GPU 负担 |
+
+### 关键指标目标
+
+```text
+更新到 UI 反映  ≤ 100 ms
+帧率           ≥ 50 FPS
+长会话内存增长  < 100 MB / hour
+```
+
+### 推荐方案：批处理 + 节流 + 增量渲染
+
+#### 高频更新批处理
+
+```tsx
+// ❌ 每条消息触发一次 setState
+ws.onmessage = (e) => {
+  setMessages(prev => [...prev, JSON.parse(e.data)])
+}
+
+// ✅ 批量积累 + rAF 刷新
+function useBatchedMessages() {
+  const [messages, setMessages] = useState([])
+  const buffer = useRef([])
+  const rafId = useRef(null)
+
+  function add(msg) {
+    buffer.current.push(msg)
+    if (rafId.current === null) {
+      rafId.current = requestAnimationFrame(() => {
+        setMessages(prev => [...prev, ...buffer.current])
+        buffer.current = []
+        rafId.current = null
+      })
+    }
+  }
+
+  return [messages, add]
+}
+```
+
+每帧最多刷新一次——即使每秒 10000 条消息，也只渲染 60 次。
+
+#### 节流图表更新
+
+```tsx
+function LiveChart({ wsUrl }) {
+  const [data, setData] = useState([])
+  const buffer = useRef([])
+
+  useEffect(() => {
+    const ws = new WebSocket(wsUrl)
+    ws.onmessage = (e) => {
+      buffer.current.push(JSON.parse(e.data))
+    }
+
+    // 100 ms 一次刷新（每秒 10 帧）
+    const interval = setInterval(() => {
+      if (buffer.current.length > 0) {
+        setData(prev => [...prev.slice(-100), ...buffer.current])  // 滑窗
+        buffer.current = []
+      }
+    }, 100)
+
+    return () => {
+      ws.close()
+      clearInterval(interval)
+    }
+  }, [wsUrl])
+
+  return <Chart data={data} />
+}
+```
+
+`prev.slice(-100)`——只保留最近 100 条数据，防止内存无限增长。
+
+#### Canvas / WebGL
+
+100+ 数据点的动态图表，**Canvas 比 SVG 性能高 5-10 倍**：
+
+| 库 | 渲染层 | 适用 |
+| -- | ------ | ---- |
+| Recharts | SVG | < 100 点 |
+| Chart.js | Canvas | < 1000 点 |
+| ECharts | Canvas | 通用 |
+| visx + d3-canvas | Canvas | 自定义 |
+| regl / Three.js | WebGL | 10000+ 点 / 3D |
+
+#### 看板布局：每个 Widget 独立
+
+```tsx
+function Dashboard({ widgets }) {
+  return (
+    <div className="grid grid-cols-3 gap-4">
+      {widgets.map(w => (
+        <Widget key={w.id} config={w} />     // 每个 Widget 自管 WebSocket
+      ))}
+    </div>
+  )
+}
+
+// memo 让 widget 间互不影响
+const Widget = React.memo(function Widget({ config }) {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    const sub = subscribeToData(config.dataSource, setData)
+    return () => sub.close()
+  }, [config.dataSource])
+
+  return <ChartView data={data} type={config.type} />
+})
+```
+
+### 内存防护
+
+长会话定时清理：
+
+```tsx
+useEffect(() => {
+  const cleanup = setInterval(() => {
+    // 清理过期数据
+    setData(prev => prev.slice(-1000))
+
+    // 强制 GC（仅 Chrome devtools 启动时可用）
+    if (window.gc) window.gc()
+  }, 60_000)
+
+  return () => clearInterval(cleanup)
+}, [])
+```
+
+### 监控要点
+
+- WebSocket 连接稳定性
+- 长会话内存曲线（Memory 面板）
+- 主线程长任务密度
+- 帧率（rAF 监控脚本）
+
+---
+
+## 场景 6：移动端 Web App
+
+### 业务特征
+
+- 慢网络（3G / 4G）
+- 低端设备（中低端 Android）
+- 小屏幕（375-414 px）
+- 触摸交互（手势、滚动）
+- 可能离线使用
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| 慢 CPU + 慢网络 | 一切都慢 |
+| 小 bundle 预算 | 100 KB JS 可能要 5 秒 |
+| 触摸响应严苛 | INP > 200 ms 极明显 |
+| 内存有限 | 易崩溃 |
+
+### 关键指标目标
+
+```text
+LCP   ≤ 2.5 s（4G）
+INP   ≤ 200 ms
+JS bundle（gzip） ≤ 150 KB
+首次解析时间 ≤ 1.5 s
+```
+
+### 推荐方案：极简 + SSG/ISR + Service Worker + 渐进增强
+
+#### Bundle 控制
+
+```text
+首屏关键 chunk：
+  - React + ReactDOM    ~ 45 KB
+  - 路由库              ~ 5 KB
+  - 应用逻辑（首屏）     ~ 50 KB
+  ─────────────────────
+  合计 < 100 KB（gzip）
+
+非首屏：lazy 拆分
+```
+
+详见 [JavaScript 优化](/performance/javascript) / [依赖管理](/performance/dependencies)。
+
+#### Service Worker 离线优先
+
+```tsx
+// 注册
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js')
+}
+```
+
+```js
+// sw.js（用 Workbox 简化）
+import { registerRoute } from 'workbox-routing'
+import { CacheFirst, StaleWhileRevalidate } from 'workbox-strategies'
+
+// 静态资源缓存优先
+registerRoute(
+  ({ request }) => ['style', 'script', 'font'].includes(request.destination),
+  new CacheFirst({ cacheName: 'static' })
+)
+
+// API SWR
+registerRoute(
+  ({ url }) => url.pathname.startsWith('/api/'),
+  new StaleWhileRevalidate({ cacheName: 'api' })
+)
+
+// 图片缓存优先 + 容量限制
+registerRoute(
+  ({ request }) => request.destination === 'image',
+  new CacheFirst({
+    cacheName: 'images',
+    plugins: [new ExpirationPlugin({ maxEntries: 60, maxAgeSeconds: 30 * 86400 })]
+  })
+)
+```
+
+详见 [缓存策略](/performance/caching)。
+
+#### 触摸响应优化
+
+```tsx
+// passive listener 防止滚动卡顿
+useEffect(() => {
+  const handler = () => {/* ... */}
+  window.addEventListener('touchstart', handler, { passive: true })
+  return () => window.removeEventListener('touchstart', handler)
+}, [])
+
+// 用 transform 实现下拉刷新
+<div style={{ transform: `translateY(${pullDistance}px)` }}>
+  <List />
+</div>
+```
+
+#### 字体优化
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter-subset.woff2') format('woff2');
+  font-display: swap;
+  unicode-range: U+0000-00FF;     /* 仅基础拉丁 */
+}
+```
+
+详见 [字体优化](/performance/fonts)。
+
+#### Skeleton 占位与 perceived performance
+
+```tsx
+function HomePage() {
+  return (
+    <Suspense fallback={<HomeSkeleton />}>
+      <HomeContent />
+    </Suspense>
+  )
+}
+
+function HomeSkeleton() {
+  return (
+    <div className="space-y-4 animate-pulse">
+      <div className="h-48 bg-gray-200 rounded" />
+      <div className="h-6 bg-gray-200 rounded w-3/4" />
+      <div className="h-6 bg-gray-200 rounded w-1/2" />
+    </div>
+  )
+}
+```
+
+用户从 0.5 秒就看到"页面框架"——感知速度比实际更快。
+
+### PWA 加分
+
+```ts
+// manifest.json
+{
+  "name": "MyApp",
+  "short_name": "MyApp",
+  "icons": [...],
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fff",
+  "theme_color": "#000"
+}
+```
+
+让用户可以"添加到主屏"——下次打开几乎瞬开。
+
+### 监控要点
+
+- CrUX P75 移动数据（PSI 显示）
+- 弱网用户体验（Lighthouse Slow 4G 测试）
+- bundle size 趋势（CI 拦截）
+- 离线场景验证
+
+---
+
+## 场景 7：高并发后台（多步表单 / 多 Tab / 多面板）
+
+### 业务特征
+
+- 多步表单（如订单、申报）
+- 多 Tab 同时编辑
+- 用户可能开多个浏览器标签页
+- 数据需要持久化（防止丢失）
+
+### 核心挑战
+
+| 挑战 | 影响 |
+| ---- | ---- |
+| 多步表单状态管理 | 复杂度高 |
+| 跨标签页同步 | 数据冲突 |
+| 大表单性能 | 输入卡 |
+| 提交前丢失 | 用户体验灾难 |
+
+### 推荐方案：react-hook-form + Zustand + BroadcastChannel
+
+#### 多步表单
+
+```tsx
+function MultiStepForm() {
+  const [step, setStep] = useState(1)
+  const methods = useForm({ defaultValues: loadFromStorage() })
+
+  // 自动保存到 localStorage
+  useEffect(() => {
+    const sub = methods.watch((values) => {
+      localStorage.setItem('form-draft', JSON.stringify(values))
+    })
+    return () => sub.unsubscribe()
+  }, [methods])
+
+  return (
+    <FormProvider {...methods}>
+      <ProgressBar current={step} total={4} />
+
+      {step === 1 && <Step1 onNext={() => setStep(2)} />}
+      {step === 2 && <Step2 onNext={() => setStep(3)} onBack={() => setStep(1)} />}
+      {step === 3 && <Step3 onNext={() => setStep(4)} onBack={() => setStep(2)} />}
+      {step === 4 && <Review onSubmit={methods.handleSubmit(onSubmit)} />}
+    </FormProvider>
+  )
+}
+```
+
+切换步骤时只渲染当前步骤——其它步骤不在 DOM。
+
+#### 跨标签页同步
+
+```tsx
+// 用 BroadcastChannel 同步多个标签
+useEffect(() => {
+  const channel = new BroadcastChannel('app-state')
+  channel.onmessage = (e) => {
+    if (e.data.type === 'form-update') {
+      methods.reset(e.data.payload)
+    }
+  }
+
+  const sub = methods.watch((values) => {
+    channel.postMessage({ type: 'form-update', payload: values })
+  })
+
+  return () => {
+    sub.unsubscribe()
+    channel.close()
+  }
+}, [methods])
+```
+
+或用 Zustand + `persist` 中间件 + storage 同步：
+
+```tsx
+import { create } from 'zustand'
+import { persist, createJSONStorage } from 'zustand/middleware'
+
+const useStore = create(persist(
+  (set) => ({
+    formData: {},
+    setFormData: (data) => set({ formData: data })
+  }),
+  {
+    name: 'app-storage',
+    storage: createJSONStorage(() => localStorage)
+  }
+))
+```
+
+storage 事件自动跨标签页同步。
+
+#### 离开提示
+
+```tsx
+useEffect(() => {
+  function handler(e) {
+    if (methods.formState.isDirty) {
+      e.preventDefault()
+      e.returnValue = ''        // 触发"确定离开吗？"
+    }
+  }
+  window.addEventListener('beforeunload', handler)
+  return () => window.removeEventListener('beforeunload', handler)
+}, [methods.formState.isDirty])
+```
+
+### 监控要点
+
+- 表单输入延迟
+- 草稿保存频率
+- 跨标签页同步延迟
+- 提交失败回滚正确性
+
+---
+
+## 通用优化清单
+
+无论什么场景，以下是 React 应用的"性能基本面"——上线前应过一遍：
+
+```text
+✅ 测量基线
+  □ 接入 web-vitals → 上报 P75 LCP / INP / CLS
+  □ Lighthouse CI 在 PR 中拦截回归
+
+✅ 网络层
+  □ 启用 HTTP/2 + Brotli + HTTPs
+  □ CDN + 静态资源指纹化
+  □ Hash 文件 immutable 缓存
+
+✅ 关键资源
+  □ LCP 元素 preload + fetchpriority="high"
+  □ 字体 preload + crossorigin
+  □ Critical CSS 内联（如适用）
+
+✅ JS Bundle
+  □ visualizer 检查构成
+  □ size-limit CI 拦截
+  □ 路由级代码分割
+  □ 检查 Tree Shaking 是否生效（无大头依赖）
+
+✅ React 渲染
+  □ 启用 React Compiler（React 19+）或手动 memo 关键路径
+  □ 状态在最低必要层级
+  □ Context 拆分（值 / setter）
+  □ 列表 500+ 用虚拟化
+
+✅ 图片
+  □ 用 next/image 或 NuxtImg 等
+  □ AVIF / WebP fallback
+  □ 显式 width/height 防 CLS
+  □ LCP 图 priority
+
+✅ 字体
+  □ WOFF2 + font-display: swap
+  □ 子集化（中文必要）
+  □ fallback size-adjust 防 CLS
+
+✅ 第三方脚本
+  □ 必要：async/defer
+  □ 重型：Partytown 搬到 Worker
+  □ 评估必要性
+
+✅ 离线 / PWA（移动端）
+  □ Service Worker 缓存策略
+  □ Manifest
+
+✅ 监控
+  □ web-vitals + Sentry
+  □ 慢请求 / 慢渲染上报
+  □ 错误边界 + 降级
+```
+
+## 小结
+
+- 电商首页：PPR + ISR + 流式 SSR，hero 图 priority + 列表虚拟化 + 图片 lazy；
+- Feed 流：useInfiniteQuery + 虚拟化 + IntersectionObserver 控制视频生命周期 + maxPages 防内存；
+- Dashboard：CSR + 路由分割 + 图表 lazy + 虚拟化大表 + react-hook-form 大表单；
+- 富文本编辑器：Lexical + Yjs 协同 + 编辑器懒加载 + 防抖保存；
+- 实时数据：rAF 批处理 + 滑窗数据 + Canvas/WebGL + 长会话定期清理；
+- 移动端：极小 bundle + Service Worker 离线 + Skeleton + PWA + passive listener；
+- 多步表单：react-hook-form + 自动草稿 + BroadcastChannel 跨标签同步；
+- 通用清单的 30+ 条是任何 React 项目上线前都应过的"性能基本面"。

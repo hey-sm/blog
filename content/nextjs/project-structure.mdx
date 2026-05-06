@@ -1,0 +1,225 @@
+---
+title: 项目结构
+description: "Next.js 16 App Router 的文件约定、src/ vs 根目录、私有文件夹、@ 别名与模块路径"
+---
+
+# 项目结构
+
+Next.js 通过**文件约定**把目录结构映射为路由和应用行为。理解这些约定是高效开发的前提。
+
+## 顶层目录结构
+
+```text
+my-app/
+├── app/                         # 🔴 App Router 路由与应用代码
+├── public/                      # 静态资源，原样映射到 /
+├── src/                         # (可选) 包含 app/ 的源目录
+├── next.config.ts               # Next.js 配置
+├── package.json
+├── tsconfig.json
+└── .env / .env.local / ...     # 环境变量
+```
+
+### `src/` vs 根目录
+
+Next.js 支持两种方式：
+
+```text
+# 方式一：app/ 在根目录
+my-app/
+└── app/
+    └── page.tsx
+
+# 方式二：app/ 在 src/ 下（推荐）
+my-app/
+└── src/
+    └── app/
+        └── page.tsx
+```
+
+两种方式功能完全等价。`src/` 方式能更清晰地分离应用代码与配置文件，**且 `src/` 下的应用代码可以被其他构建工具忽略**。
+
+## `app/` 目录内部约定
+
+```text
+app/
+├── layout.tsx              # 布局（嵌套，对子路由生效）
+├── template.tsx            # 模板（每次导航都重新挂载）
+├── page.tsx                # 页面（路由的终端节点）
+├── loading.tsx             # Suspense 加载 UI
+├── error.tsx               # 错误边界 UI
+├── global-error.tsx         # 根级错误边界
+├── not-found.tsx           # 404 页面
+├── route.ts                # Route Handler（API 端点）
+├── default.tsx             # 并行路由的默认回退
+│
+├── (marketing)/            # 路由组（不影响 URL 路径）
+│   ├── layout.tsx
+│   └── page.tsx
+│
+├── blog/
+│   ├── [slug]/             # 动态段
+│   │   └── page.tsx
+│   └── [...catchAll]/      # Catch-all 段
+│       └── page.tsx
+│
+├── @modal/                 # 并行路由 slot
+│   └── default.tsx
+│
+└── api/                    # API 路由
+    └── posts/
+        └── route.ts
+```
+
+## 文件约定速查表
+
+| 文件名 | 作用 | 必需？ |
+| ------ | ---- | ------ |
+| `layout.tsx` | 共享布局，导航时保持状态 | 根 `layout` 必需 |
+| `template.tsx` | 类似 layout，但每次导航都重新挂载 | 否 |
+| `page.tsx` | 路由页面，路由树终端节点 | 是（每个路由） |
+| `loading.tsx` | Suspense 回退 UI | 否 |
+| `error.tsx` | 错误边界（捕获 `page` + 子组件错误） | 否 |
+| `global-error.tsx` | 根错误边界（捕获 `layout` 错误） | 否 |
+| `not-found.tsx` | `notFound()` 调用的渲染结果 | 否 |
+| `default.tsx` | 并行路由的后备页面 | 并行路由需要 |
+| `route.ts` | Route Handler（REST API 端点） | 否 |
+
+## 私有文件夹
+
+以 `_` 开头的文件和文件夹**不会被注册为路由**：
+
+```text
+app/
+├── _components/            # 私有：不暴露为路由
+│   ├── Button.tsx
+│   └── Card.tsx
+├── _lib/                   # 私有：工具函数、数据层
+│   ├── db.ts
+│   └── utils.ts
+└── page.tsx                # 公开：路由 /
+```
+
+也可以使用**文件夹分组**（Next.js 16+）：
+
+```text
+app/
+└── (components)/           # 带 () 的文件夹自动为私有
+    └── Header.tsx          # 不作为路由
+```
+
+## 路径别名
+
+`tsconfig.json` 默认配置了 `@/*` 别名：
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+```
+
+```tsx
+import { Button } from '@/components/Button'
+import { db } from '@/lib/db'
+```
+
+也可以自定义更多别名：
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ui/*": ["./src/components/ui/*"],
+      "@lib/*": ["./src/lib/*"]
+    }
+  }
+}
+```
+
+## 推荐的完整项目结构
+
+```text
+src/
+├── app/                        # Next.js App Router
+│   ├── (marketing)/            # 路由组：营销页面
+│   │   ├── page.tsx            # /
+│   │   └── layout.tsx
+│   ├── (dashboard)/            # 路由组：后台
+│   │   ├── layout.tsx
+│   │   └── posts/
+│   │       ├── [id]/
+│   │       │   └── page.tsx    # /posts/:id
+│   │       └── page.tsx        # /posts
+│   ├── api/
+│   │   └── webhooks/
+│   │       └── route.ts        # /api/webhooks
+│   ├── layout.tsx              # 根布局
+│   ├── loading.tsx
+│   ├── error.tsx
+│   ├── not-found.tsx
+│   └── globals.css
+├── components/                 # 共享 UI 组件
+│   ├── ui/                     # 基础 UI（Button, Input…）
+│   ├── features/               # 功能复合组件
+│   └── layouts/                # 布局组件
+├── lib/                        # 工具、数据层
+│   ├── db.ts                   # 数据库客户端
+│   ├── auth.ts                 # 认证配置
+│   └── utils.ts
+├── hooks/                      # 自定义 Hooks
+├── styles/                     # 额外样式
+├── types/                      # 共享类型
+└── middleware.ts               # Next.js Middleware
+public/
+├── images/
+├── fonts/
+└── robots.txt
+next.config.ts
+```
+
+## 陷阱
+
+### Colocation 的误区
+
+把页面私有组件放在 `app/` 目录下可以，但以 `_` 开头或放在 `(group)` 中：
+
+```text
+app/
+├── posts/
+│   ├── _components/         # ✓ 私有
+│   │   └── PostCard.tsx
+│   ├── (components)/        # ✓ 私有（Next.js 16+）
+│   │   └── PostForm.tsx
+│   └── page.tsx
+```
+
+直接放不放 `_` 前缀的 `components/` 文件夹会被当作路由处理——`/posts/components` 会 404 或显示错误。
+
+### `src/` 中的 `middleware.ts`
+
+`middleware.ts` **必须放在项目根目录或 `src/`**，不能放在 `app/` 内：
+
+```text
+# ✓
+src/middleware.ts
+middleware.ts       # 如果不用 src/
+
+# ✗
+src/app/middleware.ts
+```
+
+### `public/` 内容直接映射
+
+`public/image.png` → `example.com/image.png`。没有命名空间，目录层级完全暴露。
+
+## 小结
+
+- `app/` 中的文件遵守严格的命名约定，文件名即行为；
+- 以 `_` 开头的文件和文件夹是私有的，不参与路由；
+- `src/` 可包裹 `app/`，功能等价；`public/` 存放原样输出的静态资源；
+- `middleware.ts` 必须在项目顶层或 `src/`，不在 `app/` 内。

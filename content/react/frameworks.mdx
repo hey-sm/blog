@@ -1,0 +1,531 @@
+---
+title: 框架
+description: Next.js（App Router）、Astro 与全栈 React 框架的选型实践
+---
+
+# 框架
+
+React 团队官方将"全栈框架"定位为新项目的**首选起点**。框架补齐 React 缺失的：
+
+- 文件系统约定的路由
+- 服务端渲染（SSR）/ 静态生成（SSG）/ 流式渲染
+- 数据获取与缓存
+- 表单 / Actions
+- 部署与 Edge runtime
+
+主流候选：
+
+| 框架 | 心智模型 | 适合 |
+| ---- | -------- | ---- |
+| **Next.js** | App Router + RSC + Server Actions | 通用全栈、SaaS、电商、博客 |
+| **Remix / React Router v7 framework mode** | Web 标准 + 路由 loader / action | 表单密集、HTML 优先 |
+| **Astro** | 内容主导 + 岛屿架构 | 文档、博客、营销页 |
+| **TanStack Start** | 类型安全极致 + RSC | 类型纯粹主义 |
+| **Waku** | 极简 RSC | 学习 RSC 原理 |
+
+本章 Next.js 占主篇幅（图中明确指出）；其余按选型场景简介。
+
+## Next.js App Router
+
+### 安装与项目结构
+
+```bash
+pnpm create next-app@latest my-app
+```
+
+```text
+my-app/
+├── app/                          # App Router 根目录
+│   ├── layout.tsx                # 根布局
+│   ├── page.tsx                  # /
+│   ├── about/
+│   │   └── page.tsx              # /about
+│   ├── posts/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx              # /posts
+│   │   └── [id]/
+│   │       └── page.tsx          # /posts/:id
+│   ├── api/
+│   │   └── users/
+│   │       └── route.ts          # API 路由
+│   └── (marketing)/              # 路由分组（不出现在 URL）
+│       └── pricing/
+│           └── page.tsx          # /pricing
+├── public/
+├── next.config.ts
+└── package.json
+```
+
+### 文件约定
+
+App Router 中每个目录代表一个 URL 段，目录下的文件按约定承担不同角色：
+
+| 文件 | 作用 |
+| ---- | ---- |
+| `page.tsx` | 该路由的页面（必须） |
+| `layout.tsx` | 布局，包裹该路由及其子路由 |
+| `loading.tsx` | 加载态（自动包裹 `<Suspense>`） |
+| `error.tsx` | 错误边界（必须 'use client'） |
+| `not-found.tsx` | 404 页 |
+| `template.tsx` | 类似 layout 但每次导航都重建 |
+| `route.ts` | API 路由处理器 |
+
+### Server Component（默认）
+
+App Router 中**所有组件默认是 Server Component**：
+
+```tsx filename="app/posts/[id]/page.tsx"
+import { notFound } from 'next/navigation'
+
+export default async function PostPage({
+  params
+}: {
+  params: Promise<{ id: string }>
+}) {
+  const { id } = await params
+  const post = await db.posts.findUnique({ where: { id } })
+  if (!post) notFound()
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <div dangerouslySetInnerHTML={{ __html: post.html }} />
+    </article>
+  )
+}
+```
+
+特点：
+
+- `async` 函数直接 `await` 数据库 / API
+- 无客户端 JS 体积成本
+- API 凭据 / 数据库连接均隔离在服务端
+
+### Client Component
+
+需要交互、状态、effect 的组件标记 `'use client'`：
+
+```tsx filename="app/posts/[id]/LikeButton.tsx"
+'use client'
+
+import { useState } from 'react'
+
+export default function LikeButton({ initialLikes }: { initialLikes: number }) {
+  const [likes, setLikes] = useState(initialLikes)
+  return <button onClick={() => setLikes(l => l + 1)}>👍 {likes}</button>
+}
+```
+
+### 数据获取
+
+```tsx
+// 1. 直接 fetch（自动缓存与去重）
+async function getUser(id: string) {
+  const res = await fetch(`https://api.example.com/users/${id}`, {
+    next: { revalidate: 60 }                  // ISR：60 秒重新验证
+  })
+  return res.json()
+}
+
+// 2. 数据库
+import { db } from '@/lib/db'
+const posts = await db.posts.findMany()
+
+// 3. 与 React Server Component 的 use Hook
+import { use } from 'react'
+const data = use(myPromise)
+```
+
+#### 缓存配置
+
+```tsx
+fetch(url, { cache: 'no-store' })             // 不缓存（动态）
+fetch(url, { cache: 'force-cache' })          // 永久缓存（默认）
+fetch(url, { next: { revalidate: 60 } })      // ISR
+fetch(url, { next: { tags: ['posts'] } })     // 标签失效
+
+// 主动失效
+import { revalidateTag, revalidatePath } from 'next/cache'
+revalidateTag('posts')
+revalidatePath('/posts')
+```
+
+### Server Actions
+
+`'use server'` 声明在服务端运行的函数：
+
+```tsx filename="app/actions.ts"
+'use server'
+
+import { revalidatePath } from 'next/cache'
+import { redirect } from 'next/navigation'
+import { z } from 'zod'
+
+const PostSchema = z.object({
+  title: z.string().min(1),
+  body: z.string().min(1)
+})
+
+export async function createPost(formData: FormData) {
+  const parsed = PostSchema.safeParse(Object.fromEntries(formData))
+  if (!parsed.success) {
+    return { error: parsed.error.flatten().fieldErrors }
+  }
+  const post = await db.posts.create({ data: parsed.data })
+  revalidatePath('/posts')
+  redirect(`/posts/${post.id}`)
+}
+```
+
+```tsx filename="app/posts/new/page.tsx"
+import { createPost } from '@/app/actions'
+
+export default function NewPostPage() {
+  return (
+    <form action={createPost}>
+      <input name="title" />
+      <textarea name="body" />
+      <button type="submit">Publish</button>
+    </form>
+  )
+}
+```
+
+无需 API endpoint，无需 `useEffect` 调用 fetch——Server Action 直接被表单提交触发，结果通过 `revalidatePath` 同步。
+
+#### 配合 useActionState
+
+```tsx
+'use client'
+
+import { useActionState } from 'react'
+import { createPost } from '@/app/actions'
+
+export default function NewPostForm() {
+  const [state, formAction, isPending] = useActionState(createPost, { error: null })
+
+  return (
+    <form action={formAction}>
+      <input name="title" />
+      {state?.error?.title && <span>{state.error.title[0]}</span>}
+      <textarea name="body" />
+      {state?.error?.body && <span>{state.error.body[0]}</span>}
+      <button disabled={isPending}>
+        {isPending ? 'Publishing…' : 'Publish'}
+      </button>
+    </form>
+  )
+}
+```
+
+### API 路由
+
+App Router 通过 `route.ts` 文件提供 RESTful endpoint：
+
+```ts filename="app/api/users/[id]/route.ts"
+import { NextRequest } from 'next/server'
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const user = await db.user.findUnique({ where: { id } })
+  return Response.json(user)
+}
+
+export async function PATCH(req: NextRequest, { params }: ...) {
+  const data = await req.json()
+  const { id } = await params
+  const updated = await db.user.update({ where: { id }, data })
+  return Response.json(updated)
+}
+```
+
+随着 Server Actions 普及，纯 Web App 中 API 路由的需求大幅减少；它仍适合：
+
+- 第三方服务 webhook 接收
+- 给原生客户端 / 其他后端调用
+- 需要 GET 缓存的公共数据
+
+### 流式渲染
+
+```tsx filename="app/dashboard/page.tsx"
+import { Suspense } from 'react'
+
+export default function Dashboard() {
+  return (
+    <>
+      <Suspense fallback={<UserSkeleton />}>
+        <UserCard />                          {/* async server component */}
+      </Suspense>
+      <Suspense fallback={<StatsSkeleton />}>
+        <Stats />
+      </Suspense>
+    </>
+  )
+}
+```
+
+每个 `<Suspense>` 边界对应一个独立的 HTML 片段——服务端按数据可用顺序流式输出，浏览器边接收边渲染，TTFB 与 LCP 大幅优化。
+
+### 动态 vs 静态
+
+App Router 默认让路由**尽可能静态**——构建期生成 HTML。访问以下 API 自动转为动态：
+
+- `cookies()` / `headers()`
+- `searchParams` prop
+- `fetch(url, { cache: 'no-store' })`
+
+显式声明：
+
+```tsx
+export const dynamic = 'force-dynamic'         // 始终动态
+export const dynamic = 'force-static'          // 始终静态
+export const revalidate = 60                   // ISR 间隔（秒）
+```
+
+### Middleware
+
+请求级别的拦截（鉴权、AB 测试、重定向）：
+
+```ts filename="middleware.ts"
+import { NextRequest, NextResponse } from 'next/server'
+
+export function middleware(req: NextRequest) {
+  const token = req.cookies.get('token')
+  if (!token && req.nextUrl.pathname.startsWith('/dashboard')) {
+    return NextResponse.redirect(new URL('/login', req.url))
+  }
+}
+
+export const config = {
+  matcher: ['/dashboard/:path*']
+}
+```
+
+Middleware 运行在 Edge Runtime，启动极快，但不可用 Node.js 原生 API（fs、原生 SQL 客户端等）。
+
+### 元数据
+
+```tsx
+export const metadata = {
+  title: 'My App',
+  description: 'A great Next.js app',
+  openGraph: {
+    images: ['/og-image.png']
+  }
+}
+
+// 动态
+export async function generateMetadata({ params }: ...) {
+  const post = await getPost(params.id)
+  return { title: post.title }
+}
+```
+
+### 图像与字体
+
+```tsx
+import Image from 'next/image'
+import { Inter } from 'next/font/google'
+
+const inter = Inter({ subsets: ['latin'] })
+
+<Image src="/hero.jpg" alt="" width={1200} height={600} priority />
+```
+
+`next/image` 自动响应式 srcset、懒加载、AVIF / WebP；`next/font` 自托管 Google Fonts 避免 CLS。
+
+### Route Handlers vs Server Actions vs Client Fetch
+
+| 需求 | 推荐 |
+| ---- | ---- |
+| 表单提交 / 改写数据 | **Server Action** |
+| 第三方 webhook | API Route |
+| 原生客户端调用 | API Route |
+| 客户端组件取数据 | TanStack Query + Server Action 或 API Route |
+| 公共可缓存数据 | API Route + `cache: 'force-cache'` |
+
+### 部署
+
+Next.js 与 Vercel 同源——一键部署、CDN、Edge Functions、Image Optimization 全开箱即用。
+
+非 Vercel 部署：
+
+- **Cloudflare**：`@opennextjs/cloudflare`
+- **AWS**：`@opennextjs/aws`
+- **自托管**：`next start`（Node.js）或 standalone build
+
+### Next.js 的常见陷阱
+
+#### 1. Server / Client 边界混淆
+
+```tsx
+// ✗ Server Component 中使用 onClick
+export default function Page() {
+  return <button onClick={() => alert('hi')}>Click</button>
+  //              ^^^^^^^ 编译错误
+}
+
+// ✓ 拆出 Client Component
+'use client'
+export function ClickButton() {
+  return <button onClick={() => alert('hi')}>Click</button>
+}
+```
+
+#### 2. 在 Server Component 中误用浏览器 API
+
+```tsx
+// ✗
+export default function Page() {
+  const stored = localStorage.getItem('x')   // 服务端无 window
+}
+```
+
+#### 3. 把 Provider 写进 Server Component
+
+```tsx
+// ✗ Server Component 不能用 Context
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <ThemeProvider>{children}</ThemeProvider>
+        {/* ThemeProvider 通常需要 useState，必须 Client */}
+      </body>
+    </html>
+  )
+}
+
+// ✓ 拆 Providers 到 Client Component
+'use client'
+export function Providers({ children }: { children: React.ReactNode }) {
+  return <ThemeProvider>{children}</ThemeProvider>
+}
+
+// 再在 layout 中
+import { Providers } from './providers'
+export default function RootLayout({ children }) {
+  return <html><body><Providers>{children}</Providers></body></html>
+}
+```
+
+## Astro
+
+Astro 的核心理念是**多框架共存 + 默认零 JS**。每个组件可以是 Astro / React / Vue / Svelte / Solid，构建时输出纯 HTML，仅"岛屿"携带交互式 JS。
+
+```bash
+pnpm create astro@latest
+pnpm astro add react
+```
+
+```astro filename="src/pages/index.astro"
+---
+import Counter from '../components/Counter.tsx'
+import { fetchPosts } from '../lib/db'
+
+const posts = await fetchPosts()
+---
+
+<html>
+  <body>
+    <h1>Blog</h1>
+    <ul>
+      {posts.map(p => <li>{p.title}</li>)}
+    </ul>
+
+    <Counter client:visible />              <!-- 仅可视区内才水合 -->
+  </body>
+</html>
+```
+
+`client:*` 指令控制水合时机：
+
+- `client:load`：立刻
+- `client:idle`：浏览器空闲时
+- `client:visible`：进入视口时
+- `client:media`：匹配媒体查询时
+
+适合内容主导的网站（博客、文档、营销页）——你正用 Nextra 搭的这个站点是个例子。
+
+### Astro vs Next.js
+
+| 维度 | Astro | Next.js |
+| ---- | ----- | ------- |
+| 默认 JS | 零 | 含 React 运行时 |
+| 多框架支持 | ✅ | ❌ |
+| 应用复杂度 | 偏静态内容 | 任意复杂度 |
+| Server Actions | 类似的 [Astro Actions](https://docs.astro.build/en/guides/actions/) | ✅ |
+| 数据库 / API | 需要自己接 | 一站式 |
+| 学习曲线 | 平缓 | 中 |
+
+**选 Astro**：博客、文档、营销页、内容主导且交互轻量。
+
+**选 Next.js**：SaaS、后台、电商、社交——任何"应用感"强的场景。
+
+## TanStack Start
+
+[TanStack Start](https://tanstack.com/start) 是 TanStack 团队（Query / Router / Form 等的作者）推出的全栈框架。优势：
+
+- **极强的类型推断**：路由、Search、loader 全推断
+- **基于 Vite + Vinxi**
+- **TanStack Router 作为路由内核**
+- **支持 RSC**
+
+适合追求类型纯粹的团队，但生态尚在早期，文档与第三方支持不及 Next.js。
+
+## Remix / React Router v7 framework mode
+
+Remix 已并入 React Router v7。框架模式让 React Router 直接驱动 SSR 与文件路由，理念是**Web 平台优先**——拥抱 HTML、表单、HTTP 缓存。
+
+```bash
+pnpm create remix
+```
+
+```tsx
+import { type LoaderFunctionArgs, useLoaderData } from 'react-router'
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  return { user: await getUser(params.id!) }
+}
+
+export default function User() {
+  const { user } = useLoaderData<typeof loader>()
+  return <h1>{user.name}</h1>
+}
+```
+
+适合 form-heavy 应用、认同 Web 标准的团队。Vercel 收购后 Remix 团队主导了 React Router v7 的演进，二者高度趋同。
+
+## 框架的选型决策树
+
+```text
+是 SPA、不要 SSR？
+  ├─ 是 → Vite + React Router / TanStack Router
+  └─ 否 ↓
+
+内容主导、交互轻量？（博客、文档、营销）
+  ├─ 是 → Astro
+  └─ 否 ↓
+
+需要 RSC、动态应用、生态优先？
+  ├─ 是 → Next.js
+  └─ 否 ↓
+
+类型推断极致、愿意尝鲜？
+  ├─ 是 → TanStack Start
+  └─ 否 ↓
+
+Web 标准优先、表单密集？
+  └─ Remix / React Router v7 framework mode
+```
+
+## 小结
+
+- 全栈框架补齐 React 缺失的路由、SSR、数据、表单等基建；
+- Next.js App Router 是 React 19 RSC 范式的事实落地——文件路由 + Server Components + Server Actions 三件套是新项目的现代写法；
+- Astro 适合内容主导、零 JS 优先的场景；
+- 选型应先看应用类型（内容 / SaaS / SPA）再看框架；不存在"最好"的框架，只有最契合项目的；
+- 你眼前正在阅读的这份文档站，就是基于 Next.js + Nextra 4 搭建的实例。

@@ -1,0 +1,328 @@
+---
+title: 数据结构
+description: Array、TypedArray、Map / Set / WeakMap / WeakSet 与 JSON
+---
+
+# 数据结构
+
+JavaScript 标准库提供了一组覆盖常见场景的内建数据结构，按存取方式可分为三类：
+
+- **结构化数据（Structured Data）**：`JSON`、`ArrayBuffer` / `DataView`
+- **键控集合（Keyed Collections）**：`Map` / `WeakMap` / `Set` / `WeakSet`
+- **索引集合（Indexed Collections）**：`Array` / `TypedArray`
+
+## JSON
+
+JSON（JavaScript Object Notation）是一种**子集化的 JS 字面量语法**，用作数据交换格式。仅支持以下类型：`object` / `array` / `string` / `number` / `true` / `false` / `null`。**不支持** `undefined`、`Symbol`、`BigInt`、函数、循环引用。
+
+```js
+JSON.stringify({ a: 1, b: 'x' })              // → '{"a":1,"b":"x"}'
+JSON.stringify([1, undefined, () => {}])      // → '[1,null,null]'   undefined / 函数被转为 null
+JSON.stringify({ a: undefined, b: 1 })        // → '{"b":1}'         属性中的 undefined 被忽略
+
+JSON.parse('{"a":1}')                         // → { a: 1 }
+JSON.parse('NaN')                             // ✗ SyntaxError       NaN/Infinity 不在 JSON 规范中
+```
+
+### `replacer` 与 `reviver`
+
+```js
+// replacer：序列化时干预每一对键值
+JSON.stringify({ pwd: '123', name: 'js' }, (key, value) => {
+  if (key === 'pwd') return undefined         // 屏蔽敏感字段
+  return value
+})
+// → '{"name":"js"}'
+
+// reviver：反序列化时还原值
+const json = '{"date":"2026-05-06T00:00:00.000Z"}'
+JSON.parse(json, (key, value) => {
+  if (key === 'date') return new Date(value)
+  return value
+})
+// → { date: Date object }
+```
+
+### 缩进与稳定输出
+
+```js
+JSON.stringify({ a: 1, b: 2 }, null, 2)
+// → '{
+//      "a": 1,
+//      "b": 2
+//    }'
+```
+
+### 循环引用
+
+```js
+const a = {}
+a.self = a
+JSON.stringify(a)                             // ✗ TypeError: cyclic object
+```
+
+可使用 `replacer` 自行处理，或采用 `structuredClone`（深拷贝原生 API，支持循环引用与更多类型）：
+
+```js
+structuredClone({ d: new Date(), m: new Map([['k', 'v']]) })
+```
+
+## Array
+
+`Array` 是有序的、索引从 0 开始的对象。它的下标是字符串属性，长度自动维护。
+
+### 创建与基本操作
+
+```js
+const a = [1, 2, 3]
+const b = new Array(3)                        // 长度 3 的稀疏数组：[ <3 empty items> ]
+const c = Array.of(3)                         // → [3]
+const d = Array.from('abc')                   // → ['a', 'b', 'c']    支持任意可迭代对象
+const e = Array.from({ length: 3 }, (_, i) => i * 2) // → [0, 2, 4]
+
+a.length                                       // → 3
+a[10] = 99
+a.length                                       // → 11   稀疏数组：a[3]..a[9] 是 empty
+```
+
+### 修改类方法（mutating）
+
+| 方法 | 作用 |
+| ---- | ---- |
+| `push` / `pop` | 尾部增/删 |
+| `shift` / `unshift` | 头部删/增 |
+| `splice(start, deleteCount, ...items)` | 任意位置增删 |
+| `sort` / `reverse` | 排序 / 反转（**原地**） |
+| `fill` / `copyWithin` | 填充 / 内部复制 |
+
+```js
+const arr = [3, 1, 2]
+arr.sort()                                     // 原地排序：[1, 2, 3]
+arr.sort((a, b) => b - a)                      // 自定义：降序 [3, 2, 1]
+arr.splice(1, 1, 99, 100)                      // 原地：移除 1 个，插入 2 个
+console.log(arr)                               // → [3, 99, 100]
+```
+
+### 不可变方法（non-mutating，常用）
+
+| 方法 | 作用 |
+| ---- | ---- |
+| `concat` / `slice` / `flat` / `flatMap` | 派生新数组 |
+| `map` / `filter` / `reduce` / `reduceRight` | 转换 / 过滤 / 折叠 |
+| `find` / `findIndex` / `findLast` / `includes` / `indexOf` | 查找 |
+| `every` / `some` | 谓词聚合 |
+| `join` | 拼接为字符串 |
+| `toSorted` / `toReversed` / `toSpliced` / `with`（ES2023） | 不可变版本 |
+
+```js
+const nums = [1, 2, 3, 4, 5]
+
+nums.map(n => n * 2)                          // → [2, 4, 6, 8, 10]
+nums.filter(n => n % 2 === 0)                 // → [2, 4]
+nums.reduce((sum, n) => sum + n, 0)           // → 15
+nums.flatMap(n => [n, n * n])                 // → [1, 1, 2, 4, 3, 9, 4, 16, 5, 25]
+
+;[[1, 2], [3, [4, 5]]].flat()                 // → [1, 2, 3, [4, 5]]
+;[[1, 2], [3, [4, 5]]].flat(Infinity)         // → [1, 2, 3, 4, 5]
+
+// ES2023 不可变变体
+const sorted = [3, 1, 2].toSorted()           // → [1, 2, 3]，原数组不变
+```
+
+### 稀疏数组陷阱
+
+```js
+const arr = [1, , 3]
+arr.length                                     // → 3
+arr[1]                                         // → undefined
+arr.map(x => x * 2)                            // → [2, <1 empty>, 6]   map 跳过空位
+arr.forEach(x => console.log(x))               // 只打印 1 和 3，跳过空位
+Array.from(arr, x => x * 2)                    // → [2, NaN, 6]         不跳过
+
+// 稳妥写法：使用 Array.from 或显式赋值
+const dense = Array.from({ length: 3 }, () => 0) // → [0, 0, 0]
+```
+
+### 数组解构
+
+```js
+const [a, b, ...rest] = [1, 2, 3, 4]          // a=1, b=2, rest=[3,4]
+const [, , third] = [1, 2, 3]                 // third=3
+const [x = 1] = [undefined]                   // 默认值仅在 undefined 时生效；x = 1
+```
+
+## TypedArray
+
+定长的、内存连续的二进制数据视图。常见类型：
+
+| 视图 | 元素 | 字节 |
+| ---- | ---- | ---- |
+| `Int8Array` / `Uint8Array` / `Uint8ClampedArray` | 8 位整数 | 1 |
+| `Int16Array` / `Uint16Array` | 16 位整数 | 2 |
+| `Int32Array` / `Uint32Array` | 32 位整数 | 4 |
+| `Float32Array` / `Float64Array` | 浮点 | 4 / 8 |
+| `BigInt64Array` / `BigUint64Array` | 64 位整数 | 8 |
+
+```js
+const buf = new ArrayBuffer(16)               // 16 字节原始内存
+const view32 = new Int32Array(buf)            // 视图：4 个 int32
+view32[0] = 1
+view32[1] = -1
+
+const view8 = new Uint8Array(buf)
+console.log(view8)                            // → Uint8Array(16) [1,0,0,0, 255,255,255,255, ...]
+
+// DataView 提供更灵活的字节级读写（含字节序控制）
+const dv = new DataView(buf)
+dv.setUint16(0, 256, /* littleEndian */ true)
+dv.getUint16(0, true)                         // → 256
+```
+
+`TypedArray` 不可使用大部分 `Array` 修改类方法，但提供 `subarray`、`set`、`buffer` 等。常用于二进制协议、图形（WebGL）、音频（WebAudio）、加密。
+
+## Map
+
+`Map` 是有序的键值对集合。与普通对象的关键差异：
+
+| 维度 | `Object` | `Map` |
+| ---- | -------- | ----- |
+| 键类型 | 字符串 / Symbol | 任意值（含对象、NaN） |
+| 顺序 | 整数键先按数值升序，其余按插入顺序 | 严格按插入顺序 |
+| 大小 | `Object.keys(o).length` | `m.size` |
+| 默认原型 | 继承 `Object.prototype` | 不污染原型 |
+| 性能 | 频繁增删较慢 | 频繁增删更优 |
+| 可迭代 | 否（需 `Object.entries`） | 是 |
+
+```js
+const m = new Map()
+m.set('a', 1).set('b', 2)
+m.set({ id: 1 }, 'object as key')             // 对象可作键
+
+m.get('a')                                    // → 1
+m.has('b')                                    // → true
+m.size                                        // → 3
+m.delete('a')
+
+for (const [k, v] of m) console.log(k, v)
+m.forEach((v, k) => console.log(k, v))
+
+// 与 Object 互转
+const obj = Object.fromEntries(m)
+const back = new Map(Object.entries(obj))
+
+// 字面量化构造：传入可迭代的 [key, value] 对
+const m2 = new Map([['a', 1], ['b', 2]])
+```
+
+### `WeakMap`
+
+键必须是对象（或非全局注册的 Symbol，ES2023），且为**弱引用**——若键对象在其他地方不再被引用，可被 GC 回收，对应的条目自动消失。**不可迭代**、**没有 `size`**、**没有 `keys` / `values`**。
+
+典型用途：附加私有数据，避免内存泄漏。
+
+```js
+const cache = new WeakMap()
+
+function fetchUser(req) {
+  if (cache.has(req)) return cache.get(req)
+  const data = expensiveCompute(req)
+  cache.set(req, data)
+  return data
+}
+// 当 req 对象被释放后，对应缓存自动失效
+```
+
+## Set
+
+`Set` 是去重的、有序的值集合。
+
+```js
+const s = new Set([1, 2, 2, 3])
+s.size                                         // → 3
+s.add(4).add(2)                                // 重复添加无效果
+
+s.has(2)                                       // → true
+s.delete(2)
+;[...s]                                        // → [1, 3, 4]   解构得到数组
+
+// 数组去重
+const unique = [...new Set([1, 1, 2, 3, 3])]   // → [1, 2, 3]
+```
+
+`Set` 也按**插入顺序**迭代，遵循 SameValueZero 算法（`NaN` 自相等）：
+
+```js
+const s = new Set([NaN, NaN])
+s.size                                         // → 1
+```
+
+### `WeakSet`
+
+与 `WeakMap` 类似：成员必须是对象，弱引用，不可迭代。常用于"标记"对象集合：
+
+```js
+const visited = new WeakSet()
+
+function visit(node) {
+  if (visited.has(node)) return
+  visited.add(node)
+  // ... 处理 node
+}
+```
+
+## 选择指南
+
+| 场景 | 首选 |
+| ---- | ---- |
+| 顺序数据、需要数学运算或迭代变换 | `Array` |
+| 频繁增删的键值映射、键非字符串、需要保留插入顺序 | `Map` |
+| 数据交换、配置对象、属性集合 | `Object` |
+| 唯一值集合、去重 | `Set` |
+| 缓存元数据、需要 GC 友好 | `WeakMap` / `WeakSet` |
+| 二进制数据、固定字段格式 | `TypedArray` + `DataView` |
+
+## 常见操作模式
+
+### 数组分组（ES2024）
+
+```js
+const fruits = [
+  { name: 'apple', kind: 'red' },
+  { name: 'banana', kind: 'yellow' },
+  { name: 'cherry', kind: 'red' }
+]
+
+Object.groupBy(fruits, f => f.kind)
+// → {
+//     red: [{ name: 'apple', kind: 'red' }, { name: 'cherry', kind: 'red' }],
+//     yellow: [{ name: 'banana', kind: 'yellow' }]
+//   }
+
+Map.groupBy(fruits, f => f.kind)              // 返回 Map 版本
+```
+
+### 数组分块
+
+```js
+function chunk(arr, size) {
+  return Array.from({ length: Math.ceil(arr.length / size) },
+    (_, i) => arr.slice(i * size, i * size + size))
+}
+
+chunk([1, 2, 3, 4, 5], 2)                     // → [[1, 2], [3, 4], [5]]
+```
+
+### 对象 / Map 互转
+
+```js
+const m = new Map([['a', 1], ['b', 2]])
+const obj = Object.fromEntries(m)             // → { a: 1, b: 2 }
+const back = new Map(Object.entries(obj))
+```
+
+## 小结
+
+- `Array` 适合顺序数据，提供丰富的迭代方法；注意区分 mutating 与 non-mutating 版本；
+- `Map` / `Set` 是 ES6 引入的现代键值/集合容器，性能与语义优于普通对象；
+- `WeakMap` / `WeakSet` 解决"附加数据 + GC 友好"的场景，但失去了可迭代能力；
+- `TypedArray` 是底层二进制处理的基础，与 `ArrayBuffer` / `DataView` 配合使用。

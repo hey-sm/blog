@@ -1,0 +1,489 @@
+---
+title: 伪类与伪元素
+description: 状态、结构、表单伪类与 ::before / ::after / ::placeholder / ::backdrop
+---
+
+# 伪类与伪元素
+
+伪类（pseudo-class）以**单冒号**`:`开头，根据元素的**状态**或**位置**匹配；伪元素（pseudo-element）以**双冒号**`::`开头，匹配元素的**特定部分或虚拟内容**。
+
+```css
+/* 伪类：单冒号 */
+button:hover { ... }
+input:focus { ... }
+li:nth-child(2n) { ... }
+
+/* 伪元素：双冒号 */
+p::first-line { ... }
+.tag::before { content: '#'; }
+input::placeholder { ... }
+```
+
+## 状态伪类
+
+### 鼠标交互
+
+```css
+.btn:hover     { background: blue; }
+.btn:active    { background: darkblue; }       /* 鼠标按下瞬间 */
+.btn:focus     { outline: 2px solid; }
+.btn:focus-visible { outline: 2px solid blue; }/* 仅键盘聚焦 */
+.btn:focus-within  { box-shadow: 0 0 0 2px; }  /* 自身或子元素聚焦 */
+```
+
+#### Tailwind
+
+```html
+<button class="hover:bg-blue-700 active:bg-blue-800 focus-visible:outline-2">
+  Click
+</button>
+
+<form class="focus-within:ring-2 focus-within:ring-blue-500">
+  <input />
+</form>
+```
+
+### 链接
+
+```css
+a:link    { color: blue; }                    /* 未访问 */
+a:visited { color: purple; }                  /* 已访问 */
+a:hover   { text-decoration: underline; }
+a:active  { color: red; }
+```
+
+写法顺序记忆口诀：**`:link → :visited → :hover → :focus → :active`**（LVHFA）。
+
+### 表单状态
+
+```css
+input:required          { border-color: orange; }
+input:optional          { ... }
+input:invalid           { border-color: red; }
+input:valid             { border-color: green; }
+input:user-invalid      { ... }                /* 仅用户已交互后无效（更友好） */
+input:placeholder-shown { background: #f5f5f5; } /* 显示 placeholder（即未填写）*/
+input:disabled          { opacity: 0.5; }
+input:read-only         { background: #eee; }
+input:checked           { ... }
+input:in-range / :out-of-range { ... }
+input:default           { ... }                /* 默认选中的 radio / checkbox */
+input:indeterminate     { ... }                /* 半选状态 */
+```
+
+#### Tailwind
+
+```html
+<input class="
+  required:border-orange-500
+  invalid:border-red-500
+  user-invalid:bg-red-50
+  placeholder-shown:bg-gray-50
+  disabled:opacity-50
+  checked:bg-blue-500
+" />
+```
+
+### `:user-invalid` vs `:invalid`
+
+```css
+/* ✗ :invalid 在用户还没输入时就显示红框，体验差 */
+input:invalid { border: 1px solid red; }
+
+/* ✓ :user-invalid 仅在用户交互且失焦后才标红 */
+input:user-invalid { border: 1px solid red; }
+```
+
+`:user-invalid` 是 2024 年广泛支持的现代 API，应作为表单错误高亮的首选。
+
+## 结构伪类
+
+### 子元素位置
+
+```css
+li:first-child { ... }                        /* 父的第一个子，且必须是 li */
+li:last-child  { ... }
+li:only-child  { ... }                        /* 父唯一子元素 */
+li:nth-child(3) { ... }                        /* 第 3 个 */
+li:nth-child(2n) { ... }                       /* 偶数 */
+li:nth-child(2n+1) { ... }                     /* 奇数 */
+li:nth-child(-n+3) { ... }                     /* 前 3 个 */
+li:nth-last-child(2) { ... }                   /* 倒数第 2 */
+
+/* 类型版（仅在自己类型中计数） */
+section h2:first-of-type { ... }
+section p:nth-of-type(odd) { ... }
+section h2:only-of-type { ... }
+```
+
+### `:nth-child` 公式
+
+`an+b` 中 `n` 从 0 开始：
+
+| 公式 | 匹配 |
+| ---- | ---- |
+| `2n` 或 `even` | 2, 4, 6, ... |
+| `2n+1` 或 `odd` | 1, 3, 5, ... |
+| `3n` | 3, 6, 9, ... |
+| `3n+1` | 1, 4, 7, ... |
+| `n+3` | 3 之后所有 |
+| `-n+3` | 1, 2, 3 |
+
+```css
+tr:nth-child(odd)  { background: #f9f9f9; }    /* 隔行变色 */
+li:nth-child(-n+3) { font-weight: bold; }      /* 前三个加粗 */
+li:nth-child(n+4):nth-child(-n+8) { ... }      /* 第 4 到第 8 个 */
+```
+
+#### `:nth-child(an+b of selector)`（CSS Selectors 4）
+
+```css
+li:nth-child(2n of .featured) { ... }          /* .featured 中的偶数项 */
+```
+
+旧浏览器不支持 of 子句；现代浏览器（2023+）已普及。
+
+#### Tailwind 结构伪类
+
+```html
+<ul>
+  <li class="first:rounded-t last:rounded-b odd:bg-gray-50">...</li>
+</ul>
+```
+
+复杂 `nth-*` 用 arbitrary variant：
+
+```html
+<li class="[&:nth-child(3n)]:bg-red-50">...</li>
+```
+
+### `:empty` 与 `:blank`
+
+```css
+p:empty { display: none; }                    /* 完全空（无字符、无子元素） */
+p:blank { ... }                                /* 仅空白字符（草案，未广泛支持） */
+```
+
+### `:root` 与 `:scope`
+
+```css
+:root {
+  --primary: blue;                            /* 一般写在 :root 上的 CSS 变量 */
+}
+```
+
+`:root` 通常等于 `<html>`，但比 `html` 选择器特异性高一点（一个伪类 vs 一个元素）。
+
+`:scope` 在 `querySelector` / `querySelectorAll` 中代表查询起点：
+
+```js
+element.querySelectorAll(':scope > li')        /* 仅匹配 element 的直接子 li */
+```
+
+## 逻辑伪类
+
+```css
+:is(h1, h2, h3) { ... }                       /* 列表中任一，特异性取最高 */
+:where(h1, h2, h3) { ... }                    /* 同上，但特异性永远 0 */
+:not(.btn-primary) { ... }                    /* 否定 */
+:not(.btn-primary, .btn-danger) { ... }       /* 多重否定 */
+:has(> img) { ... }                           /* 含直接子 img */
+```
+
+详见 [选择器](/css/selectors#逻辑组合)。
+
+## UI 状态伪类
+
+### `:fullscreen`
+
+```css
+:fullscreen video { width: 100vw; height: 100vh; }
+```
+
+进入全屏（`element.requestFullscreen()`）后生效。
+
+### `:popover-open`
+
+新出的 `popover` API 配套：
+
+```html
+<button popovertarget="menu">Menu</button>
+<div id="menu" popover>...</div>
+```
+
+```css
+[popover]:popover-open { animation: fade 200ms; }
+```
+
+`popover` 是 2024 浏览器原生支持的"点击外部关闭"弹层，免去自己处理 `addEventListener('click')`。
+
+### `:modal`
+
+匹配处于"模态状态"的元素：
+
+```css
+dialog:modal { ... }                          /* 通过 showModal() 打开的 dialog */
+```
+
+### `:defined`
+
+匹配已注册的 Custom Element：
+
+```css
+:not(:defined) { display: none; }             /* 未注册的自定义元素先隐藏，避免 FOUC */
+my-component { display: block; }
+```
+
+## 伪元素
+
+### `::before` / `::after`
+
+在元素**内容前后**生成虚拟内容：
+
+```css
+.tag::before { content: '#'; color: gray; }
+.required::after { content: ' *'; color: red; }
+
+/* 装饰元素 */
+.divider::before {
+  content: '';
+  display: block;
+  height: 1px;
+  background: gray;
+}
+```
+
+#### `content` 属性
+
+`content` 是 `::before` / `::after` 的必备：
+
+```css
+.x::before { content: ''; }                    /* 空但生成 */
+.x::before { content: 'Hello'; }
+.x::before { content: attr(data-label); }      /* 取属性值 */
+.x::before { content: counter(item); }         /* 计数器 */
+.x::before { content: url('icon.svg'); }       /* 图片 */
+.x::before { content: '"' attr(cite) '"'; }    /* 多值拼接 */
+```
+
+#### Tailwind
+
+```html
+<div class="before:content-['#'] before:text-gray-500">tag</div>
+<div class="after:content-['_*'] after:text-red-500">required</div>
+<div class="before:content-[attr(data-label)]" data-label="Hello">
+```
+
+### `::first-letter` / `::first-line`
+
+```css
+p::first-letter {
+  font-size: 3em;
+  font-weight: bold;
+  float: left;
+  line-height: 1;
+}                                              /* 首字下沉 */
+
+p::first-line {
+  font-variant: small-caps;
+}
+```
+
+### `::placeholder`
+
+```css
+input::placeholder {
+  color: #999;
+  font-style: italic;
+}
+```
+
+### `::selection`
+
+```css
+::selection {
+  background: blue;
+  color: white;
+}
+```
+
+用户选中文字时的高亮颜色。
+
+### `::marker`
+
+列表项前的标记符（项目符号 / 数字）：
+
+```css
+li::marker {
+  color: blue;
+  font-weight: bold;
+}
+
+ol li::marker { content: counters(list-item, '.') ' '; }
+```
+
+### `::backdrop`
+
+`<dialog>` / `:fullscreen` 元素的背景：
+
+```css
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+```
+
+### `::file-selector-button`
+
+```css
+input[type='file']::file-selector-button {
+  background: #1d4ed8;
+  color: white;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 4px;
+}
+```
+
+### `::details-content`（实验）
+
+```html
+<details>
+  <summary>Click me</summary>
+  <div>Hidden content</div>
+</details>
+```
+
+```css
+details::details-content { padding: 12px; }
+```
+
+## 实战配方
+
+### 1. 必填标记
+
+```css
+label.required::after {
+  content: ' *';
+  color: red;
+}
+```
+
+### 2. 内容计数器
+
+```css
+ol.steps {
+  counter-reset: step;
+  list-style: none;
+}
+ol.steps li::before {
+  counter-increment: step;
+  content: 'Step ' counter(step) '. ';
+  font-weight: bold;
+}
+```
+
+### 3. 引号样式
+
+```css
+blockquote::before { content: open-quote; }
+blockquote::after  { content: close-quote; }
+blockquote { quotes: '“' '”' '‘' '’'; }
+```
+
+### 4. 文字阶梯：每个段落首字母大写
+
+```css
+.article > p:first-of-type::first-letter {
+  font-size: 4em;
+  float: left;
+  line-height: 1;
+  margin-right: 0.1em;
+}
+```
+
+### 5. 表格隔行
+
+```css
+tbody tr:nth-child(odd) { background: rgba(0, 0, 0, 0.025); }
+tbody tr:hover { background: rgba(0, 0, 0, 0.05); }
+```
+
+### 6. 自定义复选框
+
+```css
+input[type='checkbox'] { display: none; }
+input[type='checkbox'] + label {
+  position: relative;
+  padding-left: 24px;
+  cursor: pointer;
+}
+input[type='checkbox'] + label::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 16px;
+  height: 16px;
+  border: 1px solid gray;
+  border-radius: 3px;
+}
+input[type='checkbox']:checked + label::before {
+  background: blue;
+}
+input[type='checkbox']:checked + label::after {
+  content: '✓';
+  position: absolute;
+  left: 3px;
+  top: -2px;
+  color: white;
+}
+```
+
+现代项目通常用 Radix Checkbox 或类似 headless 组件——但理解原理仍有价值。
+
+### 7. 给链接图标自动加箭头
+
+```css
+a[href^='http']::after {
+  content: ' ↗';
+  color: gray;
+}
+```
+
+### 8. 加载占位
+
+```css
+.skeleton::before {
+  content: '';
+  display: block;
+  height: 1em;
+  background: linear-gradient(90deg, #eee 25%, #f5f5f5 50%, #eee 75%);
+  background-size: 200% 100%;
+  animation: loading 1.5s infinite;
+}
+
+@keyframes loading {
+  to { background-position: -200% 0; }
+}
+```
+
+## 浏览器开发者工具调试伪类
+
+Chrome DevTools 的 Elements 面板支持**强制状态**：
+
+1. 选中元素 → 右键 → "Force state"
+2. 勾选 `:hover` / `:focus` / `:active` / `:visited` / `:focus-within`
+3. 元素保持该状态，便于调试样式
+
+或在 Styles 面板顶部点击 `:hov` 按钮。
+
+## 小结
+
+- 状态伪类匹配交互状态，结构伪类匹配文档位置；
+- `:focus-visible` 替代 `:focus`，仅键盘聚焦时显示 outline，兼顾可访问性与鼠标体验；
+- `:user-invalid` 比 `:invalid` 更友好，仅在用户交互后才提示错误；
+- `:has()` 让 CSS 拥有了"父选择器"，是过去十年最重要的新增；
+- `::before` / `::after` 适合装饰元素与计数器，但**不要**滥用为内容（屏幕阅读器可能漏读）；
+- `::backdrop` + `<dialog>` 是现代模态框的标配；
+- `::placeholder` / `::file-selector-button` / `::marker` 等伪元素让原生表单 / 列表也能高度定制。

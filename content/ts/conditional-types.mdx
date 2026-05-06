@@ -1,0 +1,381 @@
+---
+title: 条件类型
+description: TypeScript 条件类型 Conditional Types：extends 三元、分布式条件类型、infer 关键字、递归条件类型与高级类型体操
+---
+
+# 条件类型
+
+条件类型（Conditional Types）让类型系统具备了"根据类型做判断"的能力，是 TypeScript 类型体操的核心。
+
+## 基本语法
+
+```ts
+// T extends U ? X : Y
+// 若 T 可赋值给 U，取 X，否则取 Y
+
+type IsString<T> = T extends string ? 'yes' : 'no'
+
+type T1 = IsString<string>   // 'yes'
+type T2 = IsString<number>   // 'no'
+type T3 = IsString<'hello'>  // 'yes'
+type T4 = IsString<unknown>  // 'no'
+```
+
+### 条件类型的使用场景
+
+```ts
+// ✅ 判断是否为数组
+type IsArray<T> = T extends unknown[] ? true : false
+
+type A = IsArray<string[]>   // true
+type B = IsArray<number>     // false
+
+// ✅ 判断是否为函数
+type IsFunction<T> = T extends (...args: unknown[]) => unknown ? true : false
+
+// ✅ 判断是否为 Promise
+type IsPromise<T> = T extends Promise<unknown> ? true : false
+```
+
+## 分布式条件类型
+
+当条件类型应用于**裸泛型参数**且 T 为联合类型时，条件类型会**自动分发**到每个成员：
+
+```ts
+// T 是裸类型参数，触发分布式
+type ToArray<T> = T extends unknown ? T[] : never
+
+type Result = ToArray<string | number>
+// 等价于 ToArray<string> | ToArray<number>
+// = string[] | number[]
+```
+
+### 手动控制分发
+
+```ts
+// ✅ 普通分发
+type Distribute<T> = T extends unknown ? T[] : never
+type R1 = Distribute<string | number>
+// string[] | number[]
+
+// ✅ 阻止分发：用元组包裹
+type NoDistribute<T> = [T] extends [unknown] ? T[] : never
+type R2 = NoDistribute<string | number>
+// (string | number)[]
+```
+
+### 分布式条件类型的实际应用
+
+```ts
+// ✅ Exclude 源码
+type Exclude<T, U> = T extends U ? never : T
+type E = Exclude<'a' | 'b' | 'c', 'a' | 'b'>
+// 'c'
+
+// 分步：
+// ('a' extends ('a'|'b') ? never : 'a')    → never
+// | ('b' extends ('a'|'b') ? never : 'b')  → never
+// | ('c' extends ('a'|'b') ? never : 'c')  → 'c'
+// = never | never | 'c' = 'c'
+```
+
+```ts
+// ✅ Extract 源码
+type Extract<T, U> = T extends U ? T : never
+type E2 = Extract<'a' | 'b' | 'c', 'a' | 'b'>
+// 'a' | 'b'
+```
+
+## infer 关键字
+
+`infer` 在条件类型的 extends 子句中声明一个类型变量，从匹配的结构中提取类型：
+
+```ts
+// ✅ 提取数组元素类型
+type ElementType<T> = T extends (infer U)[] ? U : never
+
+type E1 = ElementType<string[]>      // string
+type E2 = ElementType<number[]>      // number
+type E3 = ElementType<string>        // never (不是数组)
+
+// ✅ 提取函数返回值
+type MyReturnType<T> = T extends (...args: unknown[]) => infer R ? R : never
+
+type R1 = MyReturnType<() => string>       // string
+type R2 = MyReturnType<(x: number) => void> // void
+
+// ✅ 提取函数参数
+type MyParameters<T> = T extends (...args: infer P) => unknown ? P : never
+
+type P1 = MyParameters<(a: string, b: number) => void>
+// [a: string, b: number]
+```
+
+### 多个 infer 位置
+
+```ts
+// ✅ 同时提取多个类型变量
+type UnpackPromise<T> = T extends Promise<infer V> ? V : T
+
+type Split<T> = T extends `${infer Head}.${infer Tail}` ? [Head, Tail] : [T]
+
+type S1 = Split<'hello.world'>    // ['hello', 'world']
+type S2 = Split<'a.b.c'>          // ['a', 'b.c'] ← 非贪婪匹配
+```
+
+### infer 配合协变/逆变位置
+
+```ts
+// ✅ infer 在协变位置（返回值位置）→ 联合类型
+type GetUnion<T> = T extends { value: infer V } ? V : never
+type U = GetUnion<{ value: string } | { value: number }>
+// string | number
+
+// ✅ infer 在逆变位置（参数位置）→ 交叉类型
+type GetIntersection<T> = T extends { handler: (x: infer V) => void } ? V : never
+type I = GetIntersection<
+  | { handler: (x: string) => void }
+  | { handler: (x: number) => void }
+>
+// string & number = never
+```
+
+## 递归条件类型
+
+条件类型可以递归地引用自身：
+
+```ts
+// ✅ 深层 Partial
+type DeepPartial<T> = T extends object
+  ? { [K in keyof T]?: DeepPartial<T[K]> }
+  : T
+
+// ✅ 深层 Required
+type DeepRequired<T> = T extends object
+  ? { [K in keyof T]-?: DeepRequired<T[K]> }
+  : T
+
+// ✅ Promise 递归解包
+type Awaited<T> =
+  T extends null | undefined ? T :
+  T extends Promise<infer R> ? Awaited<R> :
+  T
+```
+
+### 实现数组操作
+
+```ts
+// ✅ Pop——移除最后一个元素
+type Pop<T extends unknown[]> = T extends [...infer Rest, unknown] ? Rest : never
+type P = Pop<[1, 2, 3]>  // [1, 2]
+
+// ✅ Shift——移除第一个元素
+type Shift<T extends unknown[]> = T extends [unknown, ...infer Rest] ? Rest : never
+type S = Shift<[1, 2, 3]>  // [2, 3]
+
+// ✅ Reverse（递归）
+type Reverse<T extends unknown[]> = T extends [infer First, ...infer Rest]
+  ? [...Reverse<Rest>, First]
+  : []
+type Rev = Reverse<[1, 2, 3]>  // [3, 2, 1]
+```
+
+## 实用条件类型模式
+
+### 1. 值类型过滤器
+
+```ts
+// ✅ 只保留特定类型的属性
+type PickByType<T, V> = {
+  [K in keyof T as T[K] extends V ? K : never]: T[K]
+}
+
+interface Data {
+  name: string
+  age: number
+  email: string
+  active: boolean
+}
+
+type Strings = PickByType<Data, string>
+// { name: string; email: string }
+```
+
+### 2. 类型级别的 if/else 链
+
+```ts
+type TypeName<T> =
+  T extends string ? 'string' :
+  T extends number ? 'number' :
+  T extends boolean ? 'boolean' :
+  T extends undefined ? 'undefined' :
+  T extends Function ? 'function' :
+  'object'
+
+type N1 = TypeName<string>   // 'string'
+type N2 = TypeName<42>       // 'number'
+type N3 = TypeName<{}>       // 'object'
+```
+
+### 3. 类型安全的路径访问
+
+```ts
+// ✅ 嵌套属性访问
+type PropType<T, Path extends string> =
+  Path extends keyof T
+    ? T[Path]
+    : Path extends `${infer K}.${infer Rest}`
+      ? K extends keyof T
+        ? PropType<T[K], Rest>
+        : never
+      : never
+
+interface Deep {
+  user: {
+    profile: {
+      name: string
+      avatar: { url: string }
+    }
+  }
+}
+
+type Name = PropType<Deep, 'user.profile.name'>        // string
+type Avatar = PropType<Deep, 'user.profile.avatar.url'> // string
+```
+
+## React 实战应用
+
+### 条件式 Props
+
+```tsx
+// ✅ 基于 data 类型的条件 props
+type DataViewProps<T> = {
+  data: T
+  loading: boolean
+  error: Error | null
+} & (T extends unknown[]
+  ? { renderItem: (item: T[number]) => React.ReactNode }
+  : { renderContent: (data: T) => React.ReactNode }
+)
+
+function DataView<T>(props: DataViewProps<T>) {
+  if (props.loading) return <div>Loading...</div>
+  if (props.error) return <div>Error: {props.error.message}</div>
+
+  if (Array.isArray(props.data)) {
+    return <ul>{(props as any).renderItem(props.data[0])}</ul>
+  }
+  return <>{(props as any).renderContent(props.data)}</>
+}
+```
+
+### 条件类型推断 Hook 返回
+
+```tsx
+type UseQueryReturn<T> =
+  T extends Promise<infer D>
+    ? { data: D | null; loading: boolean; error: Error | null }
+    : never
+
+function useQuery<T extends Promise<unknown>>(fetcher: () => T): UseQueryReturn<T> {
+  const [data, setData] = useState<unknown>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<Error | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    fetcher()
+      .then(setData)
+      .catch(setError)
+      .finally(() => setLoading(false))
+  }, [])
+
+  return { data, loading, error } as UseQueryReturn<T>
+}
+
+// 使用时自动获得正确的 data 类型
+async function fetchUser(): Promise<{ id: number; name: string }> {
+  return { id: 1, name: 'Alice' }
+}
+
+function UserProfile() {
+  const { data } = useQuery(fetchUser)
+  // data: { id: number; name: string } | null
+}
+```
+
+## 陷阱
+
+### 1. 分布式条件类型的自动分发时机
+
+```ts
+// ✅ 裸类型参数：分发
+type Dist<T> = T extends unknown ? T[] : never
+
+// ❌ 非裸类型参数（包裹在元组中）：不分发
+type NoDist<T> = [T] extends [unknown] ? T[] : never
+
+// ❌ 非裸（使用了条件判断）：不分发
+type AlsoNoDist<T> = T & {} extends unknown ? T[] : never
+```
+
+### 2. never 被分布式条件吞没
+
+```ts
+// ✅ never 在分布式条件中产生 never
+type Test<T> = T extends string ? 'yes' : 'no'
+type R = Test<never>
+// never！（不是 'no'）
+
+// 解释：never 作为空联合，分发后产生空联合 = never
+// 如果需要 'no'，阻止分发：
+type SafeTest<T> = [T] extends [string] ? 'yes' : 'no'
+type R2 = SafeTest<never>  // 'no' ✅
+```
+
+### 3. 递归过深
+
+```ts
+// ❌ 无限递归会导致编译器报错
+type Infinite<T> = T extends object ? Infinite<T> : T
+
+// ✅ 限制递归深度
+type SafeDeep<T, D extends number = 5> = D extends 0
+  ? T
+  : T extends object
+    ? { [K in keyof T]: SafeDeep<T[K], Subtract<D, 1>> }  // 需要 Subtract 类型
+    : T
+```
+
+## 最佳实践
+
+### ✅ infer 提取类型优先于手动查找
+
+```ts
+// ✅ 用 infer
+type Return<T> = T extends (...args: unknown[]) => infer R ? R : never
+
+// ❌ 不要用复杂的嵌套索引访问来替代
+```
+
+### ✅ 注意分布式条件类型的自动分发
+
+```ts
+// ✅ 如果需要分发，使用裸类型参数
+type FilterNull<T> = T extends null | undefined ? never : T
+
+// ✅ 如果不需要，用元组包裹
+type SafeExtract<T, U> = [T] extends [U] ? T : never
+```
+
+### ✅ 递归类型增加安全出口
+
+```ts
+// ✅ 先判断终止条件
+type Flatten<T> =
+  T extends unknown[] ? T[number] :
+  T extends Promise<infer V> ? Flatten<V> :
+  T
+```
+
+下一章 [模板字面量类型](/ts/template-literal-types) 深入字符串级类型操作。

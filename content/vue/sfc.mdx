@@ -1,0 +1,601 @@
+---
+title: 单文件组件
+description: SFC 结构、<script setup>、CSS Scoped、预处理器与最佳实践
+---
+
+# 单文件组件（SFC）
+
+**单文件组件（Single-File Component, SFC）** 是 Vue 的标志性特性，将模板、逻辑、样式封装在一个 `.vue` 文件中。
+
+## SFC 基本结构
+
+```vue filename="components/Counter.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++
+}
+</script>
+
+<template>
+  <div class="counter">
+    <p>Count: {{ count }}</p>
+    <button @click="increment">+1</button>
+  </div>
+</template>
+
+<style scoped>
+.counter {
+  padding: 20px;
+  border: 1px solid #ccc;
+}
+
+button {
+  padding: 8px 16px;
+  background: #42b883;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+</style>
+```
+
+三个核心部分：
+
+| 部分 | 作用 | 语言 |
+| ---- | ---- | ---- |
+| `<script>` | 组件逻辑 | JavaScript / TypeScript |
+| `<template>` | 组件模板 | HTML + Vue 指令 |
+| `<style>` | 组件样式 | CSS / Sass / Less / Stylus |
+
+## `<script setup>`：组合式 API 语法糖
+
+`<script setup>` 是 Vue 3.2+ 推荐的写法，自动处理：
+
+- 顶层变量/函数自动暴露给模板
+- 导入的组件自动注册
+- `defineProps` / `defineEmits` 等编译宏无需导入
+
+### 对比传统写法
+
+**传统 `<script>`**：
+
+```vue
+<script lang="ts">
+import { defineComponent, ref } from 'vue'
+
+export default defineComponent({
+  setup() {
+    const count = ref(0)
+    
+    function increment() {
+      count.value++
+    }
+    
+    return {
+      count,
+      increment
+    }
+  }
+})
+</script>
+```
+
+**`<script setup>`**：
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++
+}
+</script>
+```
+
+减少了 ~40% 的样板代码。
+
+### 编译宏
+
+`<script setup>` 提供的编译宏（无需导入）：
+
+```vue filename="components/UserCard.vue"
+<script setup lang="ts">
+// 1. defineProps：定义 props
+interface Props {
+  name: string
+  age?: number
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  age: 18
+})
+
+// 2. defineEmits：定义事件
+const emit = defineEmits<{
+  update: [name: string]
+  delete: []
+}>()
+
+// 3. defineExpose：暴露给父组件
+function reset() {
+  emit('update', '')
+}
+
+defineExpose({
+  reset
+})
+
+// 4. defineOptions：定义组件选项（Vue 3.3+）
+defineOptions({
+  name: 'UserCard',
+  inheritAttrs: false
+})
+
+// 5. defineSlots：定义插槽类型（Vue 3.3+）
+defineSlots<{
+  default(props: { msg: string }): any
+  footer(): any
+}>()
+</script>
+
+<template>
+  <div class="user-card">
+    <h3>{{ name }}</h3>
+    <p>Age: {{ age }}</p>
+    <button @click="emit('delete')">Delete</button>
+  </div>
+</template>
+```
+
+### 顶层 await
+
+`<script setup>` 支持顶层 `await`，组件会自动变为异步组件：
+
+```vue filename="components/UserProfile.vue"
+<script setup lang="ts">
+const user = await fetch('/api/user').then(r => r.json())
+</script>
+
+<template>
+  <div>{{ user.name }}</div>
+</template>
+```
+
+父组件需要用 `<Suspense>` 包裹：
+
+```vue filename="App.vue"
+<template>
+  <Suspense>
+    <UserProfile />
+    <template #fallback>
+      <div>Loading...</div>
+    </template>
+  </Suspense>
+</template>
+```
+
+## `<template>`：模板语法
+
+### 单根节点 vs 多根节点
+
+Vue 3 支持 **Fragment**（多根节点）：
+
+```vue
+<!-- Vue 2：必须单根 -->
+<template>
+  <div>
+    <h1>Title</h1>
+    <p>Content</p>
+  </div>
+</template>
+
+<!-- Vue 3：支持多根 -->
+<template>
+  <h1>Title</h1>
+  <p>Content</p>
+</template>
+```
+
+### 模板引用
+
+使用 `ref` 获取 DOM 元素：
+
+```vue filename="components/Input.vue"
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+const inputRef = ref<HTMLInputElement>()
+
+onMounted(() => {
+  inputRef.value?.focus()
+})
+</script>
+
+<template>
+  <input ref="inputRef" type="text">
+</template>
+```
+
+### 动态组件
+
+```vue filename="components/Tabs.vue"
+<script setup lang="ts">
+import { ref, Component } from 'vue'
+import TabA from './TabA.vue'
+import TabB from './TabB.vue'
+
+const tabs: Record<string, Component> = { TabA, TabB }
+const current = ref<Component>(TabA)
+</script>
+
+<template>
+  <component :is="current" />
+  <button @click="current = TabA">Tab A</button>
+  <button @click="current = TabB">Tab B</button>
+</template>
+```
+
+## `<style>`：样式封装
+
+### Scoped CSS
+
+`scoped` 属性让样式只作用于当前组件：
+
+```vue filename="components/Button.vue"
+<template>
+  <button class="btn">Click</button>
+</template>
+
+<style scoped>
+.btn {
+  background: blue;
+}
+</style>
+```
+
+编译后：
+
+```html
+<button class="btn" data-v-f3f3eg9>Click</button>
+```
+
+```css
+.btn[data-v-f3f3eg9] {
+  background: blue;
+}
+```
+
+### 深度选择器
+
+修改子组件样式：
+
+```vue
+<style scoped>
+/* ❌ 不生效：scoped 限制 */
+.child {
+  color: red;
+}
+
+/* ✅ 使用 :deep() */
+:deep(.child) {
+  color: red;
+}
+</style>
+```
+
+### 插槽选择器
+
+修改插槽内容样式：
+
+```vue
+<style scoped>
+:slotted(.slot-content) {
+  color: green;
+}
+</style>
+```
+
+### 全局选择器
+
+在 scoped 中定义全局样式：
+
+```vue
+<style scoped>
+:global(.global-class) {
+  font-size: 16px;
+}
+</style>
+```
+
+### CSS Modules
+
+```vue filename="components/Button.vue"
+<template>
+  <button :class="$style.btn">Click</button>
+</template>
+
+<style module>
+.btn {
+  background: blue;
+}
+</style>
+```
+
+自定义模块名：
+
+```vue
+<template>
+  <button :class="classes.btn">Click</button>
+</template>
+
+<style module="classes">
+.btn {
+  background: blue;
+}
+</style>
+```
+
+### CSS 变量注入
+
+在 `<style>` 中使用 `<script>` 的变量：
+
+```vue filename="components/ThemedButton.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const color = ref('blue')
+const size = ref(14)
+</script>
+
+<template>
+  <button>Themed Button</button>
+</template>
+
+<style scoped>
+button {
+  background: v-bind(color);
+  font-size: v-bind(size + 'px');
+}
+</style>
+```
+
+## 预处理器
+
+### Sass / SCSS
+
+```bash
+npm i -D sass
+```
+
+```vue filename="components/Card.vue"
+<template>
+  <div class="card">
+    <div class="card-header">Header</div>
+    <div class="card-body">Body</div>
+  </div>
+</template>
+
+<style lang="scss" scoped>
+$border-color: #ddd;
+
+.card {
+  border: 1px solid $border-color;
+  
+  &-header {
+    padding: 10px;
+    background: #f5f5f5;
+  }
+  
+  &-body {
+    padding: 20px;
+  }
+}
+</style>
+```
+
+### Less
+
+```bash
+npm i -D less
+```
+
+```vue
+<style lang="less" scoped>
+@primary-color: #42b883;
+
+.button {
+  background: @primary-color;
+  
+  &:hover {
+    background: darken(@primary-color, 10%);
+  }
+}
+</style>
+```
+
+### PostCSS
+
+Vite 内置 PostCSS，配置 `postcss.config.js`：
+
+```js filename="postcss.config.js"
+export default {
+  plugins: {
+    autoprefixer: {},
+    'postcss-nested': {}
+  }
+}
+```
+
+## 自定义块
+
+SFC 支持自定义块，用于文档、国际化等：
+
+```vue filename="components/Greeting.vue"
+<script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
+</script>
+
+<template>
+  <p>{{ t('hello') }}</p>
+</template>
+
+<i18n>
+{
+  "en": {
+    "hello": "Hello!"
+  },
+  "zh": {
+    "hello": "你好！"
+  }
+}
+</i18n>
+```
+
+需要配置 Vite 插件处理自定义块。
+
+## 组件命名约定
+
+### 文件命名
+
+推荐使用 **PascalCase**：
+
+```text
+components/
+├── UserProfile.vue
+├── TodoList.vue
+└── TheHeader.vue  # 单例组件加 The 前缀
+```
+
+### 组件名
+
+```vue
+<script lang="ts">
+export default {
+  name: 'UserProfile'  // 用于 DevTools 调试
+}
+</script>
+
+<script setup lang="ts">
+// 或使用 defineOptions（Vue 3.3+）
+defineOptions({
+  name: 'UserProfile'
+})
+</script>
+```
+
+### 多词组件名
+
+避免与 HTML 元素冲突：
+
+```vue
+<!-- ❌ 单词组件名 -->
+<template>
+  <item />
+</template>
+
+<!-- ✅ 多词组件名 -->
+<template>
+  <todo-item />
+</template>
+```
+
+## 陷阱与最佳实践
+
+### ❌ 不要在 `<script setup>` 中使用 `export default`
+
+```vue
+<!-- ❌ 错误 -->
+<script setup>
+export default {
+  name: 'MyComponent'
+}
+</script>
+```
+
+```vue
+<!-- ✅ 正确 -->
+<script lang="ts">
+export default {
+  name: 'MyComponent'
+}
+</script>
+
+<script setup lang="ts">
+// 逻辑代码
+</script>
+```
+
+### ❌ 不要在 scoped 样式中使用标签选择器
+
+```vue
+<!-- ❌ 性能差：每个 <p> 都会匹配 -->
+<style scoped>
+p {
+  color: red;
+}
+</style>
+```
+
+```vue
+<!-- ✅ 使用类选择器 -->
+<style scoped>
+.text {
+  color: red;
+}
+</style>
+```
+
+### ✅ 使用 `<script setup>` + TypeScript
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+interface User {
+  name: string
+  age: number
+}
+
+const user = ref<User>({
+  name: 'Alice',
+  age: 25
+})
+</script>
+```
+
+### ✅ 组件拆分原则
+
+- 单个组件不超过 300 行
+- 逻辑复杂时提取为组合式函数
+- 样式复杂时拆分为多个 `<style>` 块
+
+```vue
+<script setup lang="ts">
+import { useCounter } from '@/composables/useCounter'
+
+const { count, increment } = useCounter()
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+</template>
+
+<style scoped>
+/* 组件样式 */
+</style>
+
+<style>
+/* 全局样式 */
+</style>
+```
+
+下一章 [模板语法与插值](/vue/template-syntax) 详解 Vue 的模板表达式。

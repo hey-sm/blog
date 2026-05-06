@@ -1,0 +1,643 @@
+---
+title: 渲染优化与 Compiler
+description: React.memo、useMemo、useCallback、引用稳定与 React Compiler 自动 memo 化
+---
+
+# 渲染优化与 Compiler
+
+[渲染机制与重渲染](/performance/react/rendering) 解释了"为什么会渲染"，本章解决"如何减少不必要的渲染"。这是 React 性能优化的日常工作核心：理解 `React.memo` / `useMemo` / `useCallback` 的工作机制、何时该用、何时不该用，以及 React Compiler 如何让这些手动操作变得自动化。
+
+## memo 化的本质
+
+> **memo 化（memoization）= 缓存上次的输入与输出，输入相同时直接返回缓存。**
+
+```js
+// 简化的 memo 实现
+function memoize(fn) {
+  let lastArgs, lastResult, hasResult = false
+  return (...args) => {
+    if (hasResult && shallowEqual(args, lastArgs)) {
+      return lastResult
+    }
+    lastArgs = args
+    lastResult = fn(...args)
+    hasResult = true
+    return lastResult
+  }
+}
+```
+
+React 的三个 memo 工具都基于这个思路，只是缓存的对象不同：
+
+| API | 缓存什么 |
+| --- | -------- |
+| `React.memo(Component)` | 组件渲染结果（基于 props） |
+| `useMemo(fn, deps)` | 计算结果（基于 deps） |
+| `useCallback(fn, deps)` | 函数引用（基于 deps） |
+
+## React.memo
+
+包裹组件，让组件在 props 浅比较相等时跳过渲染：
+
+```jsx
+const Card = React.memo(function Card({ title, content }) {
+  console.log('Card render')
+  return (
+    <div>
+      <h2>{title}</h2>
+      <p>{content}</p>
+    </div>
+  )
+})
+
+function App() {
+  const [count, setCount] = useState(0)
+  return (
+    <>
+      <button onClick={() => setCount(c => c + 1)}>{count}</button>
+      <Card title="static" content="static" />  {/* count 变化时不会重渲染 */}
+    </>
+  )
+}
+```
+
+### 浅比较的细节
+
+`React.memo` 默认对 props 做**浅比较**（每个键用 `Object.is` 比较）：
+
+```jsx
+React.memo(Card)
+// 内部相当于：
+function shallowEqual(a, b) {
+  if (Object.is(a, b)) return true
+  if (typeof a !== 'object' || typeof b !== 'object') return false
+  if (Object.keys(a).length !== Object.keys(b).length) return false
+  for (const key in a) {
+    if (!Object.is(a[key], b[key])) return false
+  }
+  return true
+}
+```
+
+**陷阱**：对象 / 数组 / 函数字面量每次渲染都是新引用：
+
+```jsx
+// ❌ memo 失效：每次都传新对象
+<Card data={{ id: 1, name: 'A' }} />
+
+// ❌ memo 失效：每次都传新函数
+<Card onClick={() => doSomething()} />
+
+// ❌ memo 失效：每次都传新数组
+<Card items={list.filter(x => x.active)} />
+```
+
+修复：
+
+```jsx
+// ✅ 引用稳定
+const data = useMemo(() => ({ id: 1, name: 'A' }), [])
+const onClick = useCallback(() => doSomething(), [])
+const items = useMemo(() => list.filter(x => x.active), [list])
+
+<Card data={data} onClick={onClick} items={items} />
+```
+
+### 自定义比较函数
+
+```jsx
+const Card = React.memo(
+  function Card({ user }) { /* ... */ },
+  (prev, next) => {
+    // 返回 true 表示"相等，跳过渲染"
+    return prev.user.id === next.user.id
+  }
+)
+```
+
+⚠️ 慎用——比较函数有运行成本，错写还会导致漏渲染（用了过期数据）。
+
+### memo 的成本
+
+```text
+每次父渲染时：
+  ├─ 浅比较 props（O(props 数)）
+  ├─ 如果相等 → 跳过整个子树
+  └─ 如果不等 → 正常渲染
+
+memo 收益 = 跳过渲染省下的时间 - 浅比较的时间
+```
+
+如果组件本身渲染就很快（< 1 ms），memo 化的浅比较开销可能比直接渲染还慢。**只对真正"渲染慢"的组件使用**。
+
+## useMemo
+
+缓存计算结果：
+
+```jsx
+function ProductList({ products, filter }) {
+  // ❌ 每次渲染都重新过滤排序
+  const visible = products
+    .filter(p => p.name.includes(filter))
+    .sort((a, b) => a.price - b.price)
+
+  // ✅ 仅 products / filter 变化时重新计算
+  const visible = useMemo(() => {
+    return products
+      .filter(p => p.name.includes(filter))
+      .sort((a, b) => a.price - b.price)
+  }, [products, filter])
+
+  return <List items={visible} />
+}
+```
+
+### 何时该用 useMemo
+
+- **计算昂贵**（> 1 ms）：复杂数组操作、大对象 deep clone、正则匹配
+- **引用需要稳定**：把对象 / 数组传给 `React.memo` 的子组件
+
+### 何时不该用
+
+```jsx
+// ❌ 计算便宜，useMemo 反而是负担
+const sum = useMemo(() => a + b, [a, b])
+const text = useMemo(() => `${prefix} ${name}`, [prefix, name])
+
+// ✅ 直接计算
+const sum = a + b
+const text = `${prefix} ${name}`
+```
+
+简单计算的成本通常远小于 useMemo 自己的开销（依赖比较 + 闭包）。
+
+### useMemo 不是"防止重渲染"
+
+```jsx
+function Parent() {
+  const [count, setCount] = useState(0)
+  const child = useMemo(() => <Child />, [])  // ❌ 误解
+  return <div>{child}</div>
+}
+```
+
+这写法看起来"缓存了 Child"，但 `<Child />` 只是 React Element 对象——`Child` 函数仍会在每次渲染时被调用（如果父组件渲染会带动子组件，无论是否在 useMemo 中）。
+
+正确做法：用 `React.memo` 包裹 `Child`。
+
+### 依赖数组的陷阱
+
+```jsx
+// ❌ 漏了 filter
+useMemo(() => products.filter(p => p.tag === filter), [products])
+
+// ❌ 多了 unrelated
+useMemo(() => products.filter(p => p.tag === filter), [products, filter, unrelated])
+```
+
+ESLint 插件 `eslint-plugin-react-hooks` 的 `exhaustive-deps` 规则会检查依赖数组——**绝对不要禁用它**。
+
+```js
+// .eslintrc
+{
+  rules: {
+    'react-hooks/exhaustive-deps': 'error'
+  }
+}
+```
+
+## useCallback
+
+`useCallback(fn, deps)` 等价于 `useMemo(() => fn, deps)`——缓存函数引用：
+
+```jsx
+function App() {
+  const [count, setCount] = useState(0)
+
+  // ❌ 每次渲染都是新函数 → memo 子组件失效
+  const handleClick = () => setCount(c => c + 1)
+
+  // ✅ 函数引用稳定
+  const handleClick = useCallback(() => setCount(c => c + 1), [])
+
+  return <Child onClick={handleClick} />
+}
+
+const Child = React.memo(function Child({ onClick }) {
+  return <button onClick={onClick}>+</button>
+})
+```
+
+### useCallback 仅在传给 memo 子组件时有意义
+
+```jsx
+function App() {
+  const handleClick = useCallback(() => doSomething(), [])  // 没意义
+  return <button onClick={handleClick}>Click</button>       // 传给原生元素
+}
+```
+
+原生元素（`button`、`div` 等）不会因函数引用变化重渲染。useCallback 在这里只是**额外的开销**。
+
+### 与 ref 的协同
+
+如果 callback 需要访问最新 state，但又不想让依赖变化：
+
+```jsx
+function App() {
+  const [count, setCount] = useState(0)
+  const countRef = useRef(count)
+  countRef.current = count
+
+  // 闭包永远是空依赖，但能访问最新 count
+  const handleClick = useCallback(() => {
+    console.log('current count:', countRef.current)
+  }, [])
+
+  return <Child onClick={handleClick} />
+}
+```
+
+或用 `useEffectEvent`（实验性，详见 React 文档）。
+
+## 引用稳定模式
+
+性能优化中"保持引用稳定"是日常技能：
+
+### 静态对象提到外面
+
+```jsx
+// ❌ 每次渲染都是新对象
+function Comp() {
+  return <Child config={{ foo: 1, bar: 2 }} />
+}
+
+// ✅ 模块级常量
+const CONFIG = { foo: 1, bar: 2 }
+function Comp() {
+  return <Child config={CONFIG} />
+}
+```
+
+### 用 useState 保存"恒定值"
+
+```jsx
+// ✅ 仅初始化一次，引用永远稳定
+function Comp() {
+  const [config] = useState(() => ({ foo: 1, bar: 2 }))
+  return <Child config={config} />
+}
+```
+
+### useReducer 的 dispatch
+
+`dispatch` 引用永远稳定：
+
+```jsx
+function App() {
+  const [state, dispatch] = useReducer(reducer, initial)
+  return <Child dispatch={dispatch} />  // 不需要 useCallback
+}
+```
+
+### setState 函数引用稳定
+
+`useState` 返回的 setter 引用永远稳定，可以放心传：
+
+```jsx
+const [count, setCount] = useState(0)
+// setCount 引用永远不变
+```
+
+## 何时不必 memo 化
+
+很多场景下 memo 化是**负优化**。判断流程：
+
+```text
+要 memo 化吗？
+│
+├─ 这个组件渲染慢吗（> 1 ms）？
+│   └─ 否 ──► 不要 memo
+│
+├─ 这个组件经常因父变而重渲染吗？
+│   └─ 否 ──► 不要 memo
+│
+├─ 它的 props 引用稳定吗（对象/函数都稳定）？
+│   └─ 否 ──► 先解决引用稳定，再考虑 memo
+│
+└─ 满足全部 ──► memo 化
+```
+
+### 反模式：全局 memo 化
+
+```jsx
+// ❌ 一个项目里所有组件都 memo
+const Button = React.memo(function Button() { ... })
+const Icon = React.memo(function Icon() { ... })
+const Text = React.memo(function Text() { ... })
+```
+
+后果：
+
+- 浅比较的累计成本可能 > 直接渲染
+- 维护负担：每次改 props 都要思考引用稳定
+- 难以推理：开发者无法快速判断"这个组件会不会渲染"
+
+**最佳实践**：只对**真正在 Profiler 中证明慢的**组件 memo。
+
+## 一个完整示例
+
+```jsx
+function Dashboard() {
+  const [search, setSearch] = useState('')
+  const [users, setUsers] = useState([])
+
+  // 1. 计算昂贵：useMemo
+  const filtered = useMemo(
+    () => users.filter(u => u.name.includes(search)),
+    [users, search]
+  )
+
+  // 2. 引用稳定：useCallback（因为传给 memo 子）
+  const handleDelete = useCallback((id) => {
+    setUsers(prev => prev.filter(u => u.id !== id))
+  }, [])
+
+  // 3. 静态对象提到外面（或 useMemo）
+  const tableConfig = useMemo(() => ({
+    pageSize: 50,
+    sortable: true
+  }), [])
+
+  return (
+    <>
+      <input value={search} onChange={e => setSearch(e.target.value)} />
+      <UserTable
+        users={filtered}
+        config={tableConfig}
+        onDelete={handleDelete}
+      />
+    </>
+  )
+}
+
+const UserTable = React.memo(function UserTable({ users, config, onDelete }) {
+  // 复杂的表格渲染（每个用户一行）
+  return <table>...</table>
+})
+```
+
+这是"老 React"（16-17）的经典优化范式。读起来繁琐——而 React 19 的 Compiler 让上面的 `useMemo` / `useCallback` / `React.memo` **几乎都可以不写**。
+
+## React Compiler
+
+> 自 React 19 起，React Compiler（前称 React Forget）让 React 自动应用 memo 化。
+
+### 工作原理
+
+Compiler 是一个**构建期工具**——分析你的组件代码，自动插入等价于 useMemo / useCallback / memo 的优化：
+
+```jsx
+// 你写的代码
+function ProductList({ products, filter }) {
+  const visible = products
+    .filter(p => p.name.includes(filter))
+    .sort((a, b) => a.price - b.price)
+  return <List items={visible} />
+}
+
+// Compiler 编译后（伪代码）
+function ProductList({ products, filter }) {
+  const $ = useMemoCache(2)
+  let t0
+  if ($[0] !== products || $[1] !== filter) {
+    t0 = products.filter(p => p.name.includes(filter)).sort(...)
+    $[0] = products
+    $[1] = filter
+    $[2] = t0
+  } else {
+    t0 = $[2]
+  }
+  return <List items={t0} />
+}
+```
+
+效果：
+
+- **数组操作自动 memo**
+- **JSX 表达式自动 memo**（即使没用 React.memo 也能跳过）
+- **函数引用自动稳定**
+
+### 启用
+
+```bash
+npm install babel-plugin-react-compiler
+```
+
+```js
+// babel.config.js
+module.exports = {
+  plugins: [['babel-plugin-react-compiler']]
+}
+```
+
+或在 Vite / Next.js 中：
+
+```js
+// next.config.js
+module.exports = {
+  experimental: {
+    reactCompiler: true
+  }
+}
+```
+
+### Compiler 的边界
+
+Compiler 不是万能：
+
+- 只能优化**遵循 React 规则**的代码（不能有隐式副作用、不能修改 props 等）
+- 复杂的派生计算可能仍需手动 useMemo
+- 部分场景仍需 React.memo（跨树边界传引用）
+
+```jsx
+// Compiler 优化不了的场景：
+// 1. 改 props（违反不可变原则）
+function Bad({ obj }) {
+  obj.x = 1               // ❌ 副作用
+  return <div>{obj.x}</div>
+}
+
+// 2. 在条件分支中调用 hook（违反 hook 规则）
+function Bad({ flag }) {
+  if (flag) {
+    const v = useState()   // ❌
+  }
+}
+```
+
+ESLint 插件 `eslint-plugin-react-compiler` 会标出 Compiler 无法优化的代码。
+
+### Compiler vs 手动优化
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| React 19+ 新项目 | 启用 Compiler，移除大部分手动 memo |
+| React 18 项目 | 保留手动 memo，逐步升级 |
+| 复杂派生计算 | 仍可手动 useMemo（更明确） |
+| 跨外部库的引用稳定 | 手动 useCallback / useMemo |
+| 第三方组件库 | 不依赖 Compiler，仍手动 memo |
+
+### 移除手动 memo 化
+
+启用 Compiler 后，可以**逐步**移除已有的 useMemo / useCallback / React.memo：
+
+```jsx
+// Before
+const handleClick = useCallback(() => doSomething(), [])
+const config = useMemo(() => ({ foo: 1 }), [])
+const Card = React.memo(CardComponent)
+
+// After（Compiler 自动处理）
+const handleClick = () => doSomething()
+const config = { foo: 1 }
+const Card = CardComponent
+```
+
+代码可读性显著提升。
+
+## 性能预算与 memo 决策
+
+不要无脑 memo 化。**用 Profiler 测量**：
+
+```text
+Profiler 显示：
+  Card 渲染 30 次，平均 0.05 ms ──► 不需要 memo（总成本 1.5 ms）
+  Table 渲染 30 次，平均 5 ms   ──► 需要 memo / 虚拟化（总成本 150 ms）
+```
+
+经验阈值：
+
+- 单次渲染 > 5 ms → 考虑 memo / 虚拟化
+- 一次提交总耗时 > 16 ms → 影响 60 FPS
+
+## useMemo 的依赖数组陷阱
+
+### 引用稳定性传染
+
+```jsx
+function Parent({ users }) {
+  // ✅ users 引用稳定时 OK
+  const adults = useMemo(() => users.filter(u => u.age >= 18), [users])
+
+  // ❌ 如果父级每次都传新数组，useMemo 永远失效
+  return <Child adults={adults} />
+}
+
+function GrandParent() {
+  // ❌ 每次都新数组
+  return <Parent users={[...someUsers]} />
+}
+```
+
+修复：在源头保持引用稳定。
+
+### 函数依赖
+
+```jsx
+function Comp({ filter }) {
+  // ❌ filter 是函数，每次都新引用 → useMemo 失效
+  const data = useMemo(() => list.filter(filter), [filter])
+}
+
+// 调用方
+<Comp filter={x => x.active} />   // 每次都新函数
+
+// 修复：调用方稳定 filter
+const isActive = (x) => x.active
+<Comp filter={isActive} />
+```
+
+### "对象作 deps" 的反模式
+
+```jsx
+// ❌ 把对象当 dep
+const result = useMemo(() => compute(config), [config])
+// 如果 config 是 { foo: 1 } 每次都新引用 → 不缓存
+
+// ✅ 用具体字段
+const result = useMemo(() => compute(config), [config.foo, config.bar])
+```
+
+或在 deps 数组中传 stringified 值（极端情况，慎用）：
+
+```jsx
+const result = useMemo(() => compute(config), [JSON.stringify(config)])
+```
+
+## useEvent / useEffectEvent（实验性）
+
+针对"我想 callback 拿到最新 state，但又想保持引用稳定"的场景：
+
+```jsx
+import { experimental_useEffectEvent as useEffectEvent } from 'react'
+
+function App() {
+  const [count, setCount] = useState(0)
+
+  // useEffectEvent：永远拿到最新 count，但引用稳定
+  const handleClick = useEffectEvent(() => {
+    console.log(count)
+  })
+
+  useEffect(() => {
+    document.addEventListener('click', handleClick)
+    return () => document.removeEventListener('click', handleClick)
+  }, [])  // 不需要把 handleClick 加进 deps
+}
+```
+
+注意：API 仍在演进，谨慎在生产使用。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 无脑给所有组件 memo | 浅比较成本 + 维护负担 | 仅对慢渲染组件 |
+| memo 子组件传内联对象 / 函数 | memo 失效 | 引用稳定 |
+| useCallback 传给原生元素 | 没意义的开销 | 移除 |
+| useMemo 缓存简单计算 | 开销大于收益 | 直接计算 |
+| 禁用 react-hooks 的 deps 检查 | 闭包陷阱 | 不要禁用 |
+| 把对象作为 useMemo deps | 缓存永远失效 | 拆字段或用稳定引用 |
+| 期望 useMemo 阻止子组件渲染 | 不会阻止 | 用 React.memo |
+| 用 deepEqual 作 memo 比较 | 性能反而更差 | 浅比较 + 引用稳定 |
+
+## 实战诊断流程
+
+```text
+1. Profiler 录制操作过程
+   └─ 看每次提交的火焰图
+
+2. 找渲染时间长的组件
+   └─ "Why did this render?" 看原因
+
+3. 分类原因：
+   ├─ 父变带动 ──► React.memo（如果 props 真不变）
+   ├─ Hook 状态变 ──► state colocation（看[状态章节]）
+   ├─ Context 变 ──► Context 拆分
+   └─ Props 变（其实不该变） ──► 上层引用稳定 / useMemo
+
+4. 应用优化 → 再次录制对比
+   └─ 验证渲染次数 / 时间下降
+```
+
+## 小结
+
+- React.memo / useMemo / useCallback 三件套都是基于浅比较 + 缓存的 memoization；
+- React.memo 的浅比较看每个 prop 的引用——内联对象 / 函数会让 memo 失效；
+- useMemo 缓存计算结果，仅对昂贵计算或需要引用稳定的对象有意义；
+- useCallback 缓存函数引用，仅对传递给 memo 子组件的回调有意义；
+- 引用稳定是 memo 化生效的前提，不是结果——上层不稳定下层 memo 也白搭；
+- React Compiler 让大部分手动 memo 化变成自动，新项目应启用，老项目可逐步迁移；
+- 不要无脑 memo——只对在 Profiler 中证明慢的组件优化，否则维护成本大于收益；
+- ESLint 的 exhaustive-deps 规则不要禁用，闭包陷阱比性能问题更难排查。

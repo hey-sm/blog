@@ -1,0 +1,253 @@
+---
+title: 动态路由
+description: "[param]、[...catchAll]、[[...optionalCatchAll]]、generateStaticParams 与动态元数据"
+---
+
+# 动态路由
+
+URL 中的可变部分通过**动态段（Dynamic Segments）**处理。文件夹名决定参数名，`generateStaticParams` 控制静态生成。
+
+## 动态段语法
+
+| 文件夹命名 | URL 匹配 | 参数获取 |
+| ---------- | -------- | -------- |
+| `[slug]` | 单段：`/posts/hello-world` | `params.slug` → `"hello-world"` |
+| `[...slug]` | 多段：`/docs/a/b/c` | `params.slug` → `["a", "b", "c"]` |
+| `[[...slug]]` | 多段（可选）：`/docs` 或 `/docs/a/b` | `params.slug` → `undefined` 或 `["a", "b"]` |
+
+## `[param]` —— 单段动态
+
+```text
+app/blog/[slug]/page.tsx  →  /blog/hello-world
+                            /blog/nextjs-16
+```
+
+```tsx filename="app/blog/[slug]/page.tsx"
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+
+  const post = await fetch(`https://api.example.com/posts/${slug}`).then(r => r.json())
+
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <p>{post.content}</p>
+    </article>
+  )
+}
+```
+
+Next.js 16 中 `params` 是 `Promise`，需要 `await` 解包（这是个渐进式变更，用于适配未来 PPR 场景）。
+
+## `[...catchAll]` —— 全捕获段
+
+```text
+app/docs/[...slug]/page.tsx  →  /docs                    (404)
+                               /docs/a                   (params.slug = ["a"])
+                               /docs/a/b/c               (params.slug = ["a", "b", "c"])
+```
+
+```tsx filename="app/docs/[...slug]/page.tsx"
+export default async function DocPage({
+  params,
+}: {
+  params: Promise<{ slug: string[] }>
+}) {
+  const { slug } = await params
+  const path = slug.join('/')
+
+  const doc = await getDocByPath(path)
+
+  return <article>{doc.content}</article>
+}
+```
+
+## `[[...optionalCatchAll]]` —— 可选全捕获
+
+与 catchAll 的区别：**父路由本身也匹配**。
+
+```text
+app/docs/[[...slug]]/page.tsx  →  /docs                    (slug = undefined)
+                                 /docs/a                   (slug = ["a"])
+                                 /docs/a/b                 (slug = ["a", "b"])
+```
+
+```tsx filename="app/docs/[[...slug]]/page.tsx"
+export default async function DocPage({
+  params,
+}: {
+  params: Promise<{ slug?: string[] }>
+}) {
+  const { slug } = await params
+
+  if (!slug) return <DocIndex />           // /docs
+
+  const doc = await getDocByPath(slug.join('/'))
+  return <article>{doc.content}</article>
+}
+```
+
+## `generateStaticParams`
+
+静态生成带动态参数的路由：
+
+```tsx filename="app/blog/[slug]/page.tsx"
+export async function generateStaticParams() {
+  const posts = await fetch('https://api.example.com/posts').then(r => r.json())
+
+  return posts.map((post: { slug: string }) => ({
+    slug: post.slug,
+  }))
+}
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  // ...
+}
+```
+
+行为：
+
+| 条件 | 结果 |
+| ---- | ---- |
+| `generateStaticParams` 返回所有可能值 | `dynamicParams = false` 时可纯静态，未覆盖的返回 404 |
+| `generateStaticParams` 返回部分值 + `dynamicParams = true` | 已返回的静态预渲染，其余按需 SSR |
+| 不提供 `generateStaticParams` | 全部按需动态渲染 |
+
+### `dynamicParams` 控制未预渲染行为
+
+```tsx filename="app/blog/[slug]/page.tsx"
+export const dynamicParams = false
+
+export async function generateStaticParams() {
+  return [{ slug: 'hello' }, { slug: 'world' }]
+}
+```
+
+访问 `/blog/other` → 404（不在 `generateStaticParams` 返回的列表中）。
+
+## 动态元数据
+
+`generateMetadata` 可以基于 `params` 生成 SEO 信息：
+
+```tsx filename="app/blog/[slug]/page.tsx"
+import type { Metadata } from 'next'
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}): Promise<Metadata> {
+  const { slug } = await params
+  const post = await getPost(slug)
+
+  return {
+    title: post.title,
+    description: post.excerpt,
+    openGraph: {
+      images: [post.coverImage],
+    },
+  }
+}
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await getPost(slug)
+  return <article>{post.content}</article>
+}
+```
+
+注意：`generateMetadata` 和 `page` 组件**独立渲染**。但 Next.js 会自动去重相同的 `fetch` 请求——`getPost(slug)` 只会调用一次。
+
+## 多级动态段
+
+```text
+app/shop/[category]/[product]/page.tsx
+```
+
+```tsx filename="app/shop/[category]/[product]/page.tsx"
+export default async function ProductPage({
+  params,
+}: {
+  params: Promise<{ category: string; product: string }>
+}) {
+  const { category, product } = await params
+  // /shop/electronics/iphone → category=electronics, product=iphone
+}
+```
+
+```tsx filename="app/shop/[category]/[product]/page.tsx"
+export async function generateStaticParams() {
+  const categories = await getCategories()
+
+  const params: { category: string; product: string }[] = []
+
+  for (const cat of categories) {
+    const products = await getProducts(cat.slug)
+    for (const p of products) {
+      params.push({ category: cat.slug, product: p.slug })
+    }
+  }
+
+  return params
+}
+```
+
+## 陷阱
+
+### `params` 是 Promise
+
+在 Next.js 16 中，`params` 被类型化为 `Promise`：
+
+```tsx
+// ✓ 需要 await
+const { slug } = await params
+
+// ✗ 直接解构（运行时可能出错）
+const { slug } = params
+```
+
+### `generateStaticParams` 中的请求是去重的
+
+如果你在 `generateMetadata` 中与 `page` 中请求了同一数据，不要试图在 `generateStaticParams` 中再写一遍以为会去重——`generateStaticParams` 运行在前，此时 `page` 还未开始，所以请求不会被共享。
+
+### catchAll 包含 `/`
+
+`[...slug]` 捕获的数组不包含开头的 `/` 或结尾的 `/`：
+
+```text
+/docs/a/b/  → slug = ["a", "b"]  (不是 ["a", "b", ""])
+/docs/       → 不匹配（除非 optional catch-all）
+```
+
+### 不要用 dynamic segment 实现 query string
+
+```text
+# 使用 dynamic segment 表示路径实体
+/posts/:id          →  app/posts/[id]/page.tsx    ✓
+
+# 用 path 表示查询条件 — 错误做法
+/search/:query      →  app/search/[query]/page.tsx  ✗
+/search?q=keyword   →  app/search/page.tsx          ✓
+```
+
+Query string 语义的数据应该用 `searchParams`，而不是动态段。
+
+## 小结
+
+- 动态段三种形式：`[param]`（单段）、`[...catchAll]`（多段）、`[[...optional]]`（可选多段）；
+- `generateStaticParams` 控制静态生成哪些动态页，`dynamicParams` 控制未命中时的行为；
+- `generateMetadata` 可基于 `params` 生成动态 SEO；
+- Next.js 16 中 `params` 是 `Promise`，需要 `await` 解包。

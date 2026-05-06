@@ -1,0 +1,467 @@
+---
+title: 渲染机制
+description: Reconciler、Lists 与 Key、Refs、合成事件、HOC 与 Render Props
+---
+
+# 渲染机制
+
+理解 React 的渲染机制，是写出正确且高性能组件的前提。本章自顶向下覆盖：**渲染流程**、**列表与 Key**、**Refs**、**合成事件**、**高阶组件（HOC）**、**Render Props**。
+
+## 渲染流程
+
+每一次 render 都经历两个阶段：
+
+```text
+┌─────────────────────────────────────────────────────┐
+│                  Render Phase                        │
+│   (Pure, can be paused / restarted / abandoned)      │
+│                                                      │
+│   • 调用组件函数 → 得到新的 React Element 树         │
+│   • 与上一次的 Fiber 树 diff，标记需要变更的节点      │
+└──────────────────────┬──────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────┐
+│                  Commit Phase                        │
+│   (Sync, can NOT be interrupted)                     │
+│                                                      │
+│   • 将 DOM 变更应用到真实 DOM                         │
+│   • 运行 useLayoutEffect (sync)                      │
+│   • 浏览器 Paint                                     │
+│   • 运行 useEffect (async, after paint)              │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 触发渲染的方式
+
+1. 组件首次挂载（`createRoot.render`）
+2. 状态更新（`setState`、`dispatch`、`useState` 的 setter）
+3. Context 值变更
+4. 父组件渲染 → 子组件默认也会渲染（可被 `React.memo` / 相同 reference 短路）
+
+#### 渲染 ≠ 更新 DOM
+
+**渲染只是计算下一个 UI 描述**。如果新旧 fiber tree diff 结果为空，commit 阶段不会触碰 DOM。这就是"组件渲染 100 次但页面无变化"也可能发生的原因——你可能只是徒增 CPU 开销。
+
+#### Render 必须是纯函数
+
+组件函数体内不应：
+
+- 修改 props / state / context
+- 直接操作 DOM（`document.title = ...`）
+- 发起网络请求 / 订阅
+- 调用非确定性函数（`Date.now()`、`Math.random()`）—— 除非用 `useState` 等 Hook 锁定
+
+```tsx
+// ✗ 副作用泄漏到渲染阶段
+function Page({ id }: { id: string }) {
+  document.title = `Page ${id}`                // ← 不要在 render 里改 DOM
+  return <div>...</div>
+}
+
+// ✓ 移到 effect
+function Page({ id }: { id: string }) {
+  useEffect(() => {
+    document.title = `Page ${id}`
+  }, [id])
+  return <div>...</div>
+}
+```
+
+## 列表与 Key
+
+```tsx
+function TodoList({ todos }: { todos: Todo[] }) {
+  return (
+    <ul>
+      {todos.map(todo => (
+        <li key={todo.id}>{todo.text}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+Key 的作用是让 Reconciler 在新旧子节点列表 diff 时识别**身份**——同 key 的节点会被复用（保留 DOM 与 fiber 状态）；不同 key 视为新节点（卸载 + 重建）。
+
+### Key 错误的代价
+
+```tsx
+const items = ['A', 'B', 'C']
+
+// ✗ 用 index 做 key
+items.map((item, i) => <Input key={i} defaultValue={item} />)
+```
+
+当用户在 `<Input value="B">` 里输入了 `"BB"`，然后从顶部插入了 `"X"`：
+
+```text
+Before:                After:
+[A, B, C]              [X, A, B, C]
+ 0  1  2                0  1  2  3
+
+key=0 复用 → "A" 节点，但显示的是 X 的内容
+key=1 复用 → "B" 节点，但显示的是 A 的内容（用户输入的 "BB" 错位）
+```
+
+DOM 的"输入焦点 / 选区 / 滚动位置"等内部状态都被错位复用。
+
+### Key 的正确用法
+
+| 场景 | Key |
+| ---- | --- |
+| 后端返回的有 ID | `item.id`（最佳） |
+| 永不重排 / 不增删 / 仅追加尾部 | `index` 可以接受 |
+| 客户端临时生成 | `crypto.randomUUID()`（生成时即固定，不可每次渲染重生成） |
+
+#### 用 key 强制重置组件
+
+利用"key 变即重建"的语义，可以人为重置组件状态：
+
+```tsx
+function ResettableForm({ userId }: { userId: string }) {
+  return <Form key={userId} userId={userId} />
+}
+// userId 切换时，Form 内部的所有 useState 全部归零
+```
+
+## Refs
+
+Refs 提供 React 之外访问 DOM / 子组件实例 / 任意可变值的"逃生舱"。
+
+### `useRef`
+
+```tsx
+import { useRef } from 'react'
+
+function TextInput() {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  return (
+    <>
+      <input ref={inputRef} />
+      <button onClick={() => inputRef.current?.focus()}>Focus</button>
+    </>
+  )
+}
+```
+
+`useRef` 返回一个稳定的对象 `{ current: T }`：
+
+- 修改 `.current` **不会触发渲染**
+- 跨渲染保持引用稳定
+- 适合存"非渲染相关的可变值"——定时器 ID、上一次的值、外部库实例等
+
+```tsx
+function PrevValue<T>(value: T): T | undefined {
+  const ref = useRef<T>(undefined)
+  useEffect(() => { ref.current = value })
+  return ref.current
+}
+```
+
+### Ref forwarding（React 19+ 简化）
+
+React 19 之前需要 `forwardRef`：
+
+```tsx
+// React 18
+const Input = forwardRef<HTMLInputElement, Props>((props, ref) => (
+  <input ref={ref} {...props} />
+))
+```
+
+React 19 起，函数组件可以**直接接收 `ref` prop**：
+
+```tsx
+// React 19+
+function Input({ ref, ...props }: Props & { ref?: React.Ref<HTMLInputElement> }) {
+  return <input ref={ref} {...props} />
+}
+
+// 父组件
+<Input ref={inputRef} />
+```
+
+更简洁，无需 `forwardRef` 包装。
+
+### `useImperativeHandle`
+
+定制暴露给父组件的 ref 对象：
+
+```tsx
+type DialogHandle = {
+  open: () => void
+  close: () => void
+}
+
+function Dialog({ ref }: { ref?: React.Ref<DialogHandle> }) {
+  const [visible, setVisible] = useState(false)
+
+  useImperativeHandle(ref, () => ({
+    open: () => setVisible(true),
+    close: () => setVisible(false)
+  }))
+
+  return visible ? <div className="dialog">...</div> : null
+}
+
+// 父组件
+const ref = useRef<DialogHandle>(null)
+ref.current?.open()
+```
+
+仅在确实需要"父调子方法"时使用——多数场景应改用受控 props。
+
+### Ref 回调（callback ref）
+
+`ref` 可接收函数：
+
+```tsx
+<input ref={node => {
+  if (node) {
+    // 元素挂载时
+    node.focus()
+  } else {
+    // 元素卸载时
+  }
+}} />
+```
+
+适用于"挂载即聚焦"等模式。React 19 起，回调 ref 可返回清理函数：
+
+```tsx
+<input ref={node => {
+  const observer = new IntersectionObserver(...)
+  observer.observe(node!)
+  return () => observer.disconnect()
+}} />
+```
+
+### Ref 的边界
+
+不要用 ref 替代 state：
+
+```tsx
+// ✗ 修改 ref 不会触发渲染
+const countRef = useRef(0)
+return <button onClick={() => countRef.current++}>{countRef.current}</button>
+
+// ✓
+const [count, setCount] = useState(0)
+return <button onClick={() => setCount(c => c + 1)}>{count}</button>
+```
+
+## 合成事件（SyntheticEvent）
+
+React 把所有事件处理统一封装为 **SyntheticEvent**——跨浏览器的事件抽象层：
+
+```tsx
+function Form() {
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const formData = new FormData(e.currentTarget)
+    // ...
+  }
+
+  return <form onSubmit={handleSubmit}>...</form>
+}
+```
+
+### 事件类型
+
+```tsx
+function Component() {
+  const onClick: React.MouseEventHandler<HTMLButtonElement> = e => {
+    console.log(e.currentTarget)              // 类型为 HTMLButtonElement
+  }
+
+  const onChange: React.ChangeEventHandler<HTMLInputElement> = e => {
+    console.log(e.target.value)
+  }
+
+  const onKeyDown: React.KeyboardEventHandler = e => {
+    if (e.key === 'Enter') submit()
+  }
+
+  return <button onClick={onClick}>...</button>
+}
+```
+
+### React 17+ 事件委托到根
+
+React 17 起，所有事件被委托到 `createRoot` 创建的根容器（不再是 `document`）。这意味着：
+
+- **多个 React 应用**可在同一页面共存而不互相打扰
+- 与原生事件混用时，原生事件**先于** React 合成事件触发
+- `e.stopPropagation()` 在 React 合成事件中只能阻止 React 体系内的传播
+
+### `event.target` vs `event.currentTarget`
+
+- `event.target`：实际触发事件的元素
+- `event.currentTarget`：绑定监听器的元素
+
+事件冒泡时二者可能不同：
+
+```tsx
+<div onClick={e => {
+  e.target          // 可能是任何后代元素
+  e.currentTarget   // 始终是这个 div
+}}>
+  <button>...</button>
+</div>
+```
+
+### 阻止默认行为与冒泡
+
+```tsx
+<a onClick={e => {
+  e.preventDefault()              // 阻止默认（如导航）
+  e.stopPropagation()             // 阻止冒泡到父
+}} />
+```
+
+### 受控 vs 非受控
+
+表单元素与 React state 关联与否决定它的"控制权归属"：
+
+```tsx
+// 受控：value 由 state 决定
+function Controlled() {
+  const [value, setValue] = useState('')
+  return <input value={value} onChange={e => setValue(e.target.value)} />
+}
+
+// 非受控：使用 ref 读取
+function Uncontrolled() {
+  const ref = useRef<HTMLInputElement>(null)
+  return (
+    <>
+      <input ref={ref} defaultValue="initial" />
+      <button onClick={() => alert(ref.current?.value)}>Read</button>
+    </>
+  )
+}
+```
+
+| 维度 | 受控 | 非受控 |
+| ---- | ---- | ------ |
+| 数据源 | React state | DOM 自身 |
+| 实时校验 / 联动 | ✅ | ❌（需要手动） |
+| 性能（大量输入） | 每次按键触发 render | 仅在读取时同步 |
+| 与表单库（RHF）配合 | ✅ | ✅（更高效） |
+
+详见 [表单与校验](/react/forms-validation)。
+
+## 高阶组件（HOC）
+
+HOC 是**接受组件、返回新组件**的函数：
+
+```tsx
+function withLogging<P extends object>(
+  Comp: React.ComponentType<P>
+): React.FC<P> {
+  return function WithLogging(props) {
+    useEffect(() => {
+      console.log(`mount ${Comp.displayName ?? Comp.name}`)
+    }, [])
+    return <Comp {...props} />
+  }
+}
+
+const LoggedButton = withLogging(Button)
+```
+
+#### HOC 的优缺点
+
+优点：
+
+- 适合"包装层"逻辑（日志、权限、数据注入、错误边界）
+- 不影响被包装组件的内部实现
+
+缺点：
+
+- 命名空间冲突（多个 HOC 注入同名 prop）
+- "包装地狱"（DevTools 中显示一长串 `<WithA><WithB><WithC>...`）
+- TS 类型推断容易失效
+
+Hook 出现后，多数 HOC 场景被 Hook 取代——HOC 只在不能用 Hook 解决时使用（如错误边界）。
+
+## Render Props
+
+通过 children 是函数的方式注入数据：
+
+```tsx
+function MouseTracker({
+  children
+}: {
+  children: (pos: { x: number; y: number }) => React.ReactNode
+}) {
+  const [pos, setPos] = useState({ x: 0, y: 0 })
+  return (
+    <div onMouseMove={e => setPos({ x: e.clientX, y: e.clientY })}>
+      {children(pos)}
+    </div>
+  )
+}
+
+<MouseTracker>{pos => <p>{pos.x}, {pos.y}</p>}</MouseTracker>
+```
+
+Hook 出现后，render props 与 HOC 同样被弱化。它仍在以下场景有用：
+
+- 需要把组件作为参数传递（virtualized list、动画曲线消费者）
+- 与 framework / 库的协议要求
+
+## Component vs Element vs Fiber
+
+理解三个层次：
+
+| 概念 | 是什么 | 例子 |
+| ---- | ------ | ---- |
+| Component | 函数 / 类 | `function Button() {...}` |
+| Element | 组件调用产生的"描述对象" | `<Button>Click</Button>` 编译后是 `{ type: Button, props: {...} }` |
+| Fiber | Reconciler 内部维护的运行时节点 | 持有 state、effect 链、子节点指针 |
+
+```tsx
+const elem = <Button>Click</Button>
+console.log(elem)
+// { type: Button, props: { children: 'Click' }, key: null, ... }
+```
+
+Element 是不可变快照；Fiber 是可变运行时结构。React 用 element 作为 render 的输出 / commit 的输入；用 fiber 作为内部增量计算的载体。
+
+## Reconciler 简化版
+
+```text
+当 setState 触发：
+
+1. 调度（schedule）：根据更新优先级安排任务
+2. begin work：从根开始遍历 fiber，标记需要更新的子树
+3. complete work：自底向上构建 effect list
+4. commit：批量应用 DOM 变更
+   ├─ before mutation：getSnapshotBeforeUpdate
+   ├─ mutation：实际 DOM 操作
+   └─ layout：useLayoutEffect、componentDidMount/Update
+5. passive effects：useEffect（在浏览器 paint 后）
+```
+
+这套机制让 React 18 的并发渲染成为可能：begin/complete work 阶段可被打断，commit 阶段不可。
+
+## 渲染优化
+
+详见 [Hooks](/react/hooks#usememo-与-usecallback) 与 [高级主题](/react/advanced)。本节给出几条总原则：
+
+1. **先测量再优化**——使用 React DevTools Profiler 看实际耗时
+2. **正确组合 props** 比 memo 更有用：把无关变更隔离到子组件
+3. **`React.memo` 只对引用相等的 props 有效**——传函数 / 对象时配合 `useCallback` / `useMemo`
+4. **state 下沉**：把 state 放到最少需要它的祖先，避免大范围重渲染
+
+## 小结
+
+- 渲染分两个阶段：纯的 Render（可中断）与同步的 Commit（不可中断）；
+- Key 必须使用稳定的业务 ID，否则会引发"复用错对象"的隐蔽 Bug；
+- React 19 取消 `forwardRef`，函数组件直接接收 `ref` prop；
+- 合成事件是跨浏览器的统一抽象，事件被委托到 `createRoot` 容器；
+- HOC 与 render props 多数被 Hook 取代，仅在无 Hook 替代品时仍有价值；
+- 优化前必先测量，盲目 memo 反而增加心智成本。

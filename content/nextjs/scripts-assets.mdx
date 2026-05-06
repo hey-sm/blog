@@ -1,0 +1,237 @@
+---
+title: 脚本与静态资源
+description: next/script 的加载策略、public/ 目录的作用域、外部脚本管理与第三方 Embed 组件
+---
+
+# 脚本与静态资源
+
+## `next/script`
+
+```tsx
+import Script from 'next/script'
+
+export default function Page() {
+  return (
+    <>
+      <Script
+        src="https://example.com/widget.js"
+        strategy="lazyOnload"
+        onLoad={() => console.log('Widget loaded')}
+      />
+    </>
+  )
+}
+```
+
+### 加载策略
+
+| `strategy` | 行为 | 适用 |
+| ---------- | ---- | ---- |
+| `beforeInteractive` | 在页面可交互前执行（阻塞） | polyfill、关键数据 |
+| `afterInteractive` | 页面 hydrate 后执行（默认） | 分析、非关键脚本 |
+| `lazyOnload` | 浏览器空闲时执行 | 聊天 widget、非必要脚本 |
+| `worker` | 在 Web Worker 中执行 | 兼容的脚本（实验性） |
+
+### `beforeInteractive` 的限制
+
+```tsx
+// 只能放在 _app.tsx ... 但在 App Router 中只能放在 root layout
+// 且只对外部脚本有效（src 必须提供）
+
+<Script
+  src="https://cdn.example.com/polyfill.js"
+  strategy="beforeInteractive"
+/>
+```
+
+`beforeInteractive` 脚本会阻塞 hydration。谨慎使用。
+
+### 内联脚本
+
+```tsx
+<Script id="inline-config" strategy="afterInteractive">
+  {`window.__CONFIG__ = ${JSON.stringify({ theme: 'dark' })}`}
+</Script>
+```
+
+必须有 `id` 属性（Next.js 用其跟踪和去重）。
+
+### 与第三方 SDK 配合
+
+```tsx filename="components/GoogleAnalytics.tsx"
+import Script from 'next/script'
+
+export function GoogleAnalytics({ gaId }: { gaId: string }) {
+  return (
+    <>
+      <Script
+        strategy="afterInteractive"
+        src={`https://www.googletagmanager.com/gtag/js?id=${gaId}`}
+      />
+      <Script id="ga-init" strategy="afterInteractive">
+        {`
+          window.dataLayer = window.dataLayer || [];
+          function gtag(){dataLayer.push(arguments);}
+          gtag('js', new Date());
+          gtag('config', '${gaId}');
+        `}
+      </Script>
+    </>
+  )
+}
+```
+
+## `public/` 目录
+
+```text
+public/
+├── images/
+│   └── logo.svg         → /images/logo.svg
+├── fonts/
+│   └── MyFont.woff2     → /fonts/MyFont.woff2
+├── robots.txt           → /robots.txt
+├── sitemap.xml          → /sitemap.xml
+└── favicon.ico          → /favicon.ico
+```
+
+规则：
+- 文件直接从项目根路径映射（无 `public/` 前缀）
+- **不** 经过 Next.js 构建流程——原样输出
+- 适合：`robots.txt`、`favicon.ico`、`sitemap.xml`、`.well-known/*`、已优化的图片/字体
+- **不能** 在此处放 TypeScript / JSX 文件——浏览器无法执行
+
+### `public/` vs import
+
+```tsx
+// 方式 1: public/ — 运行时请求
+<img src="/images/hero.jpg" />
+
+// 方式 2: import — 构建时优化
+import hero from '@/public/images/hero.jpg'
+<Image src={hero} />
+```
+
+`import` 方式有类型安全、构建时的哈希处理、可结合 `next/image` 优化。`public/` 用于构建不参与的内容（robots.txt、favicon、已优化的 JPG）。
+
+## 外部资源
+
+### CSS
+
+```tsx filename="app/layout.tsx"
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <head>
+        <link
+          rel="stylesheet"
+          href="https://cdn.example.com/external-styles.css"
+        />
+      </head>
+      <body>{children}</body>
+    </html>
+  )
+}
+```
+
+但通常不推荐——外部 CSS 无法被 Tailwind 的树摇或优化。考虑 `pnpm add` 后 import。
+
+### Preconnect / DNS prefetch
+
+```tsx filename="app/layout.tsx"
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="dns-prefetch" href="https://api.example.com" />
+      </head>
+      <body>{children}</body>
+    </html>
+  )
+}
+```
+
+## Icon / Favicon
+
+### 静态 icon
+
+```text
+app/
+├── icon.svg              ← 首选
+├── icon.png              ← 备选（App Router 自动生成）
+├── apple-icon.png        ← Apple 设备 icon
+└── favicon.ico           ← 传统 favicon
+```
+
+Next.js 自动生成 `<link rel="icon">` 标签，无需在 `<head>` 中手动写。
+
+### 动态 icon
+
+```tsx filename="app/icon.tsx"
+import { ImageResponse } from 'next/og'
+
+export const size = { width: 32, height: 32 }
+export const contentType = 'image/png'
+
+export default function Icon() {
+  return new ImageResponse(
+    (
+      <div
+        style={{
+          width: 32,
+          height: 32,
+          backgroundColor: 'black',
+          color: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 20,
+          fontWeight: 700,
+          borderRadius: 8,
+        }}
+      >
+        B
+      </div>
+    ),
+    { width: 32, height: 32 }
+  )
+}
+```
+
+## 陷阱
+
+### `public/` 不能与 `app/` 中的静态路由冲突
+
+`public/about.html` 与 `app/about/page.tsx` 冲突——Next.js 会优先选择 `public/`，导致 `/about` 不对应 page。避免 `public/` 中的 HTML 文件。
+
+### `<Script>` 的 `onError` 不总是触发
+
+跨域脚本加载失败时浏览器的错误报告不完整。脚本加载失败的排查可通过 Network 面板确认文件被正确加载。
+
+### `beforeInteractive` 的脚本影响 TBT (Total Blocking Time)
+
+`beforeInteractive` 脚本在 hydration 前执行（阻塞了主线程）。如有 3 个 `beforeInteractive` 脚本，每个 200ms → TBT +600ms。
+
+### 外部字体不应通过 `<link>` 加载
+
+用 `next/font` 代替：
+
+```tsx
+// ✗ 外部 CSS 中 import 字体（FOIT + 额外的 HTTP 请求）
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=..." />
+
+// ✓
+import { Inter } from 'next/font/google'
+const inter = Inter({ subsets: ['latin'] })
+```
+
+### 没有 `<Script id>` 的内联脚本在一个路由中可能重复
+
+Next.js 用 `id` 去重 `<Script>` 实例。缺少 `id` → 每次组件挂载都重新注入脚本（污染全局命名空间）。
+
+## 小结
+
+- `next/script` 通过 `strategy` 控制脚本加载时机，`id` 用于去重；
+- `public/` 存放原样输出的静态资源（robots.txt、favicon、已优化图片）；
+- App Router 自动处理 favicon 和 icon 文件识别；
+- 外部资源通过 `<link>` 标签或 `next/script` 引入，但尽量用 import + `next/image` / `next/font` 代替 URL 引用。

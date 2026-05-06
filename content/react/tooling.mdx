@@ -1,0 +1,367 @@
+---
+title: 工具链
+description: 使用 Vite + TypeScript 搭建生产级 React 项目
+---
+
+# 工具链
+
+Create React App（CRA）已被官方[弃用](https://react.dev/blog/2025/02/14/sunsetting-create-react-app)。当前 React 团队推荐两条路：
+
+- **使用全栈框架**：Next.js、Remix、Astro、TanStack Start —— 自带路由 / SSR / 数据请求约定
+- **从零搭轻量 SPA**：[Vite](https://vitejs.dev) + React 模板 —— 极快的冷启动与 HMR
+
+本章覆盖第二条：Vite + TypeScript + ESLint 项目骨架。框架方案见 [框架](/react/frameworks)。
+
+## 创建项目
+
+```bash
+# pnpm 推荐
+pnpm create vite my-app --template react-ts
+
+# 其他包管理器
+npm create vite@latest my-app -- --template react-ts
+yarn create vite my-app --template react-ts
+bun create vite my-app --template react-ts
+
+cd my-app
+pnpm install
+pnpm dev
+```
+
+模板自带：
+
+- Vite + 主流 React 插件 `@vitejs/plugin-react`（基于 SWC 或 Babel，HMR + Fast Refresh）
+- TypeScript 严格配置
+- ESLint 默认规则集
+- 浏览器目标基线 ESNext + 现代浏览器
+
+## 目录结构
+
+```text
+my-app/
+├── public/                    # 静态资源（直接拷贝到产物根目录）
+│   └── vite.svg
+├── src/
+│   ├── assets/                # 受打包处理的资源（import 引用）
+│   ├── App.tsx
+│   ├── App.css
+│   ├── main.tsx               # 入口：createRoot
+│   ├── index.css
+│   └── vite-env.d.ts          # Vite 类型增强
+├── index.html                 # 入口 HTML（Vite 把它当 SPA 入口）
+├── package.json
+├── tsconfig.json
+├── tsconfig.node.json         # 用于 vite.config.ts 的 TS 配置
+├── vite.config.ts
+└── eslint.config.js
+```
+
+`index.html` 在 Vite 中位于根目录而非 `public/`：
+
+```html filename="index.html"
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+## 入口文件
+
+```tsx filename="src/main.tsx"
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.tsx'
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+)
+```
+
+`<StrictMode>` 是开发期辅助：
+
+- 故意双调用渲染函数 / `useEffect`，暴露副作用问题
+- 警告即将弃用的 API
+- **不影响生产构建**
+
+## 推荐脚本
+
+```json filename="package.json"
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "type-check": "tsc -b"
+  }
+}
+```
+
+`tsc -b` 在构建前做完整类型检查；Vite 的 `vite build` 默认仅做转译，不做类型检查。
+
+## TypeScript 配置
+
+```jsonc filename="tsconfig.json"
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
+```
+
+```jsonc filename="tsconfig.app.json"
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
+```
+
+几个值得开启的严格选项：
+
+| 选项 | 收益 |
+| ---- | ---- |
+| `noUncheckedIndexedAccess` | `arr[i]` 类型为 `T \| undefined`，强制处理越界 |
+| `verbatimModuleSyntax` | 强制区分 `import type` 与 `import`，避免编译产物意外保留类型导入 |
+| `moduleDetection: "force"` | 全部源码视为模块，避免顶层 `var` 提升到全局 |
+| `paths` 别名 | 取代 `'../../components/Button'` |
+
+## 路径别名
+
+`tsconfig.json` 设置 `paths` 后还需让 Vite 识别：
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import { fileURLToPath, URL } from 'node:url'
+
+export default defineConfig({
+  plugins: [react()],
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url))
+    }
+  }
+})
+```
+
+或使用 [`vite-tsconfig-paths`](https://github.com/aleclarson/vite-tsconfig-paths) 直接读取 `tsconfig` 的 `paths`，避免双份配置。
+
+## 环境变量
+
+Vite 仅暴露以 `VITE_` 开头的变量到客户端：
+
+```bash filename=".env"
+VITE_API_BASE=https://api.example.com
+DB_PASSWORD=secret                # 不会被打包进客户端
+```
+
+```ts
+const base = import.meta.env.VITE_API_BASE
+console.log(import.meta.env.MODE)               // 'development' / 'production'
+console.log(import.meta.env.DEV)                // true 当 dev
+```
+
+`.env` 文件加载优先级（后者覆盖前者）：
+
+```text
+.env
+.env.local
+.env.[mode]            # .env.development / .env.production
+.env.[mode].local
+```
+
+类型增强：
+
+```ts filename="src/vite-env.d.ts"
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_BASE: string
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv
+}
+```
+
+## ESLint
+
+Vite 模板自带 ESLint flat config（`eslint.config.js`）。建议加入：
+
+```js filename="eslint.config.js"
+import js from '@eslint/js'
+import tseslint from 'typescript-eslint'
+import react from 'eslint-plugin-react'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+
+export default tseslint.config(
+  js.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
+  {
+    files: ['**/*.{ts,tsx}'],
+    plugins: {
+      react,
+      'react-hooks': reactHooks,
+      'react-refresh': reactRefresh
+    },
+    rules: {
+      ...react.configs.recommended.rules,
+      ...react.configs['jsx-runtime'].rules,
+      ...reactHooks.configs.recommended.rules,
+      'react-refresh/only-export-components': 'warn',
+      'react/prop-types': 'off'              // 用 TS 替代
+    },
+    settings: {
+      react: { version: '19' }
+    }
+  }
+)
+```
+
+`react-hooks/exhaustive-deps` 规则非常关键——它能在编译期发现 80% 的 Hook 依赖错误（详见 [Hooks](/react/hooks#依赖数组陷阱)）。
+
+## Prettier
+
+```bash
+pnpm add -D prettier eslint-config-prettier
+```
+
+```json filename=".prettierrc.json"
+{
+  "semi": false,
+  "singleQuote": true,
+  "trailingComma": "none",
+  "printWidth": 100,
+  "arrowParens": "avoid"
+}
+```
+
+在 ESLint 配置末尾加上 `'prettier'` 配置，关闭与格式相关的 ESLint 规则，避免冲突。
+
+## CSS 处理
+
+Vite 原生支持：
+
+| 文件名约定 | 行为 |
+| ---------- | ---- |
+| `*.css` | 全局样式 |
+| `*.module.css` | CSS Modules，自动作用域化 |
+| `*.scss` / `*.less` / `*.styl` | 安装对应预处理器即可 |
+| `import url('foo.css')` 等 | 自动处理 |
+
+详见 [样式方案](/react/styling)。
+
+## 静态资源
+
+```ts
+import logo from './assets/logo.svg'           // 经哈希处理的 URL
+import logoUrl from './assets/logo.svg?url'    // 强制 URL 形式
+import logoRaw from './assets/logo.svg?raw'    // 原始字符串
+import LogoComponent from './assets/logo.svg?react' // 需配合 vite-plugin-svgr
+```
+
+放在 `public/` 下的资源不经处理，按原路径访问：`/favicon.svg`。
+
+## 生产构建
+
+```bash
+pnpm build
+# 输出到 dist/
+```
+
+Vite 默认将依赖打包到一个或多个 chunk，开启 ES Module 输出。可在 `vite.config.ts` 做更细的控制：
+
+```ts
+export default defineConfig({
+  build: {
+    target: 'es2020',
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ['react', 'react-dom'],
+          ui: ['@radix-ui/react-*', 'lucide-react']
+        }
+      }
+    }
+  }
+})
+```
+
+## 其他常用插件
+
+| 包 | 作用 |
+| -- | ---- |
+| `@vitejs/plugin-legacy` | 输出旧浏览器兼容包 |
+| `vite-plugin-svgr` | SVG 作为 React 组件导入 |
+| `unplugin-auto-import` / `unplugin-vue-components` | 自动导入 |
+| `vite-plugin-pwa` | Service Worker 支持 |
+| `@vitejs/plugin-react-swc` | 替换 Babel 的 SWC 版本，构建更快 |
+
+## 推荐目录约定
+
+中型项目可参考：
+
+```text
+src/
+├── app/              # 应用级路由 / 入口
+├── components/       # 通用 UI 组件
+├── features/         # 业务模块（推荐"按特性分文件夹"）
+│   └── auth/
+│       ├── api.ts
+│       ├── components/
+│       ├── hooks/
+│       └── index.ts
+├── lib/              # 工具函数与第三方封装
+├── hooks/            # 跨业务的通用 Hook
+├── stores/           # Zustand / Jotai store
+├── styles/           # 全局样式
+├── types/            # 全局 TS 类型
+└── main.tsx
+```
+
+按"特性（feature-based）"组织优于"按角色（pages / components / utils）"——前者把高内聚的代码放在一起，重构时不必跨多个目录。
+
+## 小结
+
+- React 团队不再推荐 CRA；Vite 是 SPA 场景的事实标准；
+- 严格 TypeScript + ESLint + Prettier 是工程基线；
+- Vite 的 `import.meta.env` 取代 CRA 的 `process.env`，仅暴露 `VITE_*` 变量；
+- 路径别名、环境变量类型、CSS Modules 等开箱即用；
+- 中型项目按 feature 组织目录，避免"按角色分类"的耦合。

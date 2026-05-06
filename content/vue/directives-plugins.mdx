@@ -1,0 +1,153 @@
+---
+title: 自定义指令与插件
+description: 指令生命周期、插件系统、全局属性注册
+---
+
+# 自定义指令与插件
+
+Vue 允许注册自定义指令和插件来扩展功能。
+
+## 自定义指令
+
+### 基础用法
+
+```ts filename="directives/focus.ts"
+import type { Directive } from 'vue'
+
+export const vFocus: Directive = {
+  mounted(el) {
+    el.focus()
+  }
+}
+```
+
+```vue
+<script setup lang="ts">
+import { vFocus } from './directives/focus'
+</script>
+
+<template>
+  <input v-focus>
+</template>
+```
+
+### 指令钩子
+
+```ts
+const myDirective: Directive = {
+  created(el, binding, vnode, prevVnode) {},
+  beforeMount(el, binding, vnode, prevVnode) {},
+  mounted(el, binding, vnode, prevVnode) {},
+  beforeUpdate(el, binding, vnode, prevVnode) {},
+  updated(el, binding, vnode, prevVnode) {},
+  beforeUnmount(el, binding, vnode, prevVnode) {},
+  unmounted(el, binding, vnode, prevVnode) {}
+}
+```
+
+### 指令参数
+
+```ts filename="directives/color.ts"
+import type { Directive } from 'vue'
+
+export const vColor: Directive = {
+  mounted(el, binding) {
+    el.style.color = binding.value
+  },
+  updated(el, binding) {
+    el.style.color = binding.value
+  }
+}
+```
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import { vColor } from './directives/color'
+
+const color = ref('red')
+</script>
+
+<template>
+  <p v-color="color">Colored Text</p>
+</template>
+```
+
+### 全局注册
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import App from './App.vue'
+
+const app = createApp(App)
+
+app.directive('focus', {
+  mounted(el) {
+    el.focus()
+  }
+})
+
+app.mount('#app')
+```
+
+## 插件
+
+### 创建插件
+
+```ts filename="plugins/i18n.ts"
+import type { App } from 'vue'
+
+export interface I18nOptions {
+  locale: string
+  messages: Record<string, Record<string, string>>
+}
+
+export default {
+  install(app: App, options: I18nOptions) {
+    app.config.globalProperties.$t = (key: string) => {
+      return options.messages[options.locale][key]
+    }
+    
+    app.provide('i18n', options)
+  }
+}
+```
+
+### 使用插件
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import App from './App.vue'
+import i18nPlugin from './plugins/i18n'
+
+const app = createApp(App)
+
+app.use(i18nPlugin, {
+  locale: 'zh',
+  messages: {
+    zh: {
+      hello: '你好'
+    },
+    en: {
+      hello: 'Hello'
+    }
+  }
+})
+
+app.mount('#app')
+```
+
+```vue
+<script setup lang="ts">
+import { inject } from 'vue'
+import type { I18nOptions } from './plugins/i18n'
+
+const i18n = inject<I18nOptions>('i18n')
+</script>
+
+<template>
+  <p>{{ i18n?.messages[i18n.locale].hello }}</p>
+</template>
+```
+
+下一章 [插槽系统](/vue/slots) 详解内容分发。

@@ -1,0 +1,456 @@
+---
+title: 资源预加载
+description: dns-prefetch、preconnect、preload、prefetch、modulepreload 与 fetchpriority
+---
+
+# 资源预加载
+
+预加载（Resource Hints）是一组让浏览器**提前**完成 DNS 解析、TCP/TLS 握手、资源下载的 HTML 提示。它们看似低成本，却是优化首屏 LCP 与跨页导航的杀手锏——但用错也会拖慢页面。本章梳理五种主要 Hint 与新一代 `fetchpriority` 的使用边界。
+
+## 全景对比
+
+| Hint | 作用阶段 | 是否下载 | 适用场景 |
+| ---- | -------- | -------- | -------- |
+| `dns-prefetch` | DNS 解析 | ❌ | 第三方域，不确定一定会用 |
+| `preconnect` | DNS + TCP + TLS | ❌ | 第三方域，确定要用 |
+| `preload` | 下载（高优先级） | ✅ | 当前页关键资源 |
+| `prefetch` | 下载（低优先级） | ✅ | 下一页可能用到的资源 |
+| `modulepreload` | 下载 + 解析 + 编译 ES Module | ✅ | ES Module 入口 |
+
+```text
+时间轴：
+T0 ─ DNS ─ TCP ─ TLS ─ 请求 ─ 响应 ─ 解析 ─ 执行
+     ▲     ▲     ▲     ▲     ▲      ▲      ▲
+     │     │     │     │     │      │      │
+   dns-pre  preconnect      preload         modulepreload
+```
+
+## dns-prefetch
+
+提前做 DNS 查询，不建立连接。
+
+```html
+<link rel="dns-prefetch" href="https://api.example.com">
+<link rel="dns-prefetch" href="https://cdn.example.com">
+```
+
+### 何时使用
+
+- 第三方域名（埋点、广告、字体服务）
+- 当前页面**不确定**会用，但**可能**会用的域
+- 需要支持老浏览器（dns-prefetch 兼容性最广）
+
+### 何时不用
+
+- 自己的主域（HTML 已经触发了解析）
+- 已经在用 `preconnect` 的域（preconnect 已经包含 DNS）
+- 只是无脑加几十个，浏览器会忽略多余的
+
+## preconnect
+
+完成 DNS + TCP + TLS（HTTPS 时），让后续到该源的请求**省掉握手往返**。
+
+```html
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+```
+
+### `crossorigin` 属性的关键
+
+如果资源是匿名 CORS 请求（`<img>`、`<script type="module">`、字体），**必须**加 `crossorigin`，否则连接会被分配到错误的连接池，preconnect 形同虚设：
+
+```html
+<!-- 字体（匿名 CORS） -->
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+<!-- 普通图片（无 CORS） -->
+<link rel="preconnect" href="https://cdn.example.com">
+
+<!-- 带认证的 API -->
+<link rel="preconnect" href="https://api.example.com" crossorigin="use-credentials">
+```
+
+### 数量限制
+
+每个 `preconnect` 都消耗资源（连接、内存）。**不要超过 4 个**。优先选最关键的源：
+
+- 自己的 API 域（如果跨域）
+- LCP 图片所在的 CDN
+- 关键字体服务
+
+### 收益预估
+
+```text
+冷启动 RTT 100 ms：
+- DNS：1 RTT
+- TCP：1 RTT
+- TLS 1.3：1 RTT
+合计 3 RTT = 300 ms
+
+preconnect 把这 300 ms 移到 HTML 解析期间，
+后续请求几乎零延迟。
+```
+
+对 LCP 图片所在的 CDN 加 preconnect，常见能减少 200–400 ms LCP。
+
+## preload
+
+强制浏览器**提前下载**当前页面会用到的资源，并按高优先级。
+
+```html
+<!-- LCP 图片 -->
+<link rel="preload" href="/hero.webp" as="image">
+
+<!-- 关键字体 -->
+<link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin>
+
+<!-- 关键 CSS（非阻塞写法） -->
+<link rel="preload" href="/critical.css" as="style"
+      onload="this.onload=null;this.rel='stylesheet'">
+
+<!-- 关键 JS -->
+<link rel="preload" href="/main.js" as="script">
+
+<!-- 关键 fetch -->
+<link rel="preload" href="/api/init" as="fetch" crossorigin>
+```
+
+### `as` 属性是必填
+
+省略 `as` 会导致：
+
+1. 浏览器无法分配正确的优先级
+2. 请求可能被复用失败 → 下载两次
+3. CSP 校验失败
+
+| `as` 值 | 资源类型 |
+| ------- | -------- |
+| `script` | JS |
+| `style` | CSS |
+| `image` | 图片 |
+| `font` | 字体（必须加 `crossorigin`） |
+| `fetch` | XHR / Fetch API |
+| `document` | iframe |
+| `audio` / `video` / `track` | 媒体 |
+
+### 字体的 preload 必须 `crossorigin`
+
+没有 `crossorigin` 的字体 preload 会被浏览器忽略——因为字体请求默认就是 CORS 匿名：
+
+```html
+<!-- ✅ 正确 -->
+<link rel="preload" href="/inter.woff2" as="font" type="font/woff2" crossorigin>
+
+<!-- ❌ 错误：会下载两次 -->
+<link rel="preload" href="/inter.woff2" as="font" type="font/woff2">
+```
+
+### LCP 图片的 preload
+
+如果 LCP 元素是图片，`preload` 是把 LCP 时间提前的最有效手段之一：
+
+```html
+<head>
+  <link rel="preload" as="image" href="/hero.webp"
+        imagesrcset="/hero-480.webp 480w, /hero-1080.webp 1080w"
+        imagesizes="100vw"
+        fetchpriority="high">
+</head>
+<body>
+  <img src="/hero.webp" srcset="/hero-480.webp 480w, /hero-1080.webp 1080w"
+       sizes="100vw" alt="hero">
+</body>
+```
+
+`imagesrcset` 与 `imagesizes` 让 preload 选择与最终渲染**同一份图**，避免下载两次。
+
+### preload 的反模式
+
+| 反模式 | 后果 |
+| ------ | ---- |
+| preload 所有 JS chunk | 与浏览器自身调度冲突，反而变慢 |
+| preload 但 5 秒内没用 | 控制台警告 + 浪费带宽 |
+| preload 字体不加 `crossorigin` | 下载两次 |
+| preload 很多 `as="fetch"` 但没匹配上 | 失效 |
+
+```text
+Console 警告示例：
+"The resource <url> was preloaded using link preload but not used within
+ a few seconds from the window's load event."
+```
+
+## prefetch
+
+低优先级下载，告诉浏览器"用户**可能**会跳到下一页"，趁空闲时把资源拉下来：
+
+```html
+<link rel="prefetch" href="/checkout.js">
+<link rel="prefetch" href="/checkout-data.json" as="fetch" crossorigin>
+```
+
+### 与 preload 的差异
+
+| 维度 | preload | prefetch |
+| ---- | ------- | -------- |
+| 优先级 | 高 | 极低（idle） |
+| 目标 | 当前页 | 下一页 |
+| 缓存层 | HTTP cache（Memory） | HTTP cache（Disk） |
+| 失效行为 | 立即下载 | 等浏览器空闲 |
+
+### 在框架中的应用
+
+#### Next.js / React Router
+
+`<Link>` 组件视口内可见时自动 prefetch 目标路由的代码与数据：
+
+```jsx
+import Link from 'next/link'
+
+// Next.js：默认 prefetch
+<Link href="/checkout">Checkout</Link>
+
+// 关闭：仅鼠标 hover 时再 prefetch
+<Link href="/checkout" prefetch={false}>Checkout</Link>
+```
+
+#### Vue Router / Nuxt
+
+```vue
+<NuxtLink to="/checkout" prefetch>Checkout</NuxtLink>
+```
+
+#### 手动 prefetch
+
+```js
+// 鼠标 hover 时 prefetch（最经济的策略）
+document.querySelectorAll('a[href]').forEach(a => {
+  a.addEventListener('mouseenter', () => {
+    const link = document.createElement('link')
+    link.rel = 'prefetch'
+    link.href = a.href
+    document.head.appendChild(link)
+  }, { once: true })
+})
+```
+
+### 数据 prefetch
+
+不仅可以 prefetch 静态资源，也可以 prefetch API 数据。Next.js / SvelteKit / Nuxt 都内置了路由级数据 prefetch。
+
+## modulepreload
+
+ES Module 有自己的依赖图，浏览器解析 `import` 才能发现下一个依赖。`modulepreload` 让浏览器**同时**预加载整个依赖链：
+
+```html
+<link rel="modulepreload" href="/main.js">
+<link rel="modulepreload" href="/utils.js">
+<link rel="modulepreload" href="/api.js">
+```
+
+与 `preload as="script"` 的区别：
+
+| 维度 | `preload as="script"` | `modulepreload` |
+| ---- | --------------------- | --------------- |
+| 下载 | ✅ | ✅ |
+| 解析依赖 | ❌ | ✅ |
+| 编译 | ❌ | ✅ |
+| 加入模块图 | ❌ | ✅ |
+
+构建工具自动生成（Vite 默认开启）：
+
+```html
+<!-- Vite 构建产物 -->
+<link rel="modulepreload" crossorigin href="/assets/vendor.abc.js">
+<script type="module" src="/assets/main.def.js"></script>
+```
+
+## fetchpriority
+
+2023 年加入的属性，对所有可下载元素提供**优先级控制**：
+
+```html
+<!-- LCP 图片提到最高 -->
+<img src="/hero.webp" fetchpriority="high">
+
+<!-- 装饰性图片降到最低 -->
+<img src="/decoration.webp" fetchpriority="low" loading="lazy">
+
+<!-- 重要 fetch -->
+<script>
+  fetch('/api/critical', { priority: 'high' })
+</script>
+```
+
+### 浏览器默认优先级（简化）
+
+| 资源 | 默认优先级 |
+| ---- | ---------- |
+| HTML 入口 | Highest |
+| `<head>` 中的 CSS | Highest |
+| `<head>` 中同步 JS | High |
+| `defer` / `async` JS | Low |
+| 视口外图片 | Low |
+| 视口内图片 | Medium |
+| Lazy 图片 | Low |
+| `font` (display: swap) | Low |
+| `XHR/Fetch` | High（浏览器自定义） |
+
+### fetchpriority 的实际收益
+
+LCP 图片在视口内默认是 Medium，加 `fetchpriority="high"` 可以让它**抢在第一波**下载，常见 LCP 提升 100–300 ms。
+
+```html
+<!-- before：LCP 慢 -->
+<img src="/hero.webp" alt="hero">
+
+<!-- after：LCP 快 -->
+<img src="/hero.webp" alt="hero" fetchpriority="high">
+```
+
+## 浏览器调度的"瀑布流"
+
+理解浏览器如何并行下载资源能帮你避开预加载陷阱：
+
+```text
+[HTML 到达]
+    ├─► 解析 <head>
+    │     ├─► 发现 preload → 启动下载（高优先级）
+    │     ├─► 发现 preconnect → 建立连接
+    │     ├─► 发现 CSS link → 启动下载（阻塞渲染）
+    │     ├─► 发现同步 script → 启动下载（阻塞解析）
+    │     └─► 发现 defer/async → 启动下载（不阻塞）
+    │
+    ├─► 解析 <body>
+    │     ├─► 发现 <img> → 视口内 Medium，外 Low
+    │     ├─► 发现 <link rel="prefetch"> → 加入空闲队列
+    │     └─► ...
+    │
+    └─► DOMContentLoaded
+          └─► 执行 defer 脚本
+```
+
+每个连接同时只能跑几个请求，瀑布形态决定了首屏速度。
+
+## 实战决策树
+
+需要快速判断给某资源加什么 Hint：
+
+```text
+是 LCP 元素吗？
+├─ 是 ──► preload + fetchpriority="high"
+│
+├─ 否，但是当前页关键资源 ──►
+│         是 CSS/JS/字体？──► preload
+│         是图片？        ──► fetchpriority + loading="eager"
+│
+└─ 否，是下一页可能的资源 ──► prefetch
+```
+
+第三方域的处理：
+
+```text
+确定会用？──► preconnect（最多 4 个）
+不确定？──► dns-prefetch
+```
+
+## 框架集成
+
+### Next.js
+
+```jsx
+import Head from 'next/head'
+
+export default function Page() {
+  return (
+    <>
+      <Head>
+        <link rel="preconnect" href="https://api.example.com" crossorigin />
+        <link rel="preload" href="/hero.webp" as="image" fetchpriority="high" />
+      </Head>
+      <Image
+        src="/hero.webp"
+        priority                            // 等价于 fetchpriority="high"
+        width={1200} height={600}
+        alt="hero"
+      />
+    </>
+  )
+}
+```
+
+### Nuxt 3
+
+```vue
+<script setup>
+useHead({
+  link: [
+    { rel: 'preconnect', href: 'https://api.example.com', crossorigin: '' },
+    { rel: 'preload', href: '/hero.webp', as: 'image' }
+  ]
+})
+</script>
+
+<template>
+  <NuxtImg src="/hero.webp" preload />
+</template>
+```
+
+### Vite SSR
+
+```js
+// vite.config.js
+export default {
+  experimental: {
+    renderBuiltUrl(filename) {
+      return { runtime: `globalThis.__assetsBaseURL + ${JSON.stringify(filename)}` }
+    }
+  }
+}
+```
+
+Vite 自动注入 `modulepreload` 到 SSR 输出。
+
+## 监控预加载效果
+
+### Chrome DevTools Network 面板
+
+- **Priority** 列查看资源的实际优先级
+- **Initiator** 列查看请求是哪个 Hint 触发的
+- 看 LCP 元素的 timing：是否在首屏就开始下载
+
+### Lighthouse 审计
+
+- "Preload key requests" 检查是否有应该 preload 但没 preload 的资源
+- "Avoid chaining critical requests" 检查关键请求链长度
+
+### `PerformanceObserver`
+
+```js
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.initiatorType === 'link' && entry.name.includes('hero.webp')) {
+      console.log('Preload completed:', entry.duration)
+    }
+  }
+}).observe({ type: 'resource', buffered: true })
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| preload 全部 JS chunk | 阻塞低优先级，整体变慢 | 仅 preload 关键 chunk |
+| preload 字体没 `crossorigin` | 下载两次 | 加 `crossorigin` |
+| preconnect 10+ 个域 | 浏览器忽略多余的 | 选最关键的 4 个 |
+| LCP 图片用 `loading="lazy"` | LCP 推迟 | 改 `fetchpriority="high"` |
+| prefetch 整个 sitemap | 浪费用户流量 | 视口内 / hover 触发 |
+
+## 小结
+
+- 预加载提示是"低成本高回报"的优化，但要精准——撒胡椒面式 preload 反而变慢；
+- `dns-prefetch` 与 `preconnect` 处理握手开销，前者宽松后者激进，preconnect 最多 4 个；
+- `preload` 适合**当前页**关键资源，`prefetch` 适合**下一页**可能用到的资源；
+- LCP 图片三件套：`preload` + `fetchpriority="high"` + `loading="eager"`；
+- 字体 `preload` 必须加 `crossorigin`，否则会下载两次；
+- ES Module 用 `modulepreload` 而不是 `preload as="script"`，构建工具一般自动注入；
+- `fetchpriority` 是新一代细粒度优先级控制，对 LCP 图片提优有立竿见影的效果。

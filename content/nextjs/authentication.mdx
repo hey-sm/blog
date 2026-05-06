@@ -1,0 +1,259 @@
+---
+title: 身份认证
+description: NextAuth.js (Auth.js) v5 集成、session vs JWT 策略、middleware 保护、OAuth 与 credential provider
+---
+
+# 身份认证
+
+Next.js 没有内置认证，但通过 **Auth.js (NextAuth.js v5)** 提供了官方推荐方案。它深度利用 Server Components 的上下文读取与 Server Actions 的提交能力。
+
+## 基本安装
+
+```bash
+pnpm add next-auth@beta @auth/prisma-adapter
+```
+
+```bash filename=".env.local"
+AUTH_SECRET=your-secret-key          # openssl rand -hex 32
+AUTH_GITHUB_ID=your_github_client_id
+AUTH_GITHUB_SECRET=your_github_secret
+```
+
+## 配置 Auth.js
+
+```ts filename="src/lib/auth.ts"
+import NextAuth from 'next-auth'
+import GitHub from 'next-auth/providers/github'
+import { PrismaAdapter } from '@auth/prisma-adapter'
+import { db } from '@/lib/db'
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  adapter: PrismaAdapter(db),
+  session: { strategy: 'jwt' },      // JWT（推荐）或 'database'
+  providers: [
+    GitHub({
+      clientId: process.env.AUTH_GITHUB_ID,
+      clientSecret: process.env.AUTH_GITHUB_SECRET,
+    }),
+  ],
+  callbacks: {
+    jwt({ token, user }) {
+      if (user) token.role = user.role
+      return token
+    },
+    session({ session, token }) {
+      session.user.role = token.role as string
+      return session
+    },
+  },
+})
+```
+
+## 配合 App Router 的路由
+
+```ts filename="src/app/api/auth/[...nextauth]/route.ts"
+import { handlers } from '@/lib/auth'
+
+export const { GET, POST } = handlers
+```
+
+## Server Component 中读取 session
+
+```tsx filename="app/dashboard/page.tsx"
+import { auth } from '@/lib/auth'
+import { redirect } from 'next/navigation'
+
+export default async function DashboardPage() {
+  const session = await auth()
+
+  if (!session?.user) {
+    redirect('/login')
+  }
+
+  return (
+    <div>
+      <h1>Welcome, {session.user.name}</h1>
+      <p>Email: {session.user.email}</p>
+    </div>
+  )
+}
+```
+
+## Client Component 中的认证
+
+```tsx filename="components/SignInButton.tsx"
+'use client'
+
+import { signIn, signOut, useSession } from 'next-auth/react'
+
+export function SignInButton() {
+  const { data: session, status } = useSession()
+
+  if (status === 'loading') return <p>Loading...</p>
+
+  return session ? (
+    <div className="flex items-center gap-4">
+      <img src={session.user?.image ?? ''} className="h-8 w-8 rounded-full" />
+      <span>{session.user?.name}</span>
+      <button onClick={() => signOut()}>Sign out</button>
+    </div>
+  ) : (
+    <button onClick={() => signIn('github')}>Sign in with GitHub</button>
+  )
+}
+```
+
+需要 Provider 包裹：
+
+```tsx filename="components/SessionProvider.tsx"
+'use client'
+
+import { SessionProvider as NextAuthSessionProvider } from 'next-auth/react'
+
+export function SessionProvider({ children }: { children: React.ReactNode }) {
+  return <NextAuthSessionProvider>{children}</NextAuthSessionProvider>
+}
+```
+
+```tsx filename="app/layout.tsx"
+import { SessionProvider } from '@/components/SessionProvider'
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html>
+      <body>
+        <SessionProvider>{children}</SessionProvider>
+      </body>
+    </html>
+  )
+}
+```
+
+## 自定义登录页面
+
+```tsx filename="app/login/page.tsx"
+import { signIn } from '@/lib/auth'
+
+export default function LoginPage() {
+  return (
+    <div className="mx-auto max-w-sm py-20">
+      <h1 className="text-2xl font-bold">Sign in</h1>
+      <form
+        action={async () => {
+          'use server'
+          await signIn('github', { redirectTo: '/dashboard' })
+        }}
+      >
+        <button
+          type="submit"
+          className="mt-4 w-full rounded bg-gray-900 px-4 py-2 text-white"
+        >
+          Sign in with GitHub
+        </button>
+      </form>
+    </div>
+  )
+}
+```
+
+## Middleware 保护
+
+```ts filename="src/middleware.ts"
+import { auth } from '@/lib/auth'
+
+export default auth((req) => {
+  if (!req.auth && req.nextUrl.pathname !== '/login') {
+    const newUrl = new URL('/login', req.nextUrl.origin)
+    return Response.redirect(newUrl)
+  }
+})
+
+export const config = {
+  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
+}
+```
+
+Auth.js 提供 **Edge-compatible** 的 `auth()` 版本，可在 middleware 中使用。
+
+## 策略选择
+
+| 维度 | JWT | Database Session |
+| ---- | --- | ---------------- |
+| 延迟 | 无（服务器自解析） | 需 DB 查询 |
+| 规模 | 水平扩展容易（无状态） | 需要 session store |
+| 撤回 | 必须通过黑名单或 TTL | 直接删除记录 |
+| 体积 | 通常 < 1KB | 无额外荷载 |
+| 与 Server Action 配合 | 即时 | 即时（但有 query） |
+
+JWT 是默认推荐的策略。
+
+## Credential Provider
+
+```ts filename="src/lib/auth.ts"
+import Credentials from 'next-auth/providers/credentials'
+import bcrypt from 'bcrypt'
+
+export const { auth, signIn, signOut } = NextAuth({
+  providers: [
+    Credentials({
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' },
+      },
+      async authorize(credentials) {
+        const user = await db.user.findUnique({
+          where: { email: credentials.email as string },
+        })
+
+        if (!user) return null
+
+        const valid = await bcrypt.compare(
+          credentials.password as string,
+          user.passwordHash
+        )
+        if (!valid) return null
+
+        return { id: user.id, email: user.email, name: user.name }
+      },
+    }),
+  ],
+  // ...
+})
+```
+
+## 陷阱
+
+### `auth()` 在 Server Component 中不需要 `use server`
+
+`auth()` 自动读取 cookie/header。不需要任何指令——它是纯 Server Component API。
+
+### `useSession` 需要 `<SessionProvider>`
+
+没有 Provider 时 `useSession()` 返回 `{ data: null, status: 'unauthenticated' }`——不会崩溃，但永远不会得到 session。
+
+### Middleware 中的 `auth()` 返回轻量 session
+
+与 Server Component 中的 `auth()` 返回不同：middleware 中的 session 不包含数据库扩展字段（如 `session.user.role`），除非这些字段嵌在 JWT token 中。
+
+### Credential provider 不触发 adapter
+
+`adapter` 只在 OAuth provider 的登录周期被调用。使用 credentials 时，你完全负责 session 数据的填充。
+
+### Session 过期时间
+
+JWT 的默认过期 = 30 天。如果你需要更短的生命周期，配置 `jwt.maxAge`：
+
+```ts
+session: {
+  strategy: 'jwt',
+  maxAge: 60 * 60 * 24,  // 1 天
+}
+```
+
+## 小结
+
+- Auth.js (NextAuth.js v5) 是 Next.js 官方推荐的认证方案；
+- Server Component 中 `auth()` 读取 session，Client Component 中 `useSession()` + `SessionProvider`；
+- Middleware 中 `auth()` 用于路由保护，Edge-compatible；
+- JWT 策略默认推荐（无状态、零延迟），Database session 适合需撤回的场景；
+- OAuth Provider 最简单（GitHub/Google），Credential Provider 仍需维护密码逻辑。

@@ -1,0 +1,576 @@
+---
+title: 联合与交叉类型
+description: TypeScript 联合类型 Union Types、交叉类型 Intersection Types、Discriminated Unions 与类型组合实战
+---
+
+# 联合与交叉类型
+
+联合类型（`|`）和交叉类型（`&`）是 TypeScript 类型系统中的组合运算符，用于构建复杂类型。
+
+## 联合类型
+
+### 基本语法
+
+```ts
+// 联合类型：值可以是多种类型之一
+type StringOrNumber = string | number
+
+let value: StringOrNumber
+value = 'hello'   // ✅
+value = 42        // ✅
+value = true      // ❌ 错误
+```
+
+### 字面量联合类型
+
+```ts
+type Direction = 'up' | 'down' | 'left' | 'right'
+type DiceValue = 1 | 2 | 3 | 4 | 5 | 6
+type HttpStatus = 200 | 201 | 400 | 401 | 404 | 500
+
+function move(direction: Direction) {
+  // direction 只能是这 4 个值之一
+}
+
+move('up')     // ✅
+move('north')  // ❌ 错误
+```
+
+**React 示例**：
+
+```tsx
+type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost'
+type ButtonSize = 'sm' | 'md' | 'lg'
+
+interface ButtonProps {
+  variant: ButtonVariant
+  size: ButtonSize
+  disabled?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}
+
+function Button({ variant, size, disabled, onClick, children }: ButtonProps) {
+  return (
+    <button
+      className={`btn btn-${variant} btn-${size}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  )
+}
+```
+
+### 联合类型的属性访问
+
+直接访问联合类型的属性时，只能访问所有成员的**公共属性**：
+
+```ts
+interface Cat {
+  name: string
+  meow: () => void
+}
+
+interface Dog {
+  name: string
+  bark: () => void
+}
+
+type Pet = Cat | Dog
+
+function getPetName(pet: Pet) {
+  // ✅ name 是公共属性
+  return pet.name
+}
+
+function makeSound(pet: Pet) {
+  // ❌ 错误：meow 不是 Dog 的成员
+  pet.meow()
+
+  // ❌ 错误：bark 不是 Cat 的成员
+  pet.bark()
+}
+```
+
+**需要通过类型收窄来安全访问**：
+
+```ts
+function makeSound(pet: Pet) {
+  if ('meow' in pet) {
+    pet.meow()  // ✅ 收窄到 Cat
+  } else {
+    pet.bark()  // ✅ 收窄到 Dog
+  }
+}
+```
+
+## Discriminated Unions（可辨识联合）
+
+使用共同的**字面量类型属性**来区分联合体成员，这是 TypeScript 最强大的模式之一：
+
+```ts
+interface Square {
+  kind: 'square'
+  size: number
+}
+
+interface Circle {
+  kind: 'circle'
+  radius: number
+}
+
+interface Triangle {
+  kind: 'triangle'
+  base: number
+  height: number
+}
+
+type Shape = Square | Circle | Triangle
+
+function getArea(shape: Shape): number {
+  switch (shape.kind) {
+    case 'square':
+      // shape 收窄为 Square
+      return shape.size * shape.size
+    case 'circle':
+      // shape 收窄为 Circle
+      return Math.PI * shape.radius ** 2
+    case 'triangle':
+      // shape 收窄为 Triangle
+      return (shape.base * shape.height) / 2
+  }
+}
+```
+
+**穷尽性检查**：
+
+```ts
+function getArea(shape: Shape): number {
+  switch (shape.kind) {
+    case 'square':
+      return shape.size * shape.size
+    case 'circle':
+      return Math.PI * shape.radius ** 2
+    case 'triangle':
+      return (shape.base * shape.height) / 2
+    default:
+      // 如果遗漏了任何成员，编译时报错
+      const _exhaustive: never = shape
+      return _exhaustive
+  }
+}
+```
+
+**React 示例——不同状态的组件**：
+
+```tsx
+type AsyncState<T> =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'success'; data: T }
+  | { status: 'error'; error: Error }
+
+function AsyncRenderer<T>({ state, render }: {
+  state: AsyncState<T>
+  render: (data: T) => React.ReactNode
+}) {
+  switch (state.status) {
+    case 'idle':
+      return <div>Ready to load</div>
+    case 'loading':
+      return <div>Loading...</div>
+    case 'success':
+      return <>{render(state.data)}</>
+    case 'error':
+      return <div>Error: {state.error.message}</div>
+  }
+}
+
+// 使用
+function UserList() {
+  const [state, setState] = useState<AsyncState<User[]>>({ status: 'idle' })
+
+  const loadUsers = async () => {
+    setState({ status: 'loading' })
+    try {
+      const users = await fetch('/api/users').then(r => r.json())
+      setState({ status: 'success', data: users })
+    } catch (error) {
+      setState({ status: 'error', error: error as Error })
+    }
+  }
+
+  return (
+    <div>
+      <button onClick={loadUsers}>Load Users</button>
+      <AsyncRenderer
+        state={state}
+        render={(users) => (
+          <ul>
+            {users.map(user => (
+              <li key={user.id}>{user.name}</li>
+            ))}
+          </ul>
+        )}
+      />
+    </div>
+  )
+}
+```
+
+### Discriminated Union Props 模式
+
+**React 示例——根据 variant 限制 props**：
+
+```tsx
+type ButtonProps =
+  | {
+      variant: 'primary'
+      label: string
+      onClick: () => void
+    }
+  | {
+      variant: 'link'
+      label: string
+      href: string
+      target?: '_blank' | '_self'
+    }
+  | {
+      variant: 'icon'
+      icon: React.ReactNode
+      ariaLabel: string
+      onClick: () => void
+    }
+
+function Button(props: ButtonProps) {
+  switch (props.variant) {
+    case 'primary':
+      return <button onClick={props.onClick}>{props.label}</button>
+    case 'link':
+      return <a href={props.href} target={props.target}>{props.label}</a>
+    case 'icon':
+      return (
+        <button onClick={props.onClick} aria-label={props.ariaLabel}>
+          {props.icon}
+        </button>
+      )
+  }
+}
+
+// 使用时类型安全
+<Button variant="primary" label="Click" onClick={() => {}} />
+<Button variant="link" label="Docs" href="/docs" target="_blank" />
+<Button variant="icon" icon={<Icon />} ariaLabel="Settings" onClick={() => {}} />
+
+// ❌ 错误：icon variant 没有 label
+<Button variant="icon" label="Wrong" />
+
+// ❌ 错误：link variant 没有 onClick
+<Button variant="link" label="Docs" onClick={() => {}} />
+```
+
+## 交叉类型
+
+### 基本语法
+
+交叉类型合并多个类型的属性：
+
+```ts
+interface Nameable {
+  name: string
+}
+
+interface Ageable {
+  age: number
+}
+
+type Person = Nameable & Ageable
+
+const person: Person = {
+  name: 'Alice',
+  age: 25
+}
+```
+
+### 对象类型交叉
+
+```ts
+type User = {
+  id: number
+  name: string
+}
+
+type WithTimestamps = {
+  createdAt: Date
+  updatedAt: Date
+}
+
+type UserEntity = User & WithTimestamps
+
+const entity: UserEntity = {
+  id: 1,
+  name: 'Alice',
+  createdAt: new Date(),
+  updatedAt: new Date()
+}
+```
+
+### 函数类型交叉
+
+函数类型的交叉等价于**函数重载**：
+
+```ts
+type StringFn = (value: string) => string
+type NumberFn = (value: number) => number
+
+// 交叉后：既能处理 string 也能处理 number
+type Processor = StringFn & NumberFn
+
+const process: Processor = (value: string | number): string | number => {
+  if (typeof value === 'string') {
+    return value.toUpperCase()
+  }
+  return value * 2
+}
+```
+
+**React 示例**：
+
+```tsx
+type BaseProps = {
+  className?: string
+  style?: React.CSSProperties
+}
+
+type ClickableProps = {
+  onClick: () => void
+}
+
+type FocusableProps = {
+  onFocus: () => void
+  onBlur: () => void
+}
+
+type InteractiveProps = BaseProps & ClickableProps & FocusableProps
+
+function InteractiveElement(props: InteractiveProps) {
+  return (
+    <div
+      className={props.className}
+      style={props.style}
+      onClick={props.onClick}
+      onFocus={props.onFocus}
+      onBlur={props.onBlur}
+      tabIndex={0}
+    />
+  )
+}
+```
+
+### 交叉类型与泛型配合
+
+```ts
+// 为对象添加 ID
+function withId<T>(obj: T): T & { id: string } {
+  return { ...obj, id: crypto.randomUUID() }
+}
+
+const user = withId({ name: 'Alice', age: 25 })
+// user 类型：{ name: string; age: number } & { id: string }
+console.log(user.id)    // ✅
+console.log(user.name)  // ✅
+```
+
+## 联合 vs 交叉
+
+| 特性 | 联合 `A \| B` | 交叉 `A & B` |
+|------|---------------|--------------|
+| 含义 | A **或** B | A **且** B |
+| 属性访问 | 只能访问公共属性 | 可以访问所有属性 |
+| 值要求 | 满足 A 或满足 B | 同时满足 A 和 B |
+| 类比 | 并集 | 交集 |
+
+```ts
+type A = { a: string }
+type B = { b: number }
+
+type Union = A | B
+// 值可以是 { a: string } 或 { b: number }
+
+type Intersection = A & B
+// 值必须是 { a: string; b: number }
+```
+
+### 联合交叉的分配律
+
+```ts
+// 类似代数分配律
+type T1 = (A | B) & C       // 等价于 (A & C) | (B & C)
+type T2 = (A & B) | C       // 等价于 (A | C) & (B | C)
+```
+
+## 同名属性冲突
+
+### 联合中的同名属性
+
+```ts
+interface Bird {
+  type: 'bird'
+  flySpeed: number
+}
+
+interface Fish {
+  type: 'fish'
+  swimSpeed: number
+}
+
+// 联合：同名属性的类型取并集
+type Animal = Bird | Fish
+
+// type 是 'bird' | 'fish'（只能访问公共值）
+let animal: Animal
+animal.type = 'bird'  // ✅
+animal.type = 'dog'   // ❌
+```
+
+### 交叉中的同名属性
+
+```ts
+interface A {
+  value: string
+}
+
+interface B {
+  value: number
+}
+
+// 交叉：同名属性类型也取交叉
+type C = A & B
+
+// value 类型为 string & number，即 never
+const c: C = {
+  value: /* string & number → never，无法赋任何值 */
+}
+
+// ❌ 错误
+c.value = 'hello'
+c.value = 42
+```
+
+## 实用模式
+
+### 1. 带标签的联合（Tagged Union）
+
+```ts
+type ApiResponse<T> =
+  | { type: 'ok'; data: T }
+  | { type: 'error'; code: number; message: string }
+
+function handleResponse<T>(response: ApiResponse<T>) {
+  if (response.type === 'ok') {
+    console.log(response.data)  // T
+  } else {
+    console.error(response.code, response.message)
+  }
+}
+```
+
+### 2. 部分交叉（类型安全的对象合并）
+
+```ts
+function merge<T extends object, U extends object>(a: T, b: U): T & U {
+  return { ...a, ...b }
+}
+
+const result = merge(
+  { name: 'Alice' },
+  { age: 25, email: 'alice@example.com' }
+)
+// result: { name: string } & { age: number; email: string }
+```
+
+### 3. 从联合中提取特定成员
+
+```ts
+// 使用 Extract 提取
+type Shape = Square | Circle | Triangle
+type RoundShapes = Extract<Shape, { kind: 'circle' }>
+// Circle
+
+// 使用 Exclude 排除
+type NonCircle = Exclude<Shape, { kind: 'circle' }>
+// Square | Triangle
+```
+
+## 陷阱
+
+### 1. 联合类型的 override 方法签名
+
+```ts
+class Cat {
+  sound() { return 'meow' }
+}
+
+class Dog {
+  sound() { return 'bark'; }
+}
+
+function getSound(animal: Cat | Dog) {
+  // ✅ 可以访问公共方法
+  // 但返回类型为 string（取各返回类型的并集）
+  return animal.sound()
+}
+```
+
+### 2. never 在联合和交叉中的行为
+
+```ts
+// never 在联合中被吸收
+type T1 = string | never   // string
+
+// never 在交叉中会吞没一切
+type T2 = string & never   // never
+```
+
+### 3. 大量成员的联合可能导致性能问题
+
+```ts
+// ❌ 成员过多的联合类型会拖慢类型检查
+type TooBig = 'a1' | 'a2' | 'a3' | /* ... 1000+ members */
+```
+
+## 最佳实践
+
+### ✅ 优先使用 Discriminated Unions 管理状态
+
+```tsx
+// ✅ 状态可辨识，穷尽性可检查
+type RequestState<T> =
+  | { status: 'idle' }
+  | { status: 'pending' }
+  | { status: 'fulfilled'; data: T }
+  | { status: 'rejected'; error: string }
+```
+
+### ✅ 使用交叉类型扩展现有类型
+
+```ts
+type WithLoading = { loading: boolean }
+type WithError = { error: string | null }
+
+type EnhancedProps = BaseProps & WithLoading & WithError
+```
+
+### ✅ 小范围使用——不需要为每个联合起别名
+
+```ts
+// ✅ 内联足够简单的情况
+function handle(key: 'Enter' | 'Escape' | 'Tab') {}
+
+// ✅ 导出复用则起别名
+export type KeyboardKey = 'Enter' | 'Escape' | 'Tab'
+```
+
+下一章 [类型别名](/ts/type-aliases) 介绍 Type 别名、keyof 与索引访问类型。

@@ -1,0 +1,619 @@
+---
+title: 安装与配置
+description: TypeScript 安装、编译器配置、编辑器设置与项目初始化
+---
+
+# 安装与配置
+
+本章介绍如何安装 TypeScript、配置开发环境，以及创建 TypeScript 项目。
+
+## 安装 TypeScript
+
+### 全局安装
+
+```bash
+# 使用 npm
+npm install -g typescript
+
+# 使用 yarn
+yarn global add typescript
+
+# 使用 pnpm
+pnpm add -g typescript
+
+# 验证安装
+tsc --version
+```
+
+### 项目本地安装（推荐）
+
+```bash
+# 初始化项目
+npm init -y
+
+# 安装 TypeScript
+npm install --save-dev typescript
+
+# 验证
+npx tsc --version
+```
+
+## 创建 React + TypeScript 项目
+
+### 使用 Create React App
+
+```bash
+npx create-react-app my-app --template typescript
+
+cd my-app
+npm start
+```
+
+生成的项目结构：
+
+```text
+my-app/
+├── node_modules/
+├── public/
+├── src/
+│   ├── App.css
+│   ├── App.test.tsx
+│   ├── App.tsx
+│   ├── index.css
+│   ├── index.tsx
+│   ├── react-app-env.d.ts
+│   └── reportWebVitals.ts
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+### 使用 Vite（推荐）
+
+```bash
+# 创建项目
+npm create vite@latest my-app -- --template react-ts
+
+cd my-app
+npm install
+npm run dev
+```
+
+生成的项目结构：
+
+```text
+my-app/
+├── node_modules/
+├── public/
+├── src/
+│   ├── assets/
+│   ├── App.css
+│   ├── App.tsx
+│   ├── index.css
+│   ├── main.tsx
+│   └── vite-env.d.ts
+├── index.html
+├── package.json
+├── tsconfig.json
+├── tsconfig.node.json
+└── vite.config.ts
+```
+
+### 手动配置现有项目
+
+```bash
+# 安装依赖
+npm install --save-dev typescript @types/react @types/react-dom
+
+# 创建 tsconfig.json
+npx tsc --init
+
+# 重命名文件
+mv src/App.js src/App.tsx
+mv src/index.js src/index.tsx
+```
+
+## TypeScript 编译器（tsc）
+
+### 基本命令
+
+```bash
+# 编译单个文件
+tsc app.ts
+
+# 编译多个文件
+tsc app.ts utils.ts
+
+# 使用配置文件编译
+tsc
+
+# 监听模式
+tsc --watch
+
+# 指定输出目录
+tsc --outDir dist
+
+# 生成声明文件
+tsc --declaration
+```
+
+### 编译选项
+
+```bash
+# 指定目标版本
+tsc --target ES2020
+
+# 指定模块系统
+tsc --module ESNext
+
+# 严格模式
+tsc --strict
+
+# 不生成输出文件（仅检查）
+tsc --noEmit
+```
+
+## 基础 tsconfig.json
+
+### 最小配置
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src"],
+  "exclude": ["node_modules"]
+}
+```
+
+### React 项目配置
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    // 语言和环境
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    
+    // 模块
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    
+    // 输出
+    "outDir": "./dist",
+    "noEmit": true,
+    
+    // 类型检查
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    
+    // 互操作性
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    
+    // 其他
+    "skipLibCheck": true,
+    "isolatedModules": true
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}
+```
+
+### Vite 项目配置
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+```
+
+## 编辑器配置
+
+### VS Code
+
+**安装扩展**：
+
+- **TypeScript and JavaScript Language Features**（内置）
+- **ESLint**
+- **Prettier**
+- **Error Lens**（可选）
+
+**配置 settings.json**：
+
+```json filename=".vscode/settings.json"
+{
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": true
+  },
+  "typescript.preferences.importModuleSpecifier": "relative",
+  "typescript.updateImportsOnFileMove.enabled": "always"
+}
+```
+
+### WebStorm / IntelliJ IDEA
+
+TypeScript 支持开箱即用，无需额外配置。
+
+**配置路径**：
+- Settings → Languages & Frameworks → TypeScript
+- 启用 TypeScript Language Service
+- 配置 tsconfig.json 路径
+
+## 类型定义文件
+
+### 安装 React 类型
+
+```bash
+npm install --save-dev @types/react @types/react-dom
+```
+
+### 常用类型定义
+
+```bash
+# Node.js
+npm install --save-dev @types/node
+
+# Jest
+npm install --save-dev @types/jest
+
+# 其他库
+npm install --save-dev @types/lodash
+npm install --save-dev @types/axios
+```
+
+### 查找类型定义
+
+访问 [DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) 或使用：
+
+```bash
+npm search @types/package-name
+```
+
+### 自定义类型定义
+
+```ts filename="src/types/custom.d.ts"
+// 声明模块
+declare module '*.svg' {
+  const content: string
+  export default content
+}
+
+declare module '*.png' {
+  const content: string
+  export default content
+}
+
+// 扩展全局类型
+declare global {
+  interface Window {
+    myCustomProperty: string
+  }
+}
+
+export {}
+```
+
+## 项目结构
+
+### 推荐结构
+
+```text
+src/
+├── components/          # React 组件
+│   ├── Button/
+│   │   ├── Button.tsx
+│   │   ├── Button.test.tsx
+│   │   └── index.ts
+│   └── index.ts
+├── hooks/              # 自定义 Hooks
+│   ├── useAuth.ts
+│   └── index.ts
+├── types/              # 类型定义
+│   ├── api.ts
+│   ├── models.ts
+│   └── index.ts
+├── utils/              # 工具函数
+│   ├── format.ts
+│   └── index.ts
+├── services/           # API 服务
+│   ├── api.ts
+│   └── index.ts
+├── App.tsx
+└── main.tsx
+```
+
+### 类型文件组织
+
+```ts filename="src/types/index.ts"
+// 导出所有类型
+export * from './api'
+export * from './models'
+export * from './components'
+```
+
+```ts filename="src/types/models.ts"
+// 数据模型
+export interface User {
+  id: number
+  name: string
+  email: string
+}
+
+export interface Post {
+  id: number
+  title: string
+  content: string
+  authorId: number
+}
+```
+
+```ts filename="src/types/api.ts"
+// API 相关类型
+export interface ApiResponse<T> {
+  data: T
+  status: number
+  message: string
+}
+
+export interface PaginatedResponse<T> {
+  data: T[]
+  total: number
+  page: number
+  pageSize: number
+}
+```
+
+## 开发工具
+
+### ts-node
+
+直接运行 TypeScript 文件：
+
+```bash
+# 安装
+npm install --save-dev ts-node
+
+# 运行
+npx ts-node src/script.ts
+
+# 配置 package.json
+{
+  "scripts": {
+    "dev": "ts-node src/index.ts"
+  }
+}
+```
+
+### tsx（推荐）
+
+更快的 TypeScript 执行器：
+
+```bash
+# 安装
+npm install --save-dev tsx
+
+# 运行
+npx tsx src/script.ts
+
+# 监听模式
+npx tsx watch src/script.ts
+```
+
+### tsc-watch
+
+监听模式增强：
+
+```bash
+# 安装
+npm install --save-dev tsc-watch
+
+# 配置 package.json
+{
+  "scripts": {
+    "dev": "tsc-watch --onSuccess \"node dist/index.js\""
+  }
+}
+```
+
+## ESLint 配置
+
+### 安装
+
+```bash
+npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin
+```
+
+### 配置
+
+```js filename=".eslintrc.cjs"
+module.exports = {
+  root: true,
+  env: { browser: true, es2020: true },
+  extends: [
+    'eslint:recommended',
+    'plugin:@typescript-eslint/recommended',
+    'plugin:react-hooks/recommended',
+  ],
+  ignorePatterns: ['dist', '.eslintrc.cjs'],
+  parser: '@typescript-eslint/parser',
+  plugins: ['react-refresh'],
+  rules: {
+    'react-refresh/only-export-components': [
+      'warn',
+      { allowConstantExport: true },
+    ],
+    '@typescript-eslint/no-unused-vars': ['error', { 
+      argsIgnorePattern: '^_',
+      varsIgnorePattern: '^_'
+    }],
+    '@typescript-eslint/no-explicit-any': 'warn',
+  },
+}
+```
+
+## Prettier 配置
+
+```json filename=".prettierrc"
+{
+  "semi": false,
+  "singleQuote": true,
+  "printWidth": 100,
+  "trailingComma": "es5",
+  "arrowParens": "avoid",
+  "endOfLine": "auto"
+}
+```
+
+```text filename=".prettierignore"
+node_modules
+dist
+build
+coverage
+```
+
+## 常见问题
+
+### 1. 找不到模块
+
+```ts
+// ❌ 错误
+import React from 'react'
+// Cannot find module 'react' or its corresponding type declarations
+
+// ✅ 解决：安装类型定义
+npm install --save-dev @types/react
+```
+
+### 2. JSX 语法错误
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "jsx": "react-jsx"  // 或 "react" (旧版)
+  }
+}
+```
+
+### 3. 模块解析错误
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler",  // Vite
+    // 或
+    "moduleResolution": "node"      // Webpack
+  }
+}
+```
+
+### 4. 路径别名
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"],
+      "@utils/*": ["src/utils/*"]
+    }
+  }
+}
+```
+
+```ts
+// 使用别名
+import Button from '@components/Button'
+import { formatDate } from '@utils/format'
+```
+
+## 最佳实践
+
+### ✅ 使用严格模式
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "strict": true
+  }
+}
+```
+
+### ✅ 启用增量编译
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo"
+  }
+}
+```
+
+### ✅ 配置路径映射
+
+```json filename="tsconfig.json"
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  }
+}
+```
+
+### ✅ 排除不必要的文件
+
+```json filename="tsconfig.json"
+{
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build",
+    "**/*.spec.ts",
+    "**/*.test.ts"
+  ]
+}
+```
+
+下一章 [tsconfig.json 详解](/ts/tsconfig) 深入讲解编译器配置选项。

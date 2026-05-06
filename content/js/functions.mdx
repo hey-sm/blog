@@ -1,0 +1,426 @@
+---
+title: 函数
+description: 参数、箭头函数、IIFE、词法作用域、闭包与递归
+---
+
+# 函数
+
+函数是 JavaScript 中最核心的抽象单位，**一等公民（first-class citizen）**——可作为参数传递、作为返回值、作为对象属性、作为类成员。本章覆盖函数的所有重要侧面。
+
+## 函数声明的三种形式
+
+### 函数声明（function declaration）
+
+```js
+function add(a, b) {
+  return a + b
+}
+```
+
+整体提升（包括函数体）。
+
+### 函数表达式（function expression）
+
+```js
+const add = function (a, b) {
+  return a + b
+}
+
+const named = function fact(n) {              // 命名函数表达式（NFE）
+  return n <= 1 ? 1 : n * fact(n - 1)         // 名字仅在函数体内可见
+}
+```
+
+仅变量名提升，赋值在执行阶段。命名函数表达式的名字便于调试栈与递归。
+
+### 箭头函数（arrow function）
+
+```js
+const add = (a, b) => a + b
+const square = n => n * n                     // 单参数可省略括号
+const noop = () => {}
+const obj = () => ({ a: 1 })                  // 返回对象需括号
+```
+
+箭头函数与普通函数的关键差异：
+
+| 维度 | 普通函数 | 箭头函数 |
+| ---- | -------- | -------- |
+| `this` | 调用时绑定 | **词法绑定**（继承自定义所在作用域） |
+| `arguments` | ✅ | ❌（用 rest 参数代替） |
+| `new` | 可作构造函数 | ✗ TypeError |
+| `prototype` | ✅ | ❌ |
+| `super` | 在方法中可用 | 继承外层 |
+| `yield` | 在生成器中可用 | ❌ |
+| `function.name` | 同名 | 推断名 |
+| 写法 | 完整 | 简洁，无 body 时返回表达式 |
+
+```js
+const obj = {
+  name: 'js',
+  regular() {
+    setTimeout(function () {
+      console.log(this.name)                  // → undefined  this 指向 setTimeout 内部
+    }, 0)
+  },
+  arrow() {
+    setTimeout(() => {
+      console.log(this.name)                  // → 'js'       继承 arrow 的 this
+    }, 0)
+  }
+}
+obj.regular()
+obj.arrow()
+```
+
+## 函数参数
+
+### 默认参数（ES6）
+
+```js
+function greet(name = 'World') {
+  return `Hello, ${name}!`
+}
+greet()                                       // → 'Hello, World!'
+greet(undefined)                              // → 'Hello, World!'   undefined 触发默认
+greet(null)                                   // → 'Hello, null!'    null 不触发
+```
+
+默认值在函数调用时按位求值，可引用前面的参数：
+
+```js
+function range(start, end = start + 10) {
+  return [start, end]
+}
+range(5)                                      // → [5, 15]
+```
+
+### 剩余参数 `...`
+
+```js
+function sum(...nums) {
+  return nums.reduce((a, b) => a + b, 0)
+}
+sum(1, 2, 3, 4)                               // → 10
+```
+
+剩余参数必须是**最后一个**参数。它收集成真正的 `Array`，可直接调用 `map` / `filter` 等。
+
+### `arguments` 对象
+
+普通函数中可用的类数组对象，**箭头函数中不可用**：
+
+```js
+function f() {
+  console.log(arguments.length)               // → 3
+  console.log(arguments[0])                   // → 1
+  console.log(Array.isArray(arguments))       // → false   只是类数组
+  console.log([...arguments])                 // → [1, 2, 3]
+}
+f(1, 2, 3)
+```
+
+现代代码应**优先使用 rest 参数**，仅在阅读旧代码或极少数兼容场景下处理 `arguments`。
+
+### 参数解构
+
+```js
+function user({ name, age = 18 }) {
+  return `${name}, ${age}`
+}
+user({ name: 'js' })                          // → 'js, 18'
+
+function fetchPage([first, ...rest], { limit = 10 } = {}) {
+  // ...
+}
+```
+
+## 立即调用函数表达式（IIFE）
+
+```js
+;(function () {
+  // 私有作用域
+  const secret = 42
+  console.log(secret)
+})()
+
+// 箭头函数版本
+;(() => {
+  console.log('immediately called')
+})()
+```
+
+ES6 之前 IIFE 是创建私有作用域的主要手段；ES6 引入块级作用域和模块后，IIFE 在新代码中已较少使用，仅在以下场景仍有意义：
+
+- UMD（通用模块定义）封装
+- 顶层 `await` 不可用环境下的异步入口
+
+```js
+;(async () => {
+  const data = await fetch('/api')
+  // ...
+})()
+```
+
+## 作用域与作用域链
+
+### 词法作用域
+
+JavaScript 是词法作用域：变量可见性由代码书写位置决定，而非调用位置。
+
+```js
+let x = 'outer'
+
+function inner() {
+  console.log(x)                              // 总是看到定义时所在作用域中的 x
+}
+
+function outer() {
+  let x = 'inner'
+  inner()
+}
+
+outer()                                       // → 'outer'
+```
+
+### 作用域链
+
+每个函数被创建时记录其所在的**词法环境（Lexical Environment）**。函数执行时，引擎按"当前 → 外层 → 全局"的顺序查找标识符。
+
+```js
+const a = 1
+function f() {
+  const b = 2
+  function g() {
+    const c = 3
+    console.log(a, b, c)                      // 沿作用域链查找
+  }
+  g()
+}
+f()                                           // → 1 2 3
+```
+
+### 函数调用栈
+
+每次函数调用都会压入一个**执行上下文（Execution Context）**：
+
+```js
+function a() { b() }
+function b() { c() }
+function c() { console.trace() }
+
+a()
+// Trace
+//   at c
+//   at b
+//   at a
+//   at <anonymous>
+```
+
+栈深度过大会触发 `RangeError: Maximum call stack size exceeded`（详见 [递归](#递归)）。
+
+## 闭包
+
+**闭包 = 函数 + 其定义时所在的词法环境**。当内部函数引用外部作用域的变量、且自身被传递到外部时，外部作用域的变量不会被回收，由内部函数继续持有。
+
+```js
+function makeCounter() {
+  let count = 0
+  return {
+    inc()  { return ++count },
+    dec()  { return --count },
+    get () { return count }
+  }
+}
+
+const c = makeCounter()
+c.inc()                                       // → 1
+c.inc()                                       // → 2
+c.get()                                       // → 2
+console.log(c.count)                          // → undefined   外部无法直接访问
+```
+
+闭包的典型应用：
+
+### 1. 数据私有化（模块模式）
+
+```js
+const cache = (() => {
+  const store = new Map()
+  return {
+    get: k => store.get(k),
+    set: (k, v) => store.set(k, v)
+  }
+})()
+```
+
+### 2. 函数工厂
+
+```js
+function multiplier(factor) {
+  return n => n * factor
+}
+
+const double = multiplier(2)
+const triple = multiplier(3)
+double(5)                                     // → 10
+triple(5)                                     // → 15
+```
+
+### 3. 防抖 / 节流
+
+```js
+function debounce(fn, delay) {
+  let timer
+  return function (...args) {
+    clearTimeout(timer)
+    timer = setTimeout(() => fn.apply(this, args), delay)
+  }
+}
+
+const onSearch = debounce(query => fetchResults(query), 300)
+```
+
+```js
+function throttle(fn, interval) {
+  let last = 0
+  return function (...args) {
+    const now = Date.now()
+    if (now - last >= interval) {
+      last = now
+      fn.apply(this, args)
+    }
+  }
+}
+```
+
+### 4. 偏应用与柯里化
+
+```js
+// curry：把多参数函数转成单参数函数序列
+function curry(fn) {
+  return function curried(...args) {
+    return args.length >= fn.length
+      ? fn(...args)
+      : (...rest) => curried(...args, ...rest)
+  }
+}
+
+const add = curry((a, b, c) => a + b + c)
+add(1)(2)(3)                                  // → 6
+add(1, 2)(3)                                  // → 6
+add(1, 2, 3)                                  // → 6
+```
+
+### 闭包与内存
+
+闭包持有外部变量的引用，**不会被 GC 回收**直到闭包本身不再可达。常见的内存泄漏：
+
+```js
+function attach() {
+  const huge = new Array(1e6).fill(0)
+  document.getElementById('btn').addEventListener('click', () => {
+    console.log(huge.length)                  // huge 永远不能被释放
+  })
+}
+```
+
+如果不再需要外部变量，**显式置空**或拆解函数定义：
+
+```js
+function attach() {
+  let huge = new Array(1e6).fill(0)
+  const len = huge.length                     // 仅保留需要的信息
+  huge = null                                 // 释放
+  document.getElementById('btn').addEventListener('click', () => {
+    console.log(len)
+  })
+}
+```
+
+## 递归
+
+```js
+function factorial(n) {
+  return n <= 1 ? 1 : n * factorial(n - 1)
+}
+factorial(5)                                  // → 120
+```
+
+### 栈溢出
+
+```js
+function f() { f() }
+f()                                           // ✗ RangeError: Maximum call stack size exceeded
+```
+
+不同引擎栈深度上限不同，V8 大约 1 万。处理大数据量时改用迭代或**手动维护栈**：
+
+```js
+function sumTree(root) {
+  let sum = 0
+  const stack = [root]
+  while (stack.length) {
+    const node = stack.pop()
+    sum += node.value
+    if (node.children) stack.push(...node.children)
+  }
+  return sum
+}
+```
+
+### 尾调用（Tail Call）
+
+ES2015 规范要求严格模式下支持尾调用优化（TCO），但截至 2026 年仅 Safari 实现。其他引擎仍按普通递归处理：
+
+```js
+'use strict'
+function fact(n, acc = 1) {
+  if (n <= 1) return acc
+  return fact(n - 1, n * acc)                 // 尾调用：理论上可被优化为循环
+}
+```
+
+不要假设 V8 / SpiderMonkey 会做 TCO。
+
+## 内置高阶函数
+
+| 函数 | 用途 |
+| ---- | ---- |
+| `setTimeout` / `setInterval` / `queueMicrotask` | 调度 |
+| `Array.prototype.map` / `filter` / `reduce` 等 | 数据流 |
+| `Promise.then` / `Promise.all` / `Promise.race` | 异步组合 |
+| `Function.prototype.bind` / `call` / `apply` | this 绑定 |
+
+```js
+// 函数组合
+const compose = (...fns) => x => fns.reduceRight((acc, f) => f(acc), x)
+const pipe    = (...fns) => x => fns.reduce((acc, f) => f(acc), x)
+
+const trim    = s => s.trim()
+const lower   = s => s.toLowerCase()
+const slugify = pipe(trim, lower, s => s.replaceAll(/\s+/g, '-'))
+
+slugify('  Hello World  ')                    // → 'hello-world'
+```
+
+## 函数对象的属性
+
+```js
+function f(a, b, c) {}
+
+f.name                                        // → 'f'
+f.length                                      // → 3   形参个数（不含默认值后的与 rest）
+f.toString()                                  // → 'function f(a, b, c) {}'
+
+const g = (a, b = 1, c) => 0
+g.length                                      // → 1   默认值之后的形参不计
+```
+
+## 小结
+
+- 函数声明、函数表达式、箭头函数三种形态各有适用场景；
+- 箭头函数没有自己的 `this` / `arguments` / `prototype`，不能 `new`；
+- 闭包是函数 + 词法环境，是 JavaScript 中"私有数据"与"模式抽象"的基础工具；
+- 递归优雅但需注意栈深度与是否具备尾调用优化；
+- 函数是值，可以和数据一样被传递与组合，构成 JavaScript 函数式风格的根基。

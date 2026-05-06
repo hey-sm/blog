@@ -1,0 +1,142 @@
+---
+title: 事件处理
+description: 事件绑定、内联/方法处理器、事件/按键/鼠标修饰符
+---
+
+# 事件处理
+
+Vue 提供 `v-on`（简写 `@`）指令监听 DOM 事件。
+
+## 基础用法
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++
+}
+
+function add(n: number) {
+  count.value += n
+}
+
+function handleEvent(event: MouseEvent) {
+  console.log(event.target)
+}
+</script>
+
+<template>
+  <!-- 方法处理器 -->
+  <button @click="increment">{{ count }}</button>
+  
+  <!-- 内联表达式 -->
+  <button @click="count++">{{ count }}</button>
+  
+  <!-- 传递参数 -->
+  <button @click="add(5)">+5</button>
+  
+  <!-- 访问事件对象 -->
+  <button @click="handleEvent">Log Event</button>
+  <button @click="(e) => handleEvent(e)">Log Event</button>
+  <button @click="add(5, $event)">+5 with Event</button>
+</template>
+```
+
+## 事件修饰符
+
+```vue
+<template>
+  <!-- .stop：阻止事件冒泡 -->
+  <button @click.stop="handler">Stop</button>
+  
+  <!-- .prevent：阻止默认行为 -->
+  <form @submit.prevent="onSubmit">Submit</form>
+  
+  <!-- .self：只在事件目标是元素自身时触发 -->
+  <div @click.self="handler">Self</div>
+  
+  <!-- .capture：捕获模式 -->
+  <div @click.capture="handler">Capture</div>
+  
+  <!-- .once：只触发一次 -->
+  <button @click.once="handler">Once</button>
+  
+  <!-- .passive：提升滚动性能 -->
+  <div @scroll.passive="onScroll">Scroll</div>
+  
+  <!-- 链式调用 -->
+  <form @submit.prevent.stop="onSubmit">Submit</form>
+</template>
+```
+
+## 按键修饰符
+
+```vue
+<template>
+  <!-- 特定按键 -->
+  <input @keyup.enter="submit">
+  <input @keyup.tab="nextField">
+  <input @keyup.delete="remove">
+  <input @keyup.esc="cancel">
+  <input @keyup.space="toggle">
+  <input @keyup.up="moveUp">
+  <input @keyup.down="moveDown">
+  <input @keyup.left="moveLeft">
+  <input @keyup.right="moveRight">
+  
+  <!-- 系统修饰键 -->
+  <input @keyup.ctrl="handler">
+  <input @keyup.alt="handler">
+  <input @keyup.shift="handler">
+  <input @keyup.meta="handler">
+  
+  <!-- 组合键 -->
+  <input @keyup.ctrl.enter="submit">
+  <button @click.ctrl="handler">Ctrl+Click</button>
+  
+  <!-- .exact：精确匹配 -->
+  <button @click.ctrl.exact="handler">只有 Ctrl</button>
+  <button @click.exact="handler">没有修饰键</button>
+</template>
+```
+
+## 鼠标按键修饰符
+
+```vue
+<template>
+  <button @click.left="handler">左键</button>
+  <button @click.right="handler">右键</button>
+  <button @click.middle="handler">中键</button>
+</template>
+```
+
+## 最佳实践
+
+### ✅ 提取复杂逻辑为方法
+
+```vue
+<!-- ❌ 内联逻辑过多 -->
+<template>
+  <button @click="count++; log('clicked'); emit('update')">
+    Click
+  </button>
+</template>
+
+<!-- ✅ 提取为方法 -->
+<script setup lang="ts">
+function handleClick() {
+  count.value++
+  log('clicked')
+  emit('update')
+}
+</script>
+
+<template>
+  <button @click="handleClick">Click</button>
+</template>
+```
+
+下一章 [表单处理](/vue/forms) 详解表单双向绑定。

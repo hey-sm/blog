@@ -1,0 +1,554 @@
+---
+title: 类型推断
+description: TypeScript 自动类型推断、最佳通用类型、上下文类型与类型推断最佳实践
+---
+
+# 类型推断
+
+TypeScript 可以在没有显式类型注解的情况下自动推断类型，这是 TypeScript 的核心特性之一。
+
+## 基础类型推断
+
+### 变量初始化
+
+```ts
+// 推断为 number
+let count = 0
+
+// 推断为 string
+let name = 'Alice'
+
+// 推断为 boolean
+let isActive = true
+
+// 推断为 number[]
+let numbers = [1, 2, 3]
+
+// 推断为 string[]
+let names = ['Alice', 'Bob']
+```
+
+### 函数返回值推断
+
+```ts
+// 推断返回类型为 number
+function add(a: number, b: number) {
+  return a + b
+}
+
+// 推断返回类型为 string
+function greet(name: string) {
+  return `Hello, ${name}!`
+}
+
+// 推断返回类型为 boolean
+function isPositive(n: number) {
+  return n > 0
+}
+```
+
+**React 示例**：
+
+```tsx
+// 推断返回类型为 JSX.Element
+function Button({ label }: { label: string }) {
+  return <button>{label}</button>
+}
+
+// 推断返回类型为 number
+function useCounter(initialValue: number) {
+  const [count, setCount] = useState(initialValue)
+  return count
+}
+```
+
+## 最佳通用类型
+
+当需要从多个表达式推断类型时，TypeScript 会计算"最佳通用类型"：
+
+```ts
+// 推断为 (number | string)[]
+let mixed = [1, 'two', 3]
+
+// 推断为 number[]
+let numbers = [1, 2, 3]
+
+// 推断为 (number | null)[]
+let nullable = [1, 2, null]
+```
+
+**显式指定类型**：
+
+```ts
+// 推断为 (number | string)[]
+let mixed = [1, 'two', 3]
+
+// 显式指定为 (number | string | boolean)[]
+let mixed: (number | string | boolean)[] = [1, 'two', true]
+```
+
+**React 示例**：
+
+```tsx
+// 推断为 (string | number)[]
+const [items, setItems] = useState([1, 'two', 3])
+
+// 显式指定类型
+const [items, setItems] = useState<(string | number)[]>([1, 'two', 3])
+```
+
+## 上下文类型推断
+
+TypeScript 根据表达式所在的位置推断类型：
+
+```ts
+// 上下文推断参数类型
+window.addEventListener('click', (e) => {
+  // e 推断为 MouseEvent
+  console.log(e.clientX, e.clientY)
+})
+
+// 数组方法的上下文推断
+const numbers = [1, 2, 3]
+numbers.map((n) => {
+  // n 推断为 number
+  return n * 2
+})
+```
+
+**React 示例**：
+
+```tsx
+function Form() {
+  // e 推断为 React.FormEvent<HTMLFormElement>
+  const handleSubmit = (e) => {
+    e.preventDefault()
+  }
+  
+  // e 推断为 React.ChangeEvent<HTMLInputElement>
+  const handleChange = (e) => {
+    console.log(e.target.value)
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      <input onChange={handleChange} />
+    </form>
+  )
+}
+```
+
+## 对象字面量推断
+
+```ts
+// 推断为 { name: string; age: number }
+const user = {
+  name: 'Alice',
+  age: 25
+}
+
+// 推断为 { x: number; y: number }
+const point = {
+  x: 10,
+  y: 20
+}
+
+// 嵌套对象推断
+const data = {
+  user: {
+    name: 'Alice',
+    profile: {
+      bio: 'Developer'
+    }
+  }
+}
+// 推断为 { user: { name: string; profile: { bio: string } } }
+```
+
+**React 示例**：
+
+```tsx
+function UserCard() {
+  // 推断为 { name: string; email: string; age: number }
+  const user = {
+    name: 'Alice',
+    email: 'alice@example.com',
+    age: 25
+  }
+  
+  return (
+    <div>
+      <h3>{user.name}</h3>
+      <p>{user.email}</p>
+    </div>
+  )
+}
+```
+
+## 函数参数推断
+
+### 回调函数参数
+
+```ts
+const numbers = [1, 2, 3]
+
+// n 推断为 number
+numbers.forEach((n) => {
+  console.log(n * 2)
+})
+
+// item 推断为 number, index 推断为 number
+numbers.map((item, index) => {
+  return item + index
+})
+```
+
+### 泛型函数推断
+
+```ts
+function identity<T>(value: T): T {
+  return value
+}
+
+// T 推断为 number
+const num = identity(123)
+
+// T 推断为 string
+const str = identity('hello')
+
+// T 推断为 { name: string }
+const obj = identity({ name: 'Alice' })
+```
+
+**React 示例**：
+
+```tsx
+function List<T>({ items, renderItem }: {
+  items: T[]
+  renderItem: (item: T) => React.ReactNode
+}) {
+  return (
+    <ul>
+      {items.map((item, index) => (
+        <li key={index}>{renderItem(item)}</li>
+      ))}
+    </ul>
+  )
+}
+
+// T 推断为 { id: number; name: string }
+<List
+  items={[{ id: 1, name: 'Alice' }]}
+  renderItem={(item) => <div>{item.name}</div>}
+/>
+```
+
+## const 断言
+
+使用 `as const` 创建字面量类型：
+
+```ts
+// 推断为 number
+let x = 10
+
+// 推断为 10（字面量类型）
+let x = 10 as const
+
+// 推断为 readonly [1, 2, 3]
+const arr = [1, 2, 3] as const
+
+// 推断为 { readonly name: "Alice"; readonly age: 25 }
+const user = {
+  name: 'Alice',
+  age: 25
+} as const
+```
+
+**React 示例**：
+
+```tsx
+// 推断为 readonly ["primary", "secondary", "danger"]
+const BUTTON_VARIANTS = ['primary', 'secondary', 'danger'] as const
+
+type ButtonVariant = typeof BUTTON_VARIANTS[number]
+// 'primary' | 'secondary' | 'danger'
+
+interface ButtonProps {
+  variant: ButtonVariant
+}
+
+function Button({ variant }: ButtonProps) {
+  return <button className={`btn-${variant}`}>Click</button>
+}
+```
+
+## 类型收窄推断
+
+TypeScript 会根据控制流分析收窄类型：
+
+```ts
+function process(value: string | number) {
+  if (typeof value === 'string') {
+    // 这里 value 推断为 string
+    return value.toUpperCase()
+  }
+  
+  // 这里 value 推断为 number
+  return value * 2
+}
+```
+
+**React 示例**：
+
+```tsx
+interface User {
+  name: string
+  email: string
+}
+
+function UserProfile({ user }: { user: User | null }) {
+  // 类型守卫
+  if (!user) {
+    return <div>Loading...</div>
+  }
+  
+  // 这里 user 推断为 User（非 null）
+  return (
+    <div>
+      <h3>{user.name}</h3>
+      <p>{user.email}</p>
+    </div>
+  )
+}
+```
+
+## 解构推断
+
+```ts
+const user = {
+  name: 'Alice',
+  age: 25,
+  email: 'alice@example.com'
+}
+
+// name 推断为 string, age 推断为 number
+const { name, age } = user
+
+// 数组解构
+const numbers = [1, 2, 3]
+const [first, second] = numbers  // first 和 second 推断为 number
+```
+
+**React 示例**：
+
+```tsx
+function UserCard({ user }: { user: { name: string; age: number } }) {
+  // name 推断为 string, age 推断为 number
+  const { name, age } = user
+  
+  return (
+    <div>
+      <h3>{name}</h3>
+      <p>Age: {age}</p>
+    </div>
+  )
+}
+
+// useState 解构推断
+function Counter() {
+  // count 推断为 number, setCount 推断为 (value: number) => void
+  const [count, setCount] = useState(0)
+  
+  return <div>{count}</div>
+}
+```
+
+## 类型推断的限制
+
+### 1. 空数组
+
+```ts
+// 推断为 any[]
+const arr = []
+
+// ✅ 显式指定类型
+const arr: number[] = []
+```
+
+### 2. null 和 undefined
+
+```ts
+// 推断为 null
+let value = null
+
+// ✅ 显式指定类型
+let value: string | null = null
+```
+
+### 3. 复杂对象
+
+```ts
+// 推断可能不够精确
+const config = {
+  api: {
+    url: 'https://api.example.com',
+    timeout: 5000
+  }
+}
+
+// ✅ 使用接口
+interface Config {
+  api: {
+    url: string
+    timeout: number
+  }
+}
+
+const config: Config = {
+  api: {
+    url: 'https://api.example.com',
+    timeout: 5000
+  }
+}
+```
+
+## 类型推断 vs 显式类型
+
+### 何时使用类型推断
+
+```ts
+// ✅ 简单的变量初始化
+const count = 0
+const name = 'Alice'
+
+// ✅ 函数返回值明确
+function add(a: number, b: number) {
+  return a + b  // 推断为 number
+}
+
+// ✅ 数组方法
+const doubled = numbers.map(n => n * 2)
+```
+
+### 何时使用显式类型
+
+```ts
+// ✅ 函数参数
+function greet(name: string) {
+  return `Hello, ${name}!`
+}
+
+// ✅ 复杂类型
+interface User {
+  name: string
+  age: number
+}
+
+const user: User = {
+  name: 'Alice',
+  age: 25
+}
+
+// ✅ 空数组
+const numbers: number[] = []
+
+// ✅ 公共 API
+export function fetchUser(id: number): Promise<User> {
+  return fetch(`/api/users/${id}`).then(r => r.json())
+}
+```
+
+**React 示例**：
+
+```tsx
+// ✅ Props 使用显式类型
+interface ButtonProps {
+  label: string
+  onClick: () => void
+}
+
+function Button({ label, onClick }: ButtonProps) {
+  return <button onClick={onClick}>{label}</button>
+}
+
+// ✅ State 简单类型可以推断
+function Counter() {
+  const [count, setCount] = useState(0)  // 推断为 number
+  return <div>{count}</div>
+}
+
+// ✅ State 复杂类型使用显式类型
+interface User {
+  id: number
+  name: string
+}
+
+function UserProfile() {
+  const [user, setUser] = useState<User | null>(null)
+  return <div>{user?.name}</div>
+}
+```
+
+## 最佳实践
+
+### ✅ 优先使用类型推断
+
+```ts
+// ❌ 不必要的类型注解
+const count: number = 0
+const name: string = 'Alice'
+
+// ✅ 让 TypeScript 推断
+const count = 0
+const name = 'Alice'
+```
+
+### ✅ 函数参数使用显式类型
+
+```ts
+// ❌ 参数类型不明确
+function greet(name) {
+  return `Hello, ${name}!`
+}
+
+// ✅ 显式指定参数类型
+function greet(name: string) {
+  return `Hello, ${name}!`
+}
+```
+
+### ✅ 复杂类型使用显式类型
+
+```ts
+// ❌ 推断可能不够精确
+const config = {
+  api: {
+    url: 'https://api.example.com'
+  }
+}
+
+// ✅ 使用接口
+interface Config {
+  api: {
+    url: string
+  }
+}
+
+const config: Config = {
+  api: {
+    url: 'https://api.example.com'
+  }
+}
+```
+
+### ✅ 使用 const 断言
+
+```ts
+// ❌ 推断为 string[]
+const colors = ['red', 'green', 'blue']
+
+// ✅ 推断为 readonly ["red", "green", "blue"]
+const colors = ['red', 'green', 'blue'] as const
+```
+
+下一章 [类型兼容性](/ts/type-compatibility) 介绍 TypeScript 的结构化类型系统。

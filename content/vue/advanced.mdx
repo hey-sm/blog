@@ -1,0 +1,222 @@
+---
+title: 高级特性
+description: 异步组件、Suspense、Teleport、Provide/Inject
+---
+
+# 高级特性
+
+Vue 3 提供了多个高级特性来处理复杂场景。
+
+## 异步组件
+
+### defineAsyncComponent
+
+```vue
+<script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
+
+const AsyncComp = defineAsyncComponent(() =>
+  import('./components/HeavyComponent.vue')
+)
+</script>
+
+<template>
+  <Suspense>
+    <AsyncComp />
+    <template #fallback>
+      <div>Loading...</div>
+    </template>
+  </Suspense>
+</template>
+```
+
+### 高级选项
+
+```ts
+const AsyncComp = defineAsyncComponent({
+  loader: () => import('./Comp.vue'),
+  loadingComponent: LoadingSpinner,
+  errorComponent: ErrorDisplay,
+  delay: 200,
+  timeout: 3000
+})
+```
+
+## Suspense
+
+处理异步依赖：
+
+```vue
+<script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
+
+const UserProfile = defineAsyncComponent(() =>
+  import('./UserProfile.vue')
+)
+</script>
+
+<template>
+  <Suspense>
+    <template #default>
+      <UserProfile />
+    </template>
+    <template #fallback>
+      <div>Loading user profile...</div>
+    </template>
+  </Suspense>
+</template>
+```
+
+### 顶层 await
+
+```vue filename="components/UserProfile.vue"
+<script setup lang="ts">
+const user = await fetch('/api/user').then(r => r.json())
+</script>
+
+<template>
+  <div>{{ user.name }}</div>
+</template>
+```
+
+## Teleport
+
+将内容渲染到 DOM 的其他位置：
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const isOpen = ref(false)
+</script>
+
+<template>
+  <button @click="isOpen = true">Open Modal</button>
+  
+  <Teleport to="body">
+    <div v-if="isOpen" class="modal">
+      <p>Modal Content</p>
+      <button @click="isOpen = false">Close</button>
+    </div>
+  </Teleport>
+</template>
+
+<style>
+.modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: white;
+  padding: 20px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+</style>
+```
+
+## Provide / Inject
+
+跨层级组件通信：
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import { provide, ref } from 'vue'
+
+const theme = ref('dark')
+provide('theme', theme)
+
+function toggleTheme() {
+  theme.value = theme.value === 'dark' ? 'light' : 'dark'
+}
+
+provide('toggleTheme', toggleTheme)
+</script>
+
+<template>
+  <ChildComponent />
+</template>
+```
+
+```vue filename="components/DeepChild.vue"
+<script setup lang="ts">
+import { inject, type Ref } from 'vue'
+
+const theme = inject<Ref<string>>('theme')
+const toggleTheme = inject<() => void>('toggleTheme')
+</script>
+
+<template>
+  <div :class="theme">
+    <button @click="toggleTheme">Toggle Theme</button>
+  </div>
+</template>
+```
+
+### 提供默认值
+
+```vue
+<script setup lang="ts">
+import { inject } from 'vue'
+
+const theme = inject('theme', 'light')  // 默认值
+</script>
+```
+
+### 响应式注入
+
+```vue
+<script setup lang="ts">
+import { provide, readonly, ref } from 'vue'
+
+const count = ref(0)
+
+// 提供只读版本
+provide('count', readonly(count))
+</script>
+```
+
+## KeepAlive
+
+缓存组件状态：
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+import TabA from './TabA.vue'
+import TabB from './TabB.vue'
+
+const current = ref('TabA')
+</script>
+
+<template>
+  <KeepAlive>
+    <component :is="current === 'TabA' ? TabA : TabB" />
+  </KeepAlive>
+  
+  <button @click="current = 'TabA'">Tab A</button>
+  <button @click="current = 'TabB'">Tab B</button>
+</template>
+```
+
+### include / exclude
+
+```vue
+<template>
+  <!-- 只缓存 name 为 TabA 的组件 -->
+  <KeepAlive include="TabA">
+    <component :is="current" />
+  </KeepAlive>
+  
+  <!-- 排除 TabB -->
+  <KeepAlive exclude="TabB">
+    <component :is="current" />
+  </KeepAlive>
+  
+  <!-- 最多缓存 3 个组件 -->
+  <KeepAlive :max="3">
+    <component :is="current" />
+  </KeepAlive>
+</template>
+```
+
+下一章 [自定义指令与插件](/vue/directives-plugins) 介绍扩展机制。

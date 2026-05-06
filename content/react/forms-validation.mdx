@@ -1,0 +1,555 @@
+---
+title: 表单与校验
+description: React Hook Form + Zod 的现代表单方案与 React 19 Form Actions
+---
+
+# 表单与校验
+
+表单是绝大多数业务前端最高频的交互。React 处理表单有三个层次：
+
+1. **受控 vs 非受控**（语言级，详见 [渲染机制](/react/rendering#受控-vs-非受控)）
+2. **表单库**：管理状态、校验、提交、错误展示
+3. **校验库**：定义数据形状与约束
+
+主流配方是 **React Hook Form + Zod**——前者管理状态最高效，后者类型化校验最强。React 19 的 Form Actions 引入了新的服务端表单模式，本章末单独覆盖。
+
+## 选型对比
+
+| 库 | 风格 | 重渲染 | TS 体验 | 包大小 | 适合 |
+| -- | ---- | ------ | ------- | ------ | ---- |
+| 原生受控 | 手写 | 高（每个 onChange 都重渲染整表单） | ✅ | 0 | 字段极少 |
+| Formik | 受控 + Context | 中 | ✅ | ~13 KB | 已有项目，遗留代码 |
+| **React Hook Form** | 非受控 + ref | 低 | ✅ | ~9 KB | 推荐，新项目首选 |
+| TanStack Form | 受控 + 高级类型 | 中 | ⭐ 极强 | ~10 KB | 喜欢类型推断到极致 |
+
+## React Hook Form
+
+```bash
+pnpm add react-hook-form
+```
+
+### 基本用法
+
+```tsx
+import { useForm, SubmitHandler } from 'react-hook-form'
+
+type FormValues = {
+  email: string
+  password: string
+  remember: boolean
+}
+
+function LoginForm() {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting }
+  } = useForm<FormValues>({
+    defaultValues: { email: '', password: '', remember: false }
+  })
+
+  const onSubmit: SubmitHandler<FormValues> = async data => {
+    await login(data)
+  }
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      <input
+        {...register('email', {
+          required: 'Email is required',
+          pattern: { value: /\S+@\S+\.\S+/, message: 'Invalid email' }
+        })}
+      />
+      {errors.email && <span>{errors.email.message}</span>}
+
+      <input
+        type="password"
+        {...register('password', { required: true, minLength: 6 })}
+      />
+      {errors.password && <span>Password required (min 6)</span>}
+
+      <label>
+        <input type="checkbox" {...register('remember')} />
+        Remember me
+      </label>
+
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? 'Signing in…' : 'Sign in'}
+      </button>
+    </form>
+  )
+}
+```
+
+### 为什么 RHF 性能好
+
+`register` 把表单字段挂到内部的 ref——**输入变化不触发组件重渲染**。仅在以下时机触发渲染：
+
+- 提交
+- 校验出错 / 通过
+- `watch` 订阅了变化（且仅订阅的字段）
+
+对比受控表单（每个 keystroke 都触发整表单渲染），大型表单性能差异显著。
+
+### 受控字段：`Controller`
+
+非受控适合原生输入；自定义 / 第三方组件需要 `Controller`：
+
+```tsx
+import { Controller } from 'react-hook-form'
+
+<Controller
+  name="country"
+  control={control}
+  defaultValue=""
+  rules={{ required: true }}
+  render={({ field, fieldState }) => (
+    <Select
+      value={field.value}
+      onChange={field.onChange}
+      onBlur={field.onBlur}
+      error={fieldState.error?.message}
+    />
+  )}
+/>
+```
+
+### 数组字段：`useFieldArray`
+
+```tsx
+const { fields, append, remove } = useFieldArray({
+  control,
+  name: 'phones'
+})
+
+return (
+  <>
+    {fields.map((field, index) => (
+      <div key={field.id}>
+        <input {...register(`phones.${index}.number`)} />
+        <button onClick={() => remove(index)}>Remove</button>
+      </div>
+    ))}
+    <button onClick={() => append({ number: '' })}>Add phone</button>
+  </>
+)
+```
+
+注意 `key={field.id}` 用 RHF 生成的 ID，不要用 index（详见 [渲染机制](/react/rendering#列表与-key)）。
+
+### 监听字段
+
+```tsx
+const password = useWatch({ control, name: 'password' })
+
+return (
+  <input
+    {...register('confirmPassword', {
+      validate: v => v === password || 'Passwords do not match'
+    })}
+  />
+)
+```
+
+`useWatch` 仅订阅指定字段，不会因其他字段变化而重渲染。
+
+### 异步校验
+
+```tsx
+register('username', {
+  validate: async value => {
+    const exists = await checkUsername(value)
+    return !exists || 'Username already taken'
+  }
+})
+```
+
+### 表单状态
+
+```tsx
+const {
+  formState: {
+    errors,
+    isDirty,                                  // 任意字段被修改过
+    isValid,                                  // 全部校验通过
+    isSubmitting,
+    isSubmitSuccessful,
+    submitCount
+  }
+} = useForm()
+```
+
+## Zod
+
+类型即校验——一份 Schema 同时定义运行时校验与 TS 类型。
+
+```bash
+pnpm add zod
+```
+
+```ts
+import { z } from 'zod'
+
+const UserSchema = z.object({
+  email: z.string().email(),
+  age: z.number().int().min(0).max(120),
+  role: z.enum(['admin', 'user']),
+  tags: z.array(z.string()).optional()
+})
+
+type User = z.infer<typeof UserSchema>        // { email: string; age: number; role: 'admin' | 'user'; tags?: string[] }
+```
+
+### 解析 vs 校验
+
+```ts
+// parse：成功返回值，失败抛 ZodError
+const user = UserSchema.parse(rawInput)
+
+// safeParse：返回 { success, data | error }
+const result = UserSchema.safeParse(rawInput)
+if (result.success) {
+  console.log(result.data)
+} else {
+  console.log(result.error.flatten())
+}
+```
+
+### 复合规则
+
+```ts
+const SignupSchema = z.object({
+  password: z.string().min(8),
+  confirmPassword: z.string()
+}).refine(d => d.password === d.confirmPassword, {
+  message: 'Passwords do not match',
+  path: ['confirmPassword']
+})
+
+const PaginationSchema = z.object({
+  page: z.coerce.number().min(1).default(1),
+  pageSize: z.coerce.number().min(1).max(100).default(20)
+})
+
+// transform：解析后变换
+const TimestampSchema = z.string().datetime().transform(s => new Date(s))
+```
+
+### 联合 / 鉴别联合
+
+```ts
+const ResultSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('ok'), data: z.unknown() }),
+  z.object({ status: z.literal('error'), error: z.string() })
+])
+
+type Result = z.infer<typeof ResultSchema>
+//   ^? { status: 'ok'; data: unknown } | { status: 'error'; error: string }
+```
+
+### 使用场景
+
+```ts
+// 1. API 响应校验：保护应用免受后端"形状变化"
+const res = await fetch('/api/user').then(r => r.json())
+const user = UserSchema.parse(res)            // 类型安全 + 早期失败
+
+// 2. URL Search Params 校验
+const SearchSchema = z.object({
+  q: z.string().default(''),
+  page: z.coerce.number().min(1).default(1)
+})
+const search = SearchSchema.parse(Object.fromEntries(new URLSearchParams(window.location.search)))
+
+// 3. 环境变量
+const EnvSchema = z.object({
+  VITE_API_BASE: z.string().url(),
+  VITE_FEATURE_FLAGS: z.string().optional()
+})
+const env = EnvSchema.parse(import.meta.env)
+
+// 4. 表单校验（与 RHF 集成）
+```
+
+### Zod 替代品
+
+- **Valibot**：API 类似 Zod，包更小、tree-shake 友好（~1.4 KB vs ~13 KB）
+- **ArkType**：性能更高，TS 推断更激进
+- **Yup**：老牌，与 Formik 集成深，TS 体验弱于 Zod
+
+新项目通常仍选 Zod（生态最广）；超关心包大小时考虑 Valibot。
+
+## RHF + Zod 集成
+
+```bash
+pnpm add @hookform/resolvers
+```
+
+```tsx
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+
+const Schema = z.object({
+  email: z.string().email('Invalid email'),
+  password: z.string().min(8, 'Min 8 chars'),
+  age: z.coerce.number().min(18, 'Must be 18+')
+})
+
+type FormValues = z.infer<typeof Schema>
+
+function SignupForm() {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors }
+  } = useForm<FormValues>({
+    resolver: zodResolver(Schema),
+    defaultValues: { email: '', password: '', age: 0 }
+  })
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      <input {...register('email')} />
+      {errors.email && <span>{errors.email.message}</span>}
+      <input type="password" {...register('password')} />
+      {errors.password && <span>{errors.password.message}</span>}
+      <input type="number" {...register('age')} />
+      {errors.age && <span>{errors.age.message}</span>}
+      <button type="submit">Sign up</button>
+    </form>
+  )
+}
+```
+
+优点：
+
+- 一份 Schema 同时是**类型定义**与**运行时校验规则**
+- 校验规则集中，便于复用（前后端共享）
+- TS 推断 `errors.email.message` 类型完整
+- 无需手写 `register('email', { required, pattern, ... })`
+
+## 配合 shadcn/ui Form
+
+shadcn/ui 提供 RHF 风格化封装：
+
+```bash
+pnpm dlx shadcn@latest add form input button
+```
+
+```tsx
+import { Form, FormField, FormItem, FormLabel, FormControl, FormMessage } from '@/components/ui/form'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+
+const form = useForm<FormValues>({
+  resolver: zodResolver(Schema),
+  defaultValues: { email: '' }
+})
+
+return (
+  <Form {...form}>
+    <form onSubmit={form.handleSubmit(onSubmit)}>
+      <FormField
+        control={form.control}
+        name="email"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Email</FormLabel>
+            <FormControl>
+              <Input {...field} />
+            </FormControl>
+            <FormMessage />                   {/* 自动展示 errors.email.message */}
+          </FormItem>
+        )}
+      />
+      <Button type="submit">Submit</Button>
+    </form>
+  </Form>
+)
+```
+
+详见 [样式方案](/react/styling#shadcnui)。
+
+## React 19 Form Actions
+
+React 19 引入新的表单模式：`<form action={fn}>` 直接绑定提交函数，配合 `useActionState` / `useFormStatus` / `useOptimistic`：
+
+```tsx
+import { useActionState } from 'react'
+
+async function signup(prevState: any, formData: FormData) {
+  const email = formData.get('email') as string
+  const password = formData.get('password') as string
+
+  // 服务端校验
+  const parsed = Schema.safeParse({ email, password })
+  if (!parsed.success) {
+    return { error: parsed.error.flatten().fieldErrors }
+  }
+
+  await createUser(parsed.data)
+  return { success: true }
+}
+
+function SignupForm() {
+  const [state, formAction, isPending] = useActionState(signup, { error: null })
+
+  return (
+    <form action={formAction}>
+      <input name="email" type="email" required />
+      {state?.error?.email && <span>{state.error.email[0]}</span>}
+
+      <input name="password" type="password" required />
+      {state?.error?.password && <span>{state.error.password[0]}</span>}
+
+      <button disabled={isPending}>
+        {isPending ? 'Signing up…' : 'Sign up'}
+      </button>
+    </form>
+  )
+}
+```
+
+特点：
+
+- 表单字段是非受控的（HTML 原生 `name`）
+- 无 JS 时仍可提交（渐进式增强）
+- 与 Server Components / Server Actions 天然契合
+- `useFormStatus` 在子组件读取父表单状态：
+
+```tsx
+function SubmitButton() {
+  const { pending } = useFormStatus()
+  return <button disabled={pending}>{pending ? '…' : 'Submit'}</button>
+}
+```
+
+### Form Actions vs RHF
+
+| 维度 | RHF | Form Actions |
+| ---- | --- | ------------ |
+| 校验时机 | 客户端实时 | 提交时（服务端 / 客户端） |
+| 复杂联动 | ✅ | ⚠️ 需要补客户端 state |
+| 与 Server Actions | 需要桥接 | 原生支持 |
+| 渐进式增强 | ❌（依赖 JS） | ✅ |
+| 大型表单 | ✅ | ⚠️ 仍可用，但状态分散 |
+
+实战推荐：
+
+- **客户端逻辑重的表单**（实时校验、字段联动、动态字段）→ RHF + Zod
+- **简单表单 / Server Components 场景** → Form Actions
+- **Next.js / 全栈应用** → 表单使用 Server Actions，复杂表单仍用 RHF
+
+## 通用模式
+
+### 表单提交错误展示
+
+```tsx
+const [serverError, setServerError] = useState<string | null>(null)
+
+const onSubmit = async (data: FormValues) => {
+  try {
+    await api.signup(data)
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      setError('email', { message: 'Email already in use' })  // 字段级错误
+    } else {
+      setServerError('Network error. Please retry.')          // 表单级错误
+    }
+  }
+}
+
+return (
+  <form onSubmit={handleSubmit(onSubmit)}>
+    {serverError && <Banner>{serverError}</Banner>}
+    {/* fields ... */}
+  </form>
+)
+```
+
+### 大表单分步
+
+把长表单拆为多个步骤，每步是独立小表单 + 共享状态：
+
+```tsx
+function MultiStepForm() {
+  const [step, setStep] = useState(1)
+  const [data, setData] = useState<Partial<FullForm>>({})
+
+  switch (step) {
+    case 1: return <Step1 data={data} onNext={d => { setData({ ...data, ...d }); setStep(2) }} />
+    case 2: return <Step2 data={data} onNext={d => { setData({ ...data, ...d }); setStep(3) }} onBack={() => setStep(1)} />
+    case 3: return <Review data={data} onSubmit={() => api.submit(data as FullForm)} />
+  }
+}
+```
+
+### 文件上传
+
+```tsx
+<input type="file" {...register('avatar')} />
+
+const onSubmit = (data: FormValues) => {
+  const formData = new FormData()
+  formData.append('avatar', data.avatar[0])
+  formData.append('name', data.name)
+  fetch('/api/upload', { method: 'POST', body: formData })
+}
+```
+
+避免用 JSON 传文件——使用 `FormData` + `multipart/form-data`。
+
+### 防止重复提交
+
+`isSubmitting` 让按钮自动禁用：
+
+```tsx
+<button type="submit" disabled={isSubmitting}>...</button>
+```
+
+或抽到自定义 Hook：
+
+```tsx
+function useDoubleSubmitGuard<T>(fn: (data: T) => Promise<void>) {
+  const [pending, setPending] = useState(false)
+  return async (data: T) => {
+    if (pending) return
+    setPending(true)
+    try { await fn(data) } finally { setPending(false) }
+  }
+}
+```
+
+## 类型与表单的协同
+
+把 Schema 作为单一事实源，向各方派生类型：
+
+```ts
+// schemas/user.ts
+export const CreateUserSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  age: z.number().min(18)
+})
+
+export type CreateUserInput = z.infer<typeof CreateUserSchema>
+
+// 服务端：API 层校验
+app.post('/api/users', validate(CreateUserSchema), handler)
+
+// 客户端：表单 resolver
+useForm<CreateUserInput>({ resolver: zodResolver(CreateUserSchema) })
+
+// 服务端、客户端的类型与校验完全一致
+```
+
+这套约定让"表单 → API → 数据库"全链路类型安全，重构时改一处即可。
+
+## 小结
+
+- React Hook Form 是新项目的事实标准，性能与 DX 都最佳；
+- Zod 是表单 + API + 环境变量的统一校验方案；
+- `@hookform/resolvers/zod` 把二者无缝粘合；
+- React 19 的 Form Actions 是 Server Components 时代的新模式，与 RHF 互为补充而非替代；
+- 把 Schema 作为单一事实源，向类型 / 表单 / API 派生，避免多份手写规则。

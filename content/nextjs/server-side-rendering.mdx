@@ -1,0 +1,197 @@
+---
+title: 服务端渲染策略
+description: Static / Dynamic / Streaming 渲染、dynamic 配置、dynamicParams、unstable_noStore 与运行时选择
+---
+
+# 服务端渲染策略
+
+Next.js 提供三种服务端渲染策略，你可以按路由粒度选择。**同一个项目可以有部分路由静态、部分动态、部分流式**。
+
+## 三种策略对比
+
+| 策略 | 执行时机 | 响应 | 适用场景 |
+| ---- | -------- | ---- | -------- |
+| **Static**（默认） | `next build` 时 | 预生成的 HTML + RSC Payload（缓存） | 不依赖请求数据的页面 |
+| **Dynamic** | 每次请求 | 实时渲染的 HTML + RSC Payload | 依赖 cookies / headers / 动态数据 |
+| **Streaming** | 每次请求 | 渐进式 chunked HTML | 需首屏快速显示，延迟加载慢数据 |
+
+## Static Rendering（静态渲染，默认）
+
+```tsx filename="app/about/page.tsx"
+export default function About() {
+  return <h1>About Us</h1>
+}
+```
+
+没有使用 `cookies()` / `headers()` / `searchParams` / `fetch`（未被记忆的），没有显式声明 dynamic → 在构建时执行一次，输出为静态 HTML。
+
+### 静态化的 Server Component
+
+```tsx filename="app/blog/[slug]/page.tsx"
+export const dynamicParams = false
+
+export async function generateStaticParams() {
+  return [{ slug: 'hello' }, { slug: 'world' }]
+}
+
+export default async function BlogPost({
+  params,
+}: {
+  params: Promise<{ slug: string }>
+}) {
+  const { slug } = await params
+  const post = await fetch(`https://api.example.com/posts/${slug}`).then(r => r.json())
+  return <article>{post.content}</article>
+}
+```
+
+所有 `generateStaticParams` 返回的页面在构建时渲染为静态 HTML。访问未预渲染的 `/blog/other` → 404（因为 `dynamicParams = false`）。
+
+## Dynamic Rendering（动态渲染）
+
+当 Next.js 检测到以下任意一项时，路由自动变为动态：
+
+| 触发条件 | 示例 |
+| -------- | ---- |
+| `cookies()` | `const cookieStore = await cookies()` |
+| `headers()` | `const headersList = await headers()` |
+| `searchParams` prop | `Page({ searchParams })` |
+| `'force-dynamic'` | `export const dynamic = 'force-dynamic'` |
+| `unstable_noStore()`（Next.js 16 之前） | `import { unstable_noStore } from 'next/cache'` |
+| 动态 fetch（无 cache 或 revalidate） | `fetch(url, { cache: 'no-store' })` |
+
+### 显式声明动态
+
+```tsx filename="app/dashboard/page.tsx"
+export const dynamic = 'force-dynamic'
+
+export default async function DashboardPage() {
+  const data = await fetch('https://api.example.com/live-data').then(r => r.json())
+  return <Dashboard data={data} />
+}
+```
+
+也可用 `'auto'`（默认，自动检测）、`'error'`（检测到动态源时报错，用于防止意外 opt-out）。
+
+### 读取 cookies / headers 时自动动态
+
+```tsx filename="app/profile/page.tsx"
+import { cookies, headers } from 'next/headers'
+
+export default async function ProfilePage() {
+  const cookieStore = await cookies()
+  const headersList = await headers()
+
+  const sessionId = cookieStore.get('session')?.value
+  const host = headersList.get('host')
+
+  // 因为使用了 cookies() 和 headers()，此页面自动动态渲染
+  const user = await getUserBySession(sessionId)
+  return <Profile user={user} />
+}
+```
+
+## `dynamic` 配置
+
+```tsx
+// 路由级别配置
+export const dynamic = 'auto'              // 默认，自动检测
+export const dynamic = 'force-dynamic'    // 跳过静态生成，始终动态渲染
+export const dynamic = 'force-static'     // 强制静态（禁止读取 cookies/headers）
+export const dynamic = 'error'            // 如果检测到动态依赖 → 构建报错
+```
+
+| 值 | 行为 |
+| -- | ---- |
+| `'auto'` | Next.js 自动判断（推荐） |
+| `'force-dynamic'` | 禁用构建时静态化，跳过 `generateStaticParams` |
+| `'force-static'` | 强制静态构建，`cookies()` 等返回空值 |
+| `'error'` | 检测到动态依赖时报错（防止静默变成动态） |
+
+## `fetch` 缓存控制
+
+```tsx
+// 默认：缓存（构建时获取，静态化）
+fetch('https://api.example.com/data')
+
+// 不缓存（每次请求重新获取——导致页面变成动态）
+fetch('https://api.example.com/data', { cache: 'no-store' })
+
+// 按时间窗口缓存（ISR）
+fetch('https://api.example.com/data', { next: { revalidate: 60 } })
+```
+
+## `dynamicParams`
+
+控制未在 `generateStaticParams` 中预渲染的动态段行为：
+
+```tsx filename="app/blog/[slug]/page.tsx"
+export const dynamicParams = true  // 默认：未静态化的按需渲染（动态）
+export const dynamicParams = false // 未静态化的返回 404
+```
+
+## 渲染策略选择决策树
+
+```text
+需要实时数据或依赖于请求上下文？
+├─ 否 → Static（默认）
+└─ 是
+   ├─ 部分内容可先显示（骨架/header）？
+   │   └─ 是 → Streaming（loading.tsx + Suspense）
+   └─ 全部内容必须一起显示？
+       └─ 是 → Dynamic
+```
+
+## 陷阱
+
+### 无意识的动态 opt-out
+
+```tsx
+// 这个看起来是"静态"的页面
+export default async function Page() {
+  const items = await db.item.findMany()
+  return <ItemList items={items} />
+}
+```
+
+但在 App Router 中，`db.item.findMany()` 被视为"数据源"——Next.js 不知道它是缓存还是实时。如果 DB 查询前没有做去重/记忆化处理，页面会在**每次请求**时执行。
+
+Next.js 16 中可使用 `use cache` 显式标记（详见 [缓存体系](/nextjs/caching)）：
+
+```tsx
+import { db } from '@/lib/db'
+
+async function getItems() {
+  'use cache'
+  return db.item.findMany()
+}
+
+export default async function Page() {
+  const items = await getItems()  // 被缓存，不强制动态
+  return <ItemList items={items} />
+}
+```
+
+### `force-static` 会让 `cookies()` 返回空
+
+```tsx
+export const dynamic = 'force-static'
+
+export default async function Page() {
+  const c = await cookies()       // 始终是空 Map
+  const token = c.get('token')?.value   // undefined
+}
+```
+
+如果确实需要 cookie 但同时想静态，从客户端 `document.cookie` 读取或用 middleware 将 cookie 写到 header，然后在组件中读 header（这也会触发动态）。
+
+### Static export 不兼容 `force-dynamic`
+
+使用 `output: 'export'` 的完全静态站点不能用 `force-dynamic`——构建会报错。
+
+## 小结
+
+- Static（默认）在构建时预渲染，适合不依赖请求上下文的页面；
+- Dynamic 在每次请求时渲染，由 `cookies()` / `headers()` / `searchParams` 自动触发或通过 `dynamic = 'force-dynamic'` 显式声明；
+- Streaming 通过 `loading.tsx` + `Suspense` 实现渐进式响应；
+- `dynamic` 导出提供细粒度的渲染策略控制（`auto` / `force-dynamic` / `force-static` / `error`）。

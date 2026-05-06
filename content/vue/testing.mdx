@@ -1,0 +1,111 @@
+---
+title: 测试
+description: Vitest、Vue Test Utils、Cypress、Playwright
+---
+
+# 测试
+
+Vue 应用的测试方案。
+
+## Vitest + Vue Test Utils
+
+### 安装
+
+```bash
+npm install -D vitest @vue/test-utils jsdom
+```
+
+```ts filename="vitest.config.ts"
+import { defineConfig } from 'vitest/config'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  test: {
+    environment: 'jsdom'
+  }
+})
+```
+
+### 组件测试
+
+```vue filename="components/Counter.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function increment() {
+  count.value++
+}
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+</template>
+```
+
+```ts filename="components/Counter.spec.ts"
+import { mount } from '@vue/test-utils'
+import { describe, it, expect } from 'vitest'
+import Counter from './Counter.vue'
+
+describe('Counter', () => {
+  it('increments count when button is clicked', async () => {
+    const wrapper = mount(Counter)
+    
+    expect(wrapper.text()).toBe('0')
+    
+    await wrapper.find('button').trigger('click')
+    
+    expect(wrapper.text()).toBe('1')
+  })
+})
+```
+
+## Cypress
+
+### 安装
+
+```bash
+npm install -D cypress
+```
+
+### E2E 测试
+
+```ts filename="cypress/e2e/app.cy.ts"
+describe('App', () => {
+  it('visits the app', () => {
+    cy.visit('/')
+    cy.contains('h1', 'Welcome')
+  })
+  
+  it('increments counter', () => {
+    cy.visit('/')
+    cy.get('button').click()
+    cy.get('button').should('contain', '1')
+  })
+})
+```
+
+## Playwright
+
+```bash
+npm install -D @playwright/test
+```
+
+```ts filename="tests/app.spec.ts"
+import { test, expect } from '@playwright/test'
+
+test('increments counter', async ({ page }) => {
+  await page.goto('/')
+  
+  const button = page.locator('button')
+  await expect(button).toHaveText('0')
+  
+  await button.click()
+  await expect(button).toHaveText('1')
+})
+```
+
+下一章 [SSR/SSG](/vue/ssr-ssg) 介绍服务端渲染。

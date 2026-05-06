@@ -1,0 +1,528 @@
+---
+title: 渲染机制与重渲染
+description: Virtual DOM、Fiber、Reconciliation、Commit Phase 与重渲染的四种触发条件
+---
+
+# 渲染机制与重渲染
+
+理解 React 性能问题的前提是理解 React 的渲染机制。"组件为什么重渲染"这个问题，60% 的 React 开发者答不准——他们以为是 props 变化，实际上 React 的触发条件比这宽松得多。本章深入到 Fiber 架构、协调过程、Commit 阶段与重渲染的真实触发条件。
+
+## 渲染管线全景
+
+React 的渲染分两大阶段：**Render Phase**（构建虚拟 DOM）和 **Commit Phase**（应用到真实 DOM）：
+
+```text
+触发渲染
+   │
+   ▼
+┌───────── Render Phase（可中断、可并发）─────────┐
+│                                                  │
+│  调用组件函数 → 生成新的 React Element            │
+│  对比新旧 Fiber 树 → 标记需要变更的节点           │
+│  (Reconciliation 协调过程)                        │
+│                                                  │
+└───────────────┬──────────────────────────────────┘
+                ▼
+┌───────── Commit Phase（同步、不可中断）──────────┐
+│                                                  │
+│  before mutation：getSnapshotBeforeUpdate         │
+│  mutation：DOM 增删改、ref 更新                    │
+│  layout：useLayoutEffect、componentDidMount/Update│
+│                                                  │
+│  浏览器绘制                                       │
+│                                                  │
+│  passive：useEffect 的回调（异步在下个 tick）       │
+│                                                  │
+└──────────────────────────────────────────────────┘
+```
+
+**关键概念**：
+
+- **Render Phase 可被中断**：React 18+ 在并发模式下会切片执行，让出主线程给输入响应
+- **Commit Phase 不可中断**：DOM 更新必须一气呵成，否则会出现视觉撕裂
+
+## Virtual DOM 的本质
+
+每次渲染时，组件函数返回**React Element**——一个普通 JavaScript 对象：
+
+```js
+// JSX
+const el = <div className="card">Hello</div>
+
+// 转译后
+const el = React.createElement('div', { className: 'card' }, 'Hello')
+
+// 实际是普通对象
+{
+  $$typeof: Symbol(react.element),
+  type: 'div',
+  props: { className: 'card', children: 'Hello' },
+  ...
+}
+```
+
+这些对象**不是 DOM**——它们是描述 DOM 应该长什么样的"蓝图"。每次渲染都生成新的蓝图，React 通过对比新旧蓝图找出最小的 DOM 变更。
+
+### Virtual DOM 不是性能银弹
+
+> "Virtual DOM 比直接操作 DOM 快"是常见误解。
+
+实际上：
+
+- 直接操作 DOM（如 vanilla JS / 老式 jQuery）一次操作只改变一个属性，**不会比 Virtual DOM 慢**
+- Virtual DOM 的价值是**抽象**——让你声明式地写 UI，不操心具体哪些属性需要改
+- Virtual DOM 是**一种妥协**：用一些 JS 计算换取声明式编程模型
+
+性能上限：操作 N 个 DOM 节点的最优时间是 O(N)（必须每个都改）。Virtual DOM 通过 diff 也能达到 O(N)，但常数项更大。**它只能保证"不比手写 DOM 慢太多"，不能比手写更快**。
+
+## Fiber 架构
+
+React 16 引入 **Fiber**——把组件树重构为可中断、可恢复的链表结构。
+
+### Fiber 节点结构
+
+```js
+{
+  // 节点身份
+  type: Function | string,        // 组件函数 / 'div'
+  key: any,
+  stateNode: DOMNode | Component, // 真实 DOM 或类组件实例
+
+  // 树形结构（链表）
+  return: Fiber | null,           // 父
+  child: Fiber | null,            // 第一个子
+  sibling: Fiber | null,          // 兄弟
+
+  // 副作用与状态
+  flags: number,                  // Placement | Update | Deletion ...
+  memoizedProps: any,             // 上次渲染的 props
+  memoizedState: any,             // 上次渲染的 state（hooks 链表）
+  alternate: Fiber | null,        // current ↔ workInProgress 双缓冲
+}
+```
+
+### 双缓冲（Double Buffering）
+
+```text
+current 树：    当前屏幕显示的版本
+                      ↕ alternate 指针
+workInProgress：正在构建的下一个版本
+
+构建完成后 → 切换 root.current = workInProgress
+```
+
+像图形渲染中的 Front Buffer / Back Buffer——构建期间用户始终看到完整的旧画面。
+
+### 为什么需要 Fiber
+
+老的 Stack Reconciler（React 15-）是**递归调用栈**——一旦开始就必须跑完，长任务会阻塞用户输入。
+
+Fiber 把渲染拆为**单元工作（unit of work）**，每完成一个单元检查时间是否用尽：
+
+```text
+performUnitOfWork(fiber)
+  ├─ 处理当前 fiber
+  ├─ 返回下一个待处理 fiber（child / sibling / return.sibling）
+  └─ 如果时间不够 → 让出主线程，下次继续
+
+shouldYield()
+  ├─ 当前任务时间片用完？
+  ├─ 有更高优先级任务？
+  └─ 浏览器有输入待处理？
+```
+
+这是并发渲染（Concurrent Rendering）的基础。详见 [并发特性](/performance/react/concurrent)。
+
+## Reconciliation：新旧 Fiber 树的对比
+
+```text
+旧 Fiber 树（current）        新 Fiber 树（workInProgress）
+       App                              App
+      /   \                            /   \
+   Header  Body  ──── diff ────►   Header  Body
+            |                              |
+          List                            List
+         /  \                            /  \
+       I1   I2                         I1   I3   ← I2 → I3
+```
+
+React 通过 **type + key** 决定节点是"复用"还是"删除重建"：
+
+| 情况 | 结果 |
+| ---- | ---- |
+| `type` 相同，`key` 相同 | 复用 fiber，更新 props |
+| `type` 相同，`key` 不同 | 卸载旧、挂载新 |
+| `type` 不同 | 整棵子树卸载重建（昂贵） |
+
+### key 的真正作用
+
+**key 不是给开发者的"为了消警告"——它是 React 用来识别"这个 fiber 是同一个东西"的依据**。
+
+```jsx
+{/* ❌ 用 index 作 key，删除中间项时会错位 */}
+{items.map((item, i) => <Row key={i} data={item} />)}
+
+{/* ✅ 用稳定 ID */}
+{items.map(item => <Row key={item.id} data={item} />)}
+```
+
+错误的 key 会导致：
+
+- 状态错位（输入框的值串到错误行）
+- 不必要的卸载重建（性能损失）
+- 动画失效
+
+### type 改变的代价
+
+```jsx
+// ❌ 每次渲染创建新组件类型
+function Outer({ flag }) {
+  const Component = flag ? () => <A /> : () => <B />
+  return <Component />
+}
+
+// 即使返回的 JSX 一样，type 是新函数 → React 认为是不同组件 → 卸载重建
+```
+
+```jsx
+// ✅ 在外部定义类型
+const A = () => <div>A</div>
+const B = () => <div>B</div>
+
+function Outer({ flag }) {
+  return flag ? <A /> : <B />
+}
+```
+
+**经验**：组件类型必须在渲染外部定义，否则会反复卸载重建。
+
+## 重渲染的触发条件
+
+> 这是 React 性能优化最核心的知识点。
+
+React 触发组件重渲染的条件：
+
+1. **state 变化**（`useState` / `useReducer` 的 setter 被调用）
+2. **父组件重渲染**（即使子的 props 没变，子也会重渲染）
+3. **Context 值变化**（所有消费这个 context 的组件）
+4. **订阅的外部 store 变化**（`useSyncExternalStore`）
+
+```jsx
+function Parent() {
+  const [count, setCount] = useState(0)
+  return (
+    <div>
+      <button onClick={() => setCount(c => c + 1)}>+</button>
+      <Child name="static" />   {/* count 变 → Child 也会重渲染 */}
+    </div>
+  )
+}
+
+function Child({ name }) {
+  console.log('Child render')  // 每次 + 都会打印
+  return <div>{name}</div>
+}
+```
+
+### "props 没变 → 不渲染"是错觉
+
+很多人以为 React 默认有 props 比较——**它没有**。每次父渲染，所有子都会**默认重新执行函数**。
+
+要让子在 props 没变时跳过，必须显式 `React.memo`：
+
+```jsx
+const Child = React.memo(function Child({ name }) {
+  console.log('Child render')
+  return <div>{name}</div>
+})
+
+// 现在 count 变化只重渲 Parent，不重渲 Child
+```
+
+详见 [渲染优化与 Compiler](/performance/react/memoization)。
+
+### state 变化的"等价检查"
+
+```jsx
+const [count, setCount] = useState(0)
+
+setCount(0)        // 与当前值相同（Object.is 比较）→ 跳过渲染
+setCount(c => c)   // 函数式 setter，返回相同值 → 跳过
+
+// 对象呢？
+const [user, setUser] = useState({ name: 'A' })
+setUser({ name: 'A' })   // 新对象（不同引用）→ 触发渲染（即使值看起来一样）
+```
+
+`setState(newValue)` 的 newValue 与上一次的值用 `Object.is` 比较：
+
+```ts
+Object.is(NaN, NaN)        // true（不同于 ===）
+Object.is(+0, -0)          // false（不同于 ===）
+Object.is({a:1}, {a:1})    // false（不同引用）
+```
+
+引用相同就跳过——所以**用不可变更新模式 + 引用稳定**是优化基础。
+
+### 批处理（Batching）
+
+React 18+ 默认对**所有事件**（合成事件、原生事件、setTimeout、Promise）的多个 setState 做批处理：
+
+```jsx
+// React 18：只渲染一次
+function handleClick() {
+  setA(1)
+  setB(2)
+  setC(3)
+  // ↓
+  // 一次性合并 → 一次渲染
+}
+
+// React 17 及之前：合成事件内合并，原生事件不合并
+async function handleClick() {
+  setA(1)              // 触发渲染
+  await fetch(...)
+  setB(2)              // 触发渲染
+}
+```
+
+这是性能上的免费午餐——尽量在一个事件处理函数里多次 setState，React 自己会合并。
+
+### `flushSync` 强制同步
+
+某些场景需要立即更新 DOM（比如读取新尺寸）：
+
+```jsx
+import { flushSync } from 'react-dom'
+
+function handleClick() {
+  flushSync(() => {
+    setCount(c => c + 1)
+  })
+  // 此时 DOM 已经更新
+  console.log(scrollHeight)   // 拿到的是新值
+}
+```
+
+但 `flushSync` 会**打破批处理**，过度使用会损失性能。
+
+## 定位重渲染
+
+### React DevTools Profiler
+
+最权威的工具：
+
+1. 安装 [React DevTools](https://chrome.google.com/webstore/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi)
+2. DevTools → Profiler 面板
+3. 点录制 → 操作页面 → 停止
+4. 查看每次提交的火焰图
+
+火焰图含义：
+
+```text
+颜色：
+  🟢 绿色（深 → 浅）：渲染时间长 → 短
+  🟡 黄色：还行
+  ⚫ 灰色：本次没渲染（被 memo 化）
+
+一次提交（commit）显示一帧：
+┌─────────────────────────────────────────┐
+│ App (4ms)                               │
+│ ├─ Header (1ms)                         │
+│ ├─ List (3ms)                           │
+│ │  ├─ Row1 (0.1ms)                      │
+│ │  ├─ Row2 (0.1ms) ← 没必要渲染但渲染了 │
+│ │  └─ ...                               │
+│ └─ Footer (gray)  ← 已 memo，未渲染      │
+└─────────────────────────────────────────┘
+```
+
+### "Why did this render?" 提示
+
+DevTools Profiler 设置 → 勾选 "Record why each component rendered while profiling"。
+
+录制后，每个组件的渲染原因会显示在右侧：
+
+```text
+Row2 rendered because:
+  - The parent component rendered.
+  - Hooks changed:
+    - State 1 (useState): 0 → 1
+  - Props changed:
+    - data: { id: 2, name: 'B' }
+```
+
+直接定位重渲染原因。
+
+### `useDebugValue` 调试自定义 hook
+
+```jsx
+function useUser(id) {
+  const data = useFetch(`/users/${id}`)
+  useDebugValue(data?.name ?? 'loading')  // DevTools 显示
+  return data
+}
+```
+
+### 性能日志组件
+
+```jsx
+import { Profiler } from 'react'
+
+<Profiler id="App" onRender={(id, phase, actualDuration) => {
+  if (actualDuration > 16) {
+    console.warn(`Slow render: ${id} ${phase} ${actualDuration}ms`)
+  }
+}}>
+  <App />
+</Profiler>
+```
+
+`actualDuration > 16ms` 意味着这一帧无法保持 60 FPS。
+
+## 渲染性能的"成本估算"
+
+```text
+1 次组件渲染的成本 ≈ 函数调用 + Hook 链表遍历 + 子组件递归
+
+对于简单组件：  ~ 10 μs  （万个一秒，几乎免费）
+中等组件：     ~ 100 μs  （千个一秒）
+含复杂逻辑：   ~ 1-10 ms （百个一秒）
+列表/表格：    ~ 10-100 ms（个位数一秒，明显卡）
+```
+
+实践含义：
+
+- **大多数组件不需要 memo 化**——本身渲染就快，加 memo 反而是负担
+- **优化重点是"渲染慢的少数组件"**——找到那些 > 5 ms 的渲染，把它们 memo 或拆分
+
+## 渲染优化的层级递进
+
+```text
+1. 设计层（治本）
+   ├─ 状态放在最低层级（State Colocation）
+   ├─ 把不变的内容上抽（避免在变化范围内）
+   └─ 用 children 模式破除父变子变
+
+2. 应用层（用工具）
+   ├─ React.memo / useMemo / useCallback
+   ├─ 拆分 Context
+   └─ 用 react-window 等虚拟化
+
+3. 框架层（依赖 React）
+   ├─ React Compiler 自动 memo
+   ├─ useTransition 降级渲染
+   └─ Suspense 协调加载
+```
+
+不要直接跳到第二层——很多 memo 化都是在掩盖第一层的设计问题。
+
+## 父变子变的破除技巧
+
+### children 模式
+
+```jsx
+// ❌ Counter 变 → ExpensiveTree 也重渲染
+function App() {
+  const [count, setCount] = useState(0)
+  return (
+    <div>
+      <button onClick={() => setCount(c => c + 1)}>{count}</button>
+      <ExpensiveTree />
+    </div>
+  )
+}
+
+// ✅ ExpensiveTree 作为 children 传入，count 变化时 children 引用不变
+function App({ children }) {
+  const [count, setCount] = useState(0)
+  return (
+    <div>
+      <button onClick={() => setCount(c => c + 1)}>{count}</button>
+      {children}
+    </div>
+  )
+}
+
+function Root() {
+  return <App><ExpensiveTree /></App>
+}
+```
+
+`children` 是从父级传入的引用——`App` 内部的 setState 不会改变这个引用，所以 `ExpensiveTree` 不会重渲染。
+
+### "把 state 推下去"
+
+```jsx
+// ❌ count 在顶层，导致整棵树重渲染
+function App() {
+  const [count, setCount] = useState(0)
+  return (
+    <Layout>
+      <Sidebar />
+      <Main>
+        <Counter count={count} setCount={setCount} />
+        <ExpensiveContent />
+      </Main>
+    </Layout>
+  )
+}
+
+// ✅ count 下沉到只用它的组件
+function App() {
+  return (
+    <Layout>
+      <Sidebar />
+      <Main>
+        <Counter />          {/* 自己持有 state */}
+        <ExpensiveContent />
+      </Main>
+    </Layout>
+  )
+}
+
+function Counter() {
+  const [count, setCount] = useState(0)
+  return <button onClick={() => setCount(c => c + 1)}>{count}</button>
+}
+```
+
+详见 [状态拆分与 Context](/performance/react/state)。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 在渲染函数里定义组件 | 每次都是新 type → 卸载重建 | 移到外部 |
+| 用 index 作 list key | 状态错位 + 重建 | 用稳定 ID |
+| 内联对象/函数作为 props 传 memo 子 | memo 失效 | 提到外面或 useMemo/useCallback |
+| 顶层 state 让整棵树重渲染 | 性能浪费 | state colocation |
+| 期望 props 没变就不渲染 | 默认 React 不比较 | 加 React.memo |
+| 滥用 flushSync | 破坏批处理 | 仅必要场景使用 |
+| 一切都加 memo | 维护负担 + 比较成本 | 仅对慢渲染组件 |
+| 在 useEffect 改 state 引发循环 | 死循环 | 仔细处理依赖 |
+
+## 从渲染机制到优化策略
+
+后续章节会基于本章打下的基础，分别从不同维度优化：
+
+| 问题 | 章节 |
+| ---- | ---- |
+| 重复渲染太多 | [渲染优化与 Compiler](/performance/react/memoization) |
+| 状态导致全局重渲染 | [状态拆分与 Context](/performance/react/state) |
+| 渲染慢但无法避免 | [并发特性](/performance/react/concurrent) |
+| 加载慢 / 首屏慢 | [Suspense 与代码分割](/performance/react/suspense-lazy) |
+| 客户端 JS 太多 | [Server Components](/performance/react/server-components) |
+| SEO / SSR | [SSR / SSG / ISR / PPR](/performance/react/ssr) |
+| 大列表 | [列表虚拟化](/performance/react/virtualization) |
+
+## 小结
+
+- React 的渲染分 Render Phase（可中断）与 Commit Phase（不可中断）；
+- Fiber 是 React 16+ 的核心数据结构，让渲染可暂停可恢复，是并发模式的基础；
+- 重渲染的真实触发条件是 state / 父渲染 / Context / 外部 store 变化——**不是 props 变化**；
+- props 变化默认不被比较，要让组件在 props 没变时跳过必须 `React.memo`；
+- key 不是为了消警告，是 React 识别"同一节点"的依据，错误的 key 引发状态错位；
+- 父组件渲染会带动所有子组件重新执行，破除方法是 children 模式或 state colocation；
+- React DevTools Profiler 是定位重渲染的标准工具，"Why did this render" 提示直接给原因；
+- 大多数组件不需要 memo——优化的目标是找到"真的渲染慢"的组件而非批量加 memo。

@@ -1,0 +1,308 @@
+---
+title: CDN
+description: CDN 工作原理、边缘节点、缓存策略与多 CDN 容灾
+---
+
+# CDN
+
+CDN（Content Delivery Network）是部署在全球各地的**就近代理网络**，把静态资源缓存到离用户最近的节点。它解决的是"光速也太慢"这个物理问题——数据从北京到纽约的单向传输至少需要 ~80 ms，而 CDN 边缘节点可能就在用户隔壁城市。
+
+## 为什么需要 CDN
+
+考虑两个用户访问一个源站在新加坡的网站：
+
+| 用户位置 | 直连源站 | 经 CDN |
+| -------- | -------- | ------ |
+| 上海 | RTT ~100 ms | 边缘节点（上海）RTT ~5 ms |
+| 法兰克福 | RTT ~250 ms | 边缘节点（法兰克福）RTT ~10 ms |
+
+光速决定了"距离 = 延迟"。CDN 通过把内容复制到离用户近的节点，把"全球用户访问"问题转化为"本地用户访问"问题。
+
+### CDN 的三大价值
+
+1. **延迟降低**：减少 RTT，对 TTFB / LCP 立竿见影；
+2. **带宽卸载**：源站只需服务边缘的"回源请求"，承载量提升 10-100 倍；
+3. **可用性**：边缘节点容灾，源站短暂不可用时仍能命中缓存。
+
+## 工作原理
+
+### DNS 智能解析
+
+CDN 改写 DNS 解析逻辑，让不同地区用户解析到不同的边缘 IP：
+
+```text
+用户在上海查询 cdn.example.com
+   ↓
+DNS 递归查询到 CDN 权威 DNS
+   ↓
+权威 DNS 根据用户出口 IP 判断地理位置
+   ↓
+返回上海边缘节点 IP（如 1.2.3.4）
+   ↓
+用户连接 1.2.3.4，命中或回源
+```
+
+进阶方案使用 [Anycast](https://en.wikipedia.org/wiki/Anycast)：所有边缘节点共享同一组 IP，BGP 路由把流量自动导向最近节点（Cloudflare、Fastly 主流方案）。
+
+### 缓存命中流程
+
+```text
+┌─ 用户请求 /assets/main.css ─┐
+│                             ↓
+│         ┌─ CDN 边缘节点 ────┴────┐
+│         │                       │
+│         │  Cache HIT? ──Yes──► 返回
+│         │       │                │
+│         │       No                │
+│         │       ↓                │
+│         │   回源（Origin Pull）    │
+│         │       ↓                │
+│         │   缓存 + 返回           │
+│         └────────────────────────┘
+```
+
+### 缓存键（Cache Key）
+
+CDN 用什么来识别"同一个资源"？默认通常是 `{host}{path}{query}`，但可以定制：
+
+```text
+默认：example.com/img.jpg?v=1   ≠   example.com/img.jpg?v=2
+
+加入 Vary 头：根据 Accept-Encoding 缓存多份
+   /img.jpg + Accept-Encoding: gzip
+   /img.jpg + Accept-Encoding: br
+```
+
+**反模式**：在 URL 上加无意义的查询参数（如埋点 `?ref=xxx`）会让每个用户的请求都成为独立缓存项，**击穿 CDN**。在 CDN 配置中：
+
+- **忽略**埋点参数（utm_source / fbclid / ref ...）
+- 或者在边缘剥离参数后再判断缓存键
+
+## 配置实践
+
+### 缓存策略分级
+
+不同资源应有不同 TTL：
+
+| 资源类型 | TTL（边缘） | 浏览器缓存 |
+| -------- | ----------- | ---------- |
+| 带 hash 的静态资源（`main.abc123.js`） | 1 年 | 1 年（immutable） |
+| 不带 hash 的静态资源（`/logo.svg`） | 1 天 | 1 小时 + 协商缓存 |
+| HTML 入口 | 0–60 s 或不缓存 | 0 + must-revalidate |
+| API JSON | 视业务（s-maxage 配 stale-while-revalidate） | 0 |
+| 图片（用户上传） | 7 天 | 7 天 |
+
+`Cache-Control` 的两个重要分量：
+
+```http
+Cache-Control: public, max-age=3600, s-maxage=86400, stale-while-revalidate=60
+                       ▲              ▲              ▲
+                   浏览器缓存          CDN 边缘缓存       过期后允许返回过期内容
+                                                       同时后台刷新
+```
+
+详见 [缓存策略](/performance/caching)。
+
+### 静态资源指纹化
+
+```text
+旧：main.js                   每次发版用户必须重新下载
+新：main.abc123def.js         hash 改变 → URL 改变 → 强制 miss
+```
+
+构建工具自动生成（webpack、Vite、esbuild 默认支持）：
+
+```js
+// vite.config.js
+export default {
+  build: {
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/[name].[hash].js',
+        chunkFileNames: 'assets/[name].[hash].js',
+        assetFileNames: 'assets/[name].[hash][extname]'
+      }
+    }
+  }
+}
+```
+
+Hash 化后才能放心地用 `Cache-Control: public, max-age=31536000, immutable`。
+
+### 主动失效（Purge）
+
+源站发版后某些不带 hash 的资源（如 `/index.html`）需要主动失效：
+
+```bash
+# Cloudflare
+curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"files":["https://example.com/index.html"]}'
+
+# 阿里云 CDN
+aliyun cdn RefreshObjectCaches \
+  --ObjectPath="https://example.com/index.html" \
+  --ObjectType=File
+```
+
+CI/CD 流水线发版后调用一次。
+
+### 边缘函数与边缘渲染
+
+现代 CDN 提供"在边缘运行 JS"的能力：
+
+| 平台 | 产品 | 运行时 |
+| ---- | ---- | ------ |
+| Cloudflare | Workers | V8 isolate |
+| Vercel | Edge Functions / Edge Middleware | V8 isolate |
+| Fastly | Compute@Edge | WebAssembly |
+| AWS | Lambda@Edge / CloudFront Functions | Node / 受限 V8 |
+
+边缘函数可以做：
+
+- A/B 测试路由（不回源就能判断分组）
+- 鉴权 / 重定向（无需 origin 介入）
+- 个性化 HTML 拼装（边缘 SSR）
+
+```js
+// Cloudflare Worker：根据国家返回不同语言
+export default {
+  async fetch(request) {
+    const country = request.cf.country
+    const url = new URL(request.url)
+    if (country === 'CN') url.pathname = '/zh' + url.pathname
+    if (country === 'JP') url.pathname = '/ja' + url.pathname
+    return fetch(url.toString())
+  }
+}
+```
+
+## 多 CDN 与容灾
+
+任何单一供应商都可能宕机（2021 Fastly、2022 Cloudflare、2023 Akamai 都发生过全球性故障）。商业关键站点应考虑**多 CDN**：
+
+### 主备模式
+
+```text
+DNS → CDN A（主）
+       └─ 故障检测 ──► 切换到 CDN B
+```
+
+工具：NS1、Cedexis、Catchpoint 等智能 DNS 服务。
+
+### 流量切分
+
+按比例同时走多家 CDN，自动避开慢节点：
+
+```text
+DNS RUM（真实用户测速）
+   ├─ CDN A 实测 30 ms → 80% 流量
+   └─ CDN B 实测 50 ms → 20% 流量
+```
+
+### 实践成本
+
+多 CDN 不是免费午餐：
+
+- 配置复杂度 × N
+- 缓存效率下降（每家都要独立缓存）
+- 监控统一变难
+
+**建议**：QPS < 1000 的项目用单 CDN；QPS > 1万 或 SLA 要求 99.99% 的项目再考虑多 CDN。
+
+## 与缓存的协同
+
+CDN 是**共享缓存**（多用户共用），浏览器是**私有缓存**（单用户独占）。`Cache-Control` 通过 `s-maxage` 区分：
+
+```http
+Cache-Control: max-age=60, s-maxage=86400
+                ▲           ▲
+            浏览器 60s       CDN 边缘 1 天
+```
+
+当源站希望"边缘缓存久一点，浏览器跟着边缘走"：
+
+- `max-age` 控制浏览器
+- `s-maxage` 控制 CDN（覆盖 max-age）
+- `private` 禁止 CDN 缓存（如登录后页面）
+- `no-store` 禁止任何缓存
+
+完整规则在 [缓存策略](/performance/caching)。
+
+## CDN 与 SPA / SSR
+
+### SPA 静态托管
+
+构建产物全部放 CDN，无需源站参与：
+
+```text
+/index.html         → CDN（短 TTL，每次发版 purge）
+/assets/*.js        → CDN（长 TTL，hash 化）
+/assets/*.css       → CDN（长 TTL，hash 化）
+/api/*              → 回源到 API 服务器
+```
+
+Vercel / Netlify / Cloudflare Pages 是这类托管的典型代表。
+
+### SSR 与边缘缓存
+
+SSR 应用让每次请求都回源会浪费 CDN。技巧：
+
+1. **页面级缓存**：把 HTML 也按 URL 缓存到 CDN（如博客详情页）：
+
+```http
+Cache-Control: public, s-maxage=300, stale-while-revalidate=60
+```
+
+2. **Stale-While-Revalidate**：用户拿到旧版本立即返回，CDN 后台刷新。延迟与新鲜度平衡的杀手锏。
+
+3. **ISR（Incremental Static Regeneration）**：Next.js 等框架的 [按需重新生成](/performance/react-ssr#isr)，让 CDN 缓存的 HTML 定期或按事件重建。
+
+## 监控 CDN 健康
+
+### 命中率（Cache Hit Ratio）
+
+```text
+Hit Ratio = HIT 数 / (HIT + MISS) × 100%
+```
+
+健康项目应 > 90%。命中率低的常见原因：
+
+- URL 带随机参数 → 缓存键爆炸
+- TTL 设置太短
+- 资源没 hash 化 → 频繁 purge
+- Vary 头过多导致缓存碎片化
+
+### 边缘错误率
+
+5xx 错误来自源站或边缘节点，应分开监控：
+
+| 错误码 | 通常含义 |
+| ------ | -------- |
+| 502 | 边缘连不上源站 |
+| 503 | 源站主动拒绝（限流） |
+| 504 | 边缘到源站超时 |
+
+### RUM 实测
+
+CDN 自报的 RTT 是边缘视角，用户视角需要 [真实用户监控](/performance/metrics#采集真实用户数据)。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 把 API 全部放 CDN | API 数据陈旧 | 仅缓存可缓存的 API（GET 列表） |
+| 静态资源不 hash | 发版后用户拿到旧版 | 启用 hash 化构建 |
+| URL 带埋点参数 | 缓存击穿 | 在 CDN 配置中忽略埋点参数 |
+| 全站统一 TTL | 入口 HTML 也被长缓存 | 分级 TTL |
+| `Vary: User-Agent` | 缓存碎片化 | 用 `Vary: Accept-Encoding` 即可 |
+| 不监控命中率 | 性能劣化无感知 | 接入 CDN 监控仪表 |
+
+## 小结
+
+- CDN 把"全球访问"问题降级为"本地访问"问题，主要收益在 TTFB 与 LCP；
+- 缓存键、TTL、purge 策略是 CDN 配置的三个关键面，错一个就会让 CDN 形同虚设；
+- 静态资源指纹化是开启长 TTL 的前提，所有现代构建工具默认支持；
+- 边缘函数让 CDN 不再是"哑代理"，可以在距离用户最近的地方做路由、鉴权、A/B；
+- 多 CDN 是高 SLA 站点的标配，但成本与复杂度不应被低估；
+- 监控命中率与回源率比看 PageSpeed 分数更能反映 CDN 配置质量。

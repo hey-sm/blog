@@ -1,0 +1,152 @@
+---
+title: 简介与优势
+description: Next.js 的核心定位、App Router 心智模型、与纯 React 的边界与互补
+---
+
+# 简介与优势
+
+Next.js 是 Vercel 开源的 **React 全栈框架**。它的核心命题：
+
+> **在 React 的基础上，提供路由、渲染策略、数据获取、优化与部署的一体化方案。**
+
+React 只关心"组件如何渲染与更新"；Next.js 在此基础上接管：文件路由、服务端渲染、静态生成、缓存策略、图片字体优化、Middleware、API route 等一切"框架关注点"。
+
+## React 缺什么，Next.js 补什么
+
+| 缺口 | React 自身 | Next.js |
+| ---- | ---------- | ------- |
+| 路由 | 需引入 React Router / TanStack Router | 文件系统路由（`page.tsx` / `layout.tsx`） |
+| SSR / SSG | 需手动搭建 Node 服务或引入 Astro | 内置 Static / Dynamic / ISR / PPR |
+| 数据获取 | 纯客户端 fetch 或 TanStack Query | Server Components 直查 DB、`use cache` |
+| 图片优化 | 手动处理 | `next/image`（懒加载、WebP/AVIF、模糊占位） |
+| 字体优化 | 手动处理 | `next/font`（无闪烁、子集化、自托管） |
+| 代码分割 | `React.lazy` + Suspense | 自动按路由拆分 |
+| API 层 | 需独立服务 | Route Handlers + Server Actions |
+| 中间件 | 需反向代理 / Edge Functions | `middleware.ts` |
+| 配置 | 手动 Webpack / Vite | 零配置 + `next.config.ts` |
+| 部署 | 需自行容器化 | Vercel 一键、Node 服务器、Docker |
+
+## App Router 心智模型
+
+Next.js 13.4+ 的 **App Router** 是一次范式升级，核心转变：
+
+```text
+Pages Router (旧)              App Router (新)
+─────────────────────          ─────────────────────
+pages/                         app/
+  index.tsx        →             page.tsx        (路由页面)
+  _app.tsx         →             layout.tsx      (共享布局)
+  _document.tsx    →             RSC 原生          (HTML 骨架)
+  getServerSideProps →           async 函数体      (服务端数据)
+  getStaticProps   →             generateStaticParams
+  API Routes       →             route.ts        (Route Handlers)
+  无               →             Server Actions    (表单/副作用)
+```
+
+关键差异在**渲染模型**：
+
+- **Pages Router**: 所有组件都是客户端组件，SSR 是"在服务器跑一次 render → HTML → 客户端再跑一次 hydration"
+- **App Router**: 默认一切是 **Server Components**，仅在需要交互时加 `'use client'`
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│                     App Router 渲染边界                            │
+│                                                                   │
+│  ┌─────────────────────────────┐                                  │
+│  │     Server Components        │  ← 默认，可直查 DB、读文件     │
+│  │   (no JS shipped to client)  │                                  │
+│  │                              │                                  │
+│  │   ┌──────────────────────┐   │                                  │
+│  │   │  'use client'        │   │  ← 交互边界：hooks、事件、状态  │
+│  │   │  (hydrated in browser)│   │                                  │
+│  │   └──────────────────────┘   │                                  │
+│  └─────────────────────────────┘                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+详见 [服务端与客户端组件](/nextjs/server-client-components)。
+
+## Next.js 16 关键更新
+
+Next.js 16（2025 年稳定）的核心变化：
+
+- **Turbopack 默认开启**：dev 与 build 均默认使用 Turbopack，替代 Webpack
+- **PPR (Partial Prerendering) Stable**：同一页面混合静态与动态内容
+- **`use cache` 指令**：函数级缓存，替代旧的 `unstable_cache`
+- **Viewport 独立导出**：`viewport` 从 `metadata` 分离为独立导出
+- **Middleware `waitUntil`**：允许 middleware 返回后继续执行后台任务
+- **`staleTimes` 配置**：细粒度控制路由缓存与数据缓存的 stale 时间
+- **`after()` 函数**：响应已发送后执行非关键任务（日志、分析）
+
+## 一段最小示例
+
+```bash
+npx create-next-app@latest my-app
+```
+
+```tsx filename="app/layout.tsx"
+import type { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  title: 'My App',
+  description: 'Built with Next.js 16',
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="zh-CN">
+      <body>{children}</body>
+    </html>
+  )
+}
+```
+
+```tsx filename="app/page.tsx"
+export default async function Home() {
+  const data = await fetch('https://api.example.com/posts').then(r => r.json())
+
+  return (
+    <main>
+      <h1>Posts</h1>
+      {data.map((post: { id: string; title: string }) => (
+        <article key={post.id}>
+          <h2>{post.title}</h2>
+        </article>
+      ))}
+    </main>
+  )
+}
+```
+
+执行流程：
+
+1. `create-next-app` 生成项目骨架，Turbopack 配置就绪
+2. `layout.tsx` 定义根布局 —— `<html>` + `<body>` + Metadata
+3. `page.tsx` 是 async Server Component —— `fetch` 在服务端执行，无需 `useEffect`
+4. 访问 `/` 时 Next.js 渲染 `layout.tsx` → 渲染 `page.tsx` → 嵌套 → HTML 响应
+5. 浏览器收到完整 HTML（无需客户端 JS 即可查看内容）
+
+## Next.js 不做什么
+
+理解边界同样重要：
+
+| 缺口 | 推荐方案 |
+| ---- | -------- |
+| 数据库 | Prisma、Drizzle ORM + Neon / PlanetScale / Supabase |
+| 全局状态（客户端） | Zustand、Jotai |
+| 复杂实时协作 | WebSocket 服务、Pusher、Liveblocks |
+| 定时任务 / 队列 | QStash、Inngest、Trigger.dev |
+| 全文搜索 | Algolia、Meilisearch、Orama |
+| CMS | Sanity、Strapi、Payload |
+| 移动端 | React Native / Expo |
+
+Next.js 的边界是 **Web 全栈**——从数据库到浏览器，但止于 HTTP 请求/响应循环。
+
+## 心智模型清单
+
+1. **Server Components 是默认**：不是"选择 SSR"，而是"不写 `'use client'` 的就是 RSC"；
+2. **布局嵌套 = 路由嵌套**：`layout.tsx` 的嵌套结构与 `app/` 目录完全对应；
+3. **数据在需要的地方获取**：Server Components 直接 `fetch`，无需 `useEffect` 或状态管理库；
+4. **`'use client'` 是边界，不是坏东西**：在叶子节点或交互密集处标记即可；
+5. **缓存不是 bug**：Next.js 的默认缓存行为是性能特性，先理解再关闭；
+6. **文件约定不是魔法**：`page.tsx`、`layout.tsx`、`loading.tsx` 是被扫描的命名模式，不是运行时注入。

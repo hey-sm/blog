@@ -1,0 +1,261 @@
+---
+title: 图片与字体优化
+description: next/image 的优化机制、远程图片配置、next/font 的无闪烁字体加载与 Tailwind 集成
+---
+
+# 图片与字体优化
+
+`next/image` 和 `next/font` 是 Next.js 的兩個内置优化模块。它们替代了传统的 `<img>` 和 Google Fonts 加载——不需要第三方库或手动配置。
+
+## `next/image`
+
+```tsx
+import Image from 'next/image'
+import heroImage from '@/public/hero.jpg'
+
+export default function Hero() {
+  return (
+    <Image
+      src={heroImage}                  // 本地图片：自动 infer 宽高
+      alt="Hero illustration"
+      priority                         // 首屏：不懒加载
+      placeholder="blur"               // 模糊占位符（本地图片自动生成）
+    />
+  )
+}
+```
+
+### 本地 vs 远程图片
+
+```tsx
+// 本地图片 — 构建时获取宽高，自动 blur placeholder
+import logo from '@/public/logo.svg'
+<Image src={logo} alt="Logo" />
+
+// 远程图片 — 必须提供 width/height 或 fill
+<Image
+  src="https://example.com/photo.jpg"
+  alt="Photo"
+  width={800}
+  height={600}
+/>
+```
+
+### 关键 Props
+
+| Prop | 值 | 说明 |
+| ---- | -- | ---- |
+| `priority` | `boolean` | 首屏不懒加载 + preload link |
+| `sizes` | `string` | 响应式断点，生成 srcSet |
+| `fill` | `boolean` | 填充父容器（宽高自动） |
+| `placeholder` | `"blur" \| "empty" \| "data:image/..."` | 加载前的占位 |
+| `quality` | `number` (1-100) | JPEG/WebP 质量 |
+| `loader` | custom function | 自定义图片 CDN |
+| `unoptimized` | `boolean` | 跳过优化（用于 SVG 或已优化图片） |
+
+### `fill` 模式
+
+```tsx
+<div className="relative aspect-video w-full">
+  <Image
+    src="https://example.com/banner.jpg"
+    alt="Banner"
+    fill                              // 自动宽高
+    className="object-cover rounded-lg"
+  />
+</div>
+```
+
+父元素必须有 `position: relative` 或 `position: fixed`。
+
+### 远程图片配置
+
+```ts filename="next.config.ts"
+import type { NextConfig } from 'next'
+
+const nextConfig: NextConfig = {
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'images.unsplash.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'cdn.example.com',
+        port: '',
+        pathname: '/blog/**',
+      },
+    ],
+    formats: ['image/avif', 'image/webp'],   // 自动选择最佳格式
+    deviceSizes: [640, 768, 1024, 1280, 1536],  // 响应式断点
+    imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
+    minimumCacheTTL: 60,                      // 缓存 TTL（秒）
+  },
+}
+
+export default nextConfig
+```
+
+### 图片优化原理
+
+```text
+请求 /_next/image?url=...&w=800&q=75
+
+→ Next.js 图片中间件
+→ 下载原图（或从 cache 获取）
+→ 用 Sharp 调整大小 + 格式转换（WebP/AVIF）
+→ 返回优化后的图片
+→ 缓存到 .next/cache/images 或 CDN 边缘
+```
+
+首次请求后，图片永远不重新编码——直接从缓存/CDN 返回。
+
+### 响应式图片
+
+```tsx
+<Image
+  src="/photo.jpg"
+  alt="Photo"
+  width={1200}
+  height={800}
+  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+/>
+```
+
+生成的 HTML：
+
+```html
+<img
+  srcset="
+    /_next/image?url=...&w=640&q=75  640w,
+    /_next/image?url=...&w=1024&q=75 1024w,
+    /_next/image?url=...&w=1536&q=75 1536w
+  "
+  sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+/>
+```
+
+## `next/font`
+
+### Google Fonts
+
+```tsx filename="src/app/layout.tsx"
+import { Inter, Noto_Sans_SC } from 'next/font/google'
+
+const inter = Inter({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-inter',
+})
+
+const notoSansSC = Noto_Sans_SC({
+  subsets: ['latin'],
+  weight: ['400', '500', '700'],
+  variable: '--font-noto',
+})
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="zh-CN" className={`${inter.variable} ${notoSansSC.variable}`}>
+      <body className="font-sans">{children}</body>
+    </html>
+  )
+}
+```
+
+与 Tailwind 集成：
+
+```css filename="src/app/globals.css"
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-inter), sans-serif;
+  --font-cn: var(--font-noto), sans-serif;
+}
+```
+
+### 本地字体
+
+```tsx filename="src/app/layout.tsx"
+import localFont from 'next/font/local'
+
+const myFont = localFont({
+  src: [
+    {
+      path: '../public/fonts/MyFont-Regular.woff2',
+      weight: '400',
+      style: 'normal',
+    },
+    {
+      path: '../public/fonts/MyFont-Bold.woff2',
+      weight: '700',
+      style: 'normal',
+    },
+  ],
+  display: 'swap',
+  variable: '--font-my',
+})
+```
+
+### `next/font` 的优势
+
+| 传统方式 | `next/font` |
+| -------- | ----------- |
+| 浏览器渲染 → 下载字体 → 布局变化（FOIT/FOUT） | 构建时下载字体 + 子集化 → 自托管 |
+| 额外 HTTP 连接到 Google Fonts CDN | 零网络请求（字体与页面同域） |
+| `font-display: swap` 引起 layout shift | 自动生成 `size-adjust` fallback |
+| 需手动配置 subsets | `subsets` 参数自动子集化 |
+
+## 陷阱
+
+### `<Image>` 的 `width`/`height` 不需要与原始尺寸匹配
+
+```tsx
+// 原图 2000x1500，但只需要显示 400x300
+<Image
+  src="/huge-photo.jpg"
+  width={400}                        // 显示宽度
+  height={300}
+  sizes="400px"
+/>
+```
+
+Next.js 将自动生成 400px 版本的图片——宽高只是**显示尺寸**，不是原图尺寸。
+
+### 没有 `sizes` 時的性能下降
+
+```tsx
+// 没有 sizes → 浏览器使用默认 100vw → 下载 1536px 版本在手机上
+<Image src="/photo.jpg" alt="Photo" width={1200} height={800} />
+```
+
+加上 `sizes` 可精確告知浏览器在不同 viewport 下载哪个尺寸。
+
+### `priority` 只给首屏折叠线之上的图片
+
+```tsx
+// 不要在所有的图片上加 priority
+<Image priority />  ← 页面上有 10 个 → preload 消耗带宽，阻止后面的内容
+```
+
+`priority` 应 **只给** 首屏且无条件的头像/banner/hero。
+
+### Google Fonts 的 `subsets` vs `preload`
+
+`next/font` 子集化后的字体可能仍是 20-50 KB。多个字体 + 多个 weight → 几百 KB。仅在确实需要的页面 import 字体；对于不常用的字体，考虑在特定 layout 或 page 中 import 而不是在根 layout。
+
+### 生产部署时 `sharp` 未安装
+
+```
+Error: 'sharp' is required to run the image optimization
+```
+
+某些 Docker 镜像或精简 Node.js 环境中，`sharp` 需要手动安装：`pnpm add sharp`。或通过 `images.loader` 使用外部 CDN 代替內建优化。
+
+## 小结
+
+- `next/image` 自动懒加载、生成 srcSet、转 WebP/AVIF、blur placeholder；
+- 远程图片需 `remotePatterns` 配置；`fill` + 父级 `relative` 进行自适应；
+- `next/font` 在构建时下载字体并自托管，消除 Google Fonts 的下载延迟；
+- `sizes` 对响应式图片至关重要；`priority` 仅为首屏关键图片添加。

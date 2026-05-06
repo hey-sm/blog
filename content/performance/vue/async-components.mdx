@@ -1,0 +1,563 @@
+---
+title: 异步组件与 Suspense
+description: defineAsyncComponent、Suspense、async setup、错误处理与代码分割
+---
+
+# 异步组件与 Suspense
+
+代码分割是 SPA 性能的最大杠杆——异步组件让 Vue 应用按需下载代码，`<Suspense>` 协调加载状态。本章覆盖 `defineAsyncComponent`、Suspense 边界设计、async setup、错误处理、与路由的协同。
+
+## 为什么需要异步组件
+
+```text
+单 bundle 时代：
+  入口 → 下载 1.5 MB JS → 解析 → 渲染
+                              首屏只用了 200 KB
+
+代码分割：
+  入口 → 下载 200 KB → 渲染首屏
+                       后续：访问 /admin 时下载 admin chunk
+```
+
+详见通用章 [JavaScript 优化 § 代码分割](/performance/javascript#代码分割)。
+
+## defineAsyncComponent
+
+包装一个返回 Promise 的动态 import：
+
+```ts
+import { defineAsyncComponent } from 'vue'
+
+const AdminPanel = defineAsyncComponent(() =>
+  import('./components/AdminPanel.vue')
+)
+```
+
+```vue
+<template>
+  <AdminPanel v-if="user.isAdmin" />
+</template>
+```
+
+仅当 `user.isAdmin` 为 true 时下载并挂载 AdminPanel。
+
+### 高级配置
+
+```ts
+const Modal = defineAsyncComponent({
+  loader: () => import('./Modal.vue'),
+  loadingComponent: LoadingSpinner,
+  errorComponent: ErrorFallback,
+  delay: 200,                          // 加载 < 200ms 时不显示 loading
+  timeout: 5000,                       // 5 秒超时
+  suspensible: true,                   // 是否参与 Suspense
+  onError(error, retry, fail, attempts) {
+    if (error.message.match(/fetch/) && attempts <= 3) {
+      retry()                          // 网络错误自动重试 3 次
+    } else {
+      fail()
+    }
+  }
+})
+```
+
+### 与 Vue Router 的集成
+
+```ts
+// 路由级懒加载（最常见用法）
+const routes = [
+  {
+    path: '/',
+    component: () => import('./Home.vue')      // 简写，等价于 defineAsyncComponent
+  },
+  {
+    path: '/admin',
+    component: () => import('./Admin.vue')
+  }
+]
+```
+
+每个路由独立 chunk——只在用户访问时下载。
+
+### 命名 chunk
+
+```ts
+const Admin = defineAsyncComponent(() =>
+  import(/* webpackChunkName: "admin" */ './Admin.vue')
+)
+```
+
+或 Vite 默认会按文件名命名。
+
+### 预加载
+
+`<Link>` 预加载策略（如 hover 时下载）：
+
+```vue
+<router-link
+  to="/admin"
+  @mouseenter="preload"
+>Admin</router-link>
+
+<script setup>
+function preload() {
+  import('./Admin.vue')                // 触发 chunk 下载（不渲染）
+}
+</script>
+```
+
+或路由级 prefetch（vite-plugin-vue-router 支持）：
+
+```ts
+const routes = [
+  { path: '/admin', component: () => import('./Admin.vue'), meta: { prefetch: 'visible' } }
+]
+```
+
+## Suspense
+
+Vue 3 内置 `<Suspense>`，等待异步内容（异步组件 / async setup）：
+
+```vue
+<template>
+  <Suspense>
+    <template #default>
+      <UserProfile :id="userId" />
+    </template>
+    <template #fallback>
+      <Skeleton />
+    </template>
+  </Suspense>
+</template>
+```
+
+### async setup
+
+```vue
+<!-- UserProfile.vue -->
+<script setup>
+const props = defineProps(['id'])
+const user = await fetch(`/api/users/${props.id}`).then(r => r.json())
+</script>
+
+<template>
+  <div>
+    <h1>{{ user.name }}</h1>
+    <p>{{ user.email }}</p>
+  </div>
+</template>
+```
+
+`await` 在 setup 顶层——组件在数据就绪前会**挂起**。父组件用 `<Suspense>` 包裹时，会显示 fallback 直到数据就绪。
+
+### 边界设计
+
+```vue
+<!-- ❌ 全局一个 Suspense -->
+<Suspense>
+  <App />
+  <template #fallback><FullScreenSpinner /></template>
+</Suspense>
+
+<!-- ✅ 分区 Suspense -->
+<template>
+  <Header />
+  <Suspense>
+    <UserMenu />
+    <template #fallback><MenuSkeleton /></template>
+  </Suspense>
+  <Suspense>
+    <PostList />
+    <template #fallback><ListSkeleton /></template>
+  </Suspense>
+</template>
+```
+
+每个区域独立等待，不互相阻塞。
+
+### Suspense 的事件
+
+```vue
+<Suspense
+  @pending="onPending"           <!-- 开始挂起 -->
+  @resolve="onResolve"           <!-- 异步完成 -->
+  @fallback="onFallback"         <!-- 切到 fallback -->
+  timeout="300"                   <!-- 300ms 内完成不显示 fallback -->
+>
+  <SlowComponent />
+  <template #fallback><Spinner /></template>
+</Suspense>
+```
+
+### 与错误边界配合
+
+```vue
+<template>
+  <ErrorBoundary>
+    <Suspense>
+      <AsyncContent />
+      <template #fallback><Skeleton /></template>
+    </Suspense>
+  </ErrorBoundary>
+</template>
+```
+
+Vue 没有内置 ErrorBoundary——但可以用 `onErrorCaptured` 实现：
+
+```vue
+<!-- ErrorBoundary.vue -->
+<script setup>
+import { ref, onErrorCaptured } from 'vue'
+
+const error = ref(null)
+
+onErrorCaptured((err) => {
+  error.value = err
+  return false                        // 阻止冒泡
+})
+
+function retry() {
+  error.value = null
+}
+</script>
+
+<template>
+  <div v-if="error">
+    <p>Error: {{ error.message }}</p>
+    <button @click="retry">Retry</button>
+  </div>
+  <slot v-else />
+</template>
+```
+
+## async setup 的坑
+
+### setup 中的多个 await 会**串行**
+
+```vue
+<script setup>
+const user = await fetch('/api/user').then(r => r.json())
+const posts = await fetch(`/api/posts?u=${user.id}`).then(r => r.json())
+const comments = await fetch(`/api/comments?u=${user.id}`).then(r => r.json())
+</script>
+```
+
+```text
+T+0    request user
+T+200  user 到达
+T+200  request posts
+T+400  posts 到达
+T+400  request comments
+T+600  comments 到达
+       总计 600ms（瀑布流）
+```
+
+### 修复：并行
+
+```vue
+<script setup>
+const [user, posts, comments] = await Promise.all([
+  fetch('/api/user').then(r => r.json()),
+  fetch('/api/posts').then(r => r.json()),
+  fetch('/api/comments').then(r => r.json())
+])
+</script>
+```
+
+```text
+T+0    request all 3
+T+200  all 3 到达 → 总计 200ms
+```
+
+但若有依赖关系（posts 需要 user.id），仍是瀑布——通过路由 loader 在路由匹配时启动并行更佳：
+
+```ts
+// router.ts
+const routes = [
+  {
+    path: '/profile/:id',
+    component: ProfilePage,
+    beforeEnter: async (to) => {
+      // 在路由匹配时就启动请求
+      const id = to.params.id
+      to.meta.dataPromise = Promise.all([
+        fetch(`/api/users/${id}`).then(r => r.json()),
+        fetch(`/api/posts?u=${id}`).then(r => r.json())
+      ])
+    }
+  }
+]
+```
+
+### setup 错误传播
+
+```vue
+<script setup>
+try {
+  const data = await fetch('...').then(r => r.json())
+} catch (e) {
+  // 处理错误
+}
+</script>
+```
+
+或让 `<Suspense>` 上层 ErrorBoundary 捕获——更声明式。
+
+## 异步组件 + Suspense + 错误边界
+
+完整范式：
+
+```vue
+<template>
+  <ErrorBoundary @retry="handleRetry">
+    <Suspense :timeout="300">
+      <AsyncDashboard />
+      <template #fallback><DashboardSkeleton /></template>
+    </Suspense>
+  </ErrorBoundary>
+</template>
+
+<script setup>
+import { defineAsyncComponent } from 'vue'
+
+const AsyncDashboard = defineAsyncComponent({
+  loader: () => import('./Dashboard.vue'),
+  delay: 200,
+  timeout: 5000,
+  onError(error, retry, fail, attempts) {
+    if (attempts <= 3) retry()
+    else fail()
+  }
+})
+
+function handleRetry() {
+  // 重新渲染整棵子树
+}
+</script>
+```
+
+## Suspense 与并发
+
+Vue 3 没有像 React 18 那样的 useTransition / useDeferredValue——但 Suspense 在切换时**保留旧内容**直到新内容就绪：
+
+```vue
+<template>
+  <Suspense :timeout="0">
+    <component :is="currentPage" />
+    <template #fallback><Spinner /></template>
+  </Suspense>
+</template>
+```
+
+`timeout="0"` 意味着"只在 fallback 真有意义时才显示"。短时间切换不闪烁。
+
+## 实战：路由切换 + 数据预取
+
+```vue
+<!-- App.vue -->
+<template>
+  <Header />
+  <Suspense>
+    <RouterView />
+    <template #fallback><PageSkeleton /></template>
+  </Suspense>
+</template>
+```
+
+```vue
+<!-- pages/PostDetail.vue -->
+<script setup>
+import { useRoute } from 'vue-router'
+
+const route = useRoute()
+const post = await fetch(`/api/posts/${route.params.id}`).then(r => r.json())
+</script>
+
+<template>
+  <article>
+    <h1>{{ post.title }}</h1>
+    <div v-html="post.content"></div>
+  </article>
+</template>
+```
+
+切换 `/posts/1` → `/posts/2`：
+
+- 路由匹配
+- PostDetail 组件被卸载并重建（不同 props）
+- async setup 触发挂起
+- Suspense 显示 fallback（除非 timeout 内完成）
+- 数据就绪后渲染
+
+### 改进：keep-alive 保留旧内容
+
+```vue
+<RouterView v-slot="{ Component }">
+  <KeepAlive>
+    <Suspense>
+      <component :is="Component" :key="$route.fullPath" />
+      <template #fallback><Skeleton /></template>
+    </Suspense>
+  </KeepAlive>
+</RouterView>
+```
+
+详见 [KeepAlive 缓存](/performance/vue/keep-alive)。
+
+### 改进：predict + prefetch
+
+```vue
+<router-link
+  to="/posts/2"
+  @mouseenter="prefetch(2)"
+>Next</router-link>
+
+<script setup>
+const cache = new Map()
+
+function prefetch(id) {
+  if (!cache.has(id)) {
+    cache.set(id, fetch(`/api/posts/${id}`).then(r => r.json()))
+  }
+}
+</script>
+```
+
+或用 `<NuxtLink prefetch>`（Nuxt 自动处理）。
+
+## 与 KeepAlive 的协同
+
+```vue
+<KeepAlive>
+  <Suspense>
+    <AsyncTab />
+    <template #fallback><Skeleton /></template>
+  </Suspense>
+</KeepAlive>
+```
+
+`KeepAlive` 缓存已加载的 AsyncTab——下次切换不会重新挂起。
+
+详见 [KeepAlive 缓存](/performance/vue/keep-alive)。
+
+## 性能与体验细节
+
+### 1. delay 防止 flash
+
+```ts
+defineAsyncComponent({
+  loader: () => import('./Quick.vue'),
+  delay: 200                            // < 200ms 加载完不显示 loading
+})
+```
+
+避免快速加载时 loading 一闪而过。
+
+### 2. Suspense timeout
+
+```vue
+<Suspense :timeout="200">
+  <AsyncContent />
+  <template #fallback><Spinner /></template>
+</Suspense>
+```
+
+类似 delay——< 200ms 完成不显示 fallback。
+
+### 3. fallback 与最终内容尺寸匹配
+
+```vue
+<!-- ❌ Spinner 50px，内容 600px → CLS -->
+<template #fallback><Spinner /></template>
+
+<!-- ✅ Skeleton 与最终一致高度 -->
+<template #fallback><DashboardSkeleton /></template>
+```
+
+详见通用章 [响应式图片 § 防治 CLS](/performance/image-responsive#防治-cls)。
+
+### 4. 平滑过渡
+
+```vue
+<Suspense>
+  <Transition name="fade" mode="out-in">
+    <component :is="page" />
+  </Transition>
+  <template #fallback><Skeleton /></template>
+</Suspense>
+```
+
+加载完成时淡入。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 全局一个 Suspense | 任何挂起全屏 fallback | 区域级 Suspense |
+| async setup 多 await 串行 | 数据加载瀑布 | Promise.all 并行 |
+| 路由组件不懒加载 | bundle 巨大 | `() => import(...)` |
+| 异步组件无 errorComponent | 失败白屏 | 配 errorComponent |
+| Suspense fallback 过短闪烁 | 体验差 | timeout / delay |
+| Suspense + animation 没 mode='out-in' | 双显 / 重叠 | 加 mode |
+| KeepAlive 包路由不加 key | 不同路由复用 | `:key="$route.fullPath"` |
+| 异步组件多嵌套（A 内 B 内 C） | 串行下载 | 顶层预加载或 modulepreload |
+
+## 监控
+
+### 异步组件加载时间
+
+```ts
+const Component = defineAsyncComponent({
+  loader: () => {
+    const start = performance.now()
+    return import('./Heavy.vue').then(m => {
+      console.log('Heavy.vue loaded:', performance.now() - start)
+      return m
+    })
+  }
+})
+```
+
+### Suspense 等待时间
+
+```vue
+<Suspense
+  @pending="() => performance.mark('suspense-start')"
+  @resolve="() => {
+    performance.mark('suspense-end')
+    performance.measure('suspense', 'suspense-start', 'suspense-end')
+  }"
+>
+```
+
+### bundle 分析
+
+```bash
+# Vite + visualizer
+npx vite build --report
+
+# 看每个 chunk 构成
+```
+
+详见 [通用性能工具链](/performance/tools)。
+
+## 进阶：Top-level await 与 Vite
+
+`<script setup>` 中可以使用 top-level await——Vite 编译时会处理为参与 Suspense 的形式。
+
+注意：
+
+- 必须在被 `<Suspense>` 包裹的组件中使用
+- 不能用于路由根组件（如 App.vue），否则没有 Suspense 包裹会报错
+- SSR 中天然支持（前提是 Vue 版本支持）
+
+## 小结
+
+- `defineAsyncComponent` 让 Vue 组件按需下载，是 SPA 代码分割的标准方式；
+- `<Suspense>` 协调异步组件 + async setup 的加载状态——分区 Suspense 比全局 Suspense 体验好得多；
+- async setup 的多个 await 串行——用 `Promise.all` 并行；
+- 配合 ErrorBoundary（自实现，用 `onErrorCaptured`）处理加载失败；
+- Suspense 的 timeout / async 组件的 delay 能避免 fallback 闪烁；
+- KeepAlive + Suspense 让路由切换保持旧内容直到新内容就绪，体验更流畅；
+- 路由级 prefetch / hover 时预加载是异步组件的最佳搭档；
+- fallback 应与最终内容尺寸匹配（Skeleton 而非 Spinner），避免 CLS。

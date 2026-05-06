@@ -1,0 +1,353 @@
+---
+title: 内存管理
+description: 内存生命周期、可达性、垃圾回收策略与常见内存泄漏
+---
+
+# 内存管理
+
+JavaScript 由引擎自动管理内存——开发者无需手动分配 / 释放，引擎通过**垃圾回收（Garbage Collection, GC）** 在后台释放不再使用的对象。然而，"自动管理"并不意味着"无需关心"：错误的代码模式仍会让对象长期驻留，导致内存泄漏。
+
+## 内存生命周期
+
+任何变量、对象、闭包的内存生命周期可分为三个阶段：
+
+```text
+分配（allocation） → 使用（use） → 释放（release）
+```
+
+JavaScript 中：
+
+- **分配**：声明变量、字面量构造对象、函数调用 / `new` 触发对象创建
+- **使用**：读 / 写值，作为函数参数 / 返回值
+- **释放**：开发者无法显式触发，由 GC 决定时机
+
+### 分配示例
+
+```js
+let x = 5                                     // 数字（位于栈或寄存器）
+let s = 'hi'                                  // 字符串（堆）
+let arr = [1, 2, 3]                           // 数组对象
+let obj = { a: 1 }                            // 普通对象
+let fn = function () {}                       // 函数对象
+let big = new ArrayBuffer(1024 * 1024)        // 1MB 二进制
+```
+
+引擎通常将原始值放置在栈或寄存器，对象类型放在堆。但**这是实现细节**，规范不强制；现代引擎（V8、JSC）会做大量逃逸分析与对象布局优化。
+
+## 可达性（Reachability）
+
+GC 的核心原则：**回收不可达的对象**。
+
+可达性的根集合（roots）包括：
+
+- 当前调用栈中的局部变量、参数
+- 全局对象（`globalThis`）的属性
+- 引擎运行时持有的内部引用（执行上下文链、迭代器状态、Promise resolvers 等）
+
+从根出发，沿引用链能到达的对象都被视为可达；未被到达者将被回收。
+
+```js
+let user = { name: 'js' }                     // user 引用对象 A，A 可达
+const cache = user                            // cache 也引用 A
+user = null                                   // A 仍可达（cache 引用）
+
+// 直到 cache 也被解除引用，A 才不可达
+```
+
+### 引用图
+
+```text
+Roots
+  │
+  ├─ globalThis
+  │     └─ window.config ──► { theme: 'dark' }
+  │
+  ├─ Stack
+  │     ├─ user        ──► { name: 'js' }   ← 可达
+  │     └─ tempArr     ──► [1, 2, 3]         ← 可达
+  │
+  └─ Internal
+        └─ promiseResolver ──► { /* ... */ }
+```
+
+不在图中、无路径连接到根的对象——例如已超出作用域的局部变量、未被引用的中间对象——会被回收。
+
+## 垃圾回收算法
+
+V8 / SpiderMonkey / JavaScriptCore 都采用**追踪式**回收（tracing GC），而非引用计数。引用计数无法处理循环引用：
+
+```js
+function leak() {
+  const a = {}
+  const b = {}
+  a.ref = b
+  b.ref = a
+  // 即使函数返回后没人引用 a 与 b，引用计数下二者引用对方为 1
+}
+```
+
+追踪式 GC 从 roots 出发遍历可达图，与计数无关，因此能正确回收循环结构。
+
+### 标记—清除（Mark-and-Sweep）
+
+最经典的算法：
+
+1. **Mark**：从 roots 开始 DFS / BFS，给所有可达对象打标记
+2. **Sweep**：遍历整个堆，回收未标记的对象
+
+简单但有缺点：暂停整个程序（Stop-the-World）；产生内存碎片。
+
+### 分代收集（Generational GC）
+
+观察：**绝大多数对象生命周期极短**（如循环中的临时变量），只有少数能"活过几次 GC"。基于此假设，V8 将堆分为：
+
+- **新生代（young generation）**：分配新对象，使用 **Scavenge** 算法（半空间复制），回收频繁但成本低
+- **老生代（old generation）**：经过若干次新生代回收仍存活的对象晋升到此，使用 **Mark-Compact** 算法，回收低频但成本高
+
+### 增量 / 并发 / 并行
+
+为减少主线程暂停时间，现代引擎进一步优化：
+
+- **Incremental**：将 mark 阶段切分为小步骤，与 JS 代码交替执行
+- **Concurrent**：mark 在后台线程进行，主线程几乎不被阻塞
+- **Parallel**：多个工作线程协同执行 mark / sweep / compact
+
+V8 的当前 GC（Orinoco）综合应用了上述技术。在性能要求严苛的场景（游戏、实时音视频），需要避免触发老生代回收（Major GC）。
+
+## 常见内存泄漏
+
+虽然 GC 自动工作，但以下模式会让对象**意外保持可达**，无法被回收：
+
+### 1. 全局变量
+
+```js
+function leak() {
+  // ✗ 严格模式外：未声明的赋值会创建全局变量
+  result = computeBig()                       // 应该写 const result = ...
+}
+```
+
+修复：始终使用 `'use strict'` 或 ES Module（默认严格）。
+
+### 2. 被遗忘的定时器 / 监听器
+
+```js
+class Widget {
+  constructor() {
+    this.huge = new Array(1e6).fill(0)
+    setInterval(() => this.tick(), 1000)      // ✗ 未存 id；this 永远可达
+  }
+  tick() { /* ... */ }
+}
+
+let w = new Widget()
+w = null                                      // 旧实例仍被定时器闭包引用
+```
+
+修复：
+
+```js
+class Widget {
+  constructor() {
+    this.huge = new Array(1e6).fill(0)
+    this.timerId = setInterval(() => this.tick(), 1000)
+  }
+  destroy() { clearInterval(this.timerId) }
+}
+```
+
+事件监听器同理：
+
+```js
+const handler = e => console.log(e)
+btn.addEventListener('click', handler)
+
+// 移除时必须传同一函数引用
+btn.removeEventListener('click', handler)
+```
+
+### 3. 闭包持有大对象
+
+```js
+function attach() {
+  const huge = new Array(1e6).fill(0)
+  return () => {
+    console.log('clicked')                    // 不引用 huge，但 V8 可能保留整个闭包环境
+  }
+}
+```
+
+工程实践：
+
+- 仅捕获实际需要的字段
+- 不再需要的引用显式置 `null`
+
+```js
+function attach() {
+  let huge = new Array(1e6).fill(0)
+  const len = huge.length
+  huge = null                                 // 释放
+  return () => console.log(len)
+}
+```
+
+### 4. 脱离 DOM 的引用
+
+```js
+const detached = document.getElementById('item')
+document.body.removeChild(detached)
+// detached 仍被 JS 持有，整棵 DOM 子树留在内存
+```
+
+修复：解除 JS 引用 + 解绑监听器。
+
+### 5. 大型缓存未限制
+
+```js
+const cache = {}
+function fetchUser(id) {
+  if (cache[id]) return cache[id]
+  return (cache[id] = doFetch(id))
+}
+```
+
+未限制大小的缓存最终会占满内存。改用 LRU 策略或 `WeakMap` / `WeakRef`。
+
+### 6. 控制台日志
+
+DevTools 控制台中打印过的对象**不会被回收**——开发者工具持有引用以便检查。生产代码应避免在循环中打印对象，必要时记录摘要而非整对象。
+
+## 弱引用容器
+
+ES2021 引入 `WeakRef` 与 `FinalizationRegistry`，允许对象被弱引用。
+
+### `WeakMap` / `WeakSet`
+
+键为弱引用：当键对象不再被其他地方引用时，整条键值对会被自动移除。
+
+```js
+const meta = new WeakMap()
+
+function tag(node, info) {
+  meta.set(node, info)
+}
+
+let node = document.getElementById('btn')
+tag(node, { id: 1 })
+
+node = null
+// node 对应的 DOM 元素被 GC 后，meta 中的条目随之消失
+```
+
+适合给宿主对象（DOM、`Request`、第三方对象）附加私有数据。
+
+### `WeakRef`
+
+```js
+let target = { x: 1 }
+const ref = new WeakRef(target)
+
+// 后续访问
+const obj = ref.deref()
+console.log(obj?.x)                           // 可能是 1，也可能 undefined（已被 GC）
+
+target = null
+// 此后 ref.deref() 可能返回 undefined（取决于 GC 时机）
+```
+
+`WeakRef` 适合实现观察者、缓存等场景，但**不应将业务正确性建立在 GC 时机之上**——MDN 与规范都警告：依赖 GC 时机的代码是不可移植的。
+
+### `FinalizationRegistry`
+
+注册回调，对象被回收后异步触发：
+
+```js
+const registry = new FinalizationRegistry(heldValue => {
+  console.log('cleaned:', heldValue)
+})
+
+;(function () {
+  const obj = {}
+  registry.register(obj, 'temp resource')
+  // obj 离开作用域，未来某次 GC 后会触发回调
+})()
+```
+
+同样不应作为业务清理的可靠手段。
+
+## 测量与诊断
+
+### Chrome DevTools
+
+- **Memory** 面板 → **Heap snapshot**：拍摄堆快照，按构造函数分组查看对象
+- **Allocation timeline / sampling**：定位"哪段代码持续分配内存"
+- **Performance** 面板：JS Heap 实时曲线，观察 GC 触发与峰值
+
+排查泄漏的标准流程：
+
+1. 操作页面到稳定基线 → 拍快照 #1
+2. 重复触发某操作 N 次（如打开 / 关闭某弹窗）
+3. 操作回到基线 → 拍快照 #2
+4. 用 "Comparison" 视图对比两个快照
+5. 看 "Delta" 列：被预期回收却仍存在的对象即可疑
+
+### Node.js
+
+```bash
+# 启动时启用堆快照
+node --inspect app.js
+# 然后在 chrome://inspect 中连接
+
+# 强制 GC（仅用于诊断，不要用于生产）
+node --expose-gc app.js
+> global.gc()
+
+# 内存上限
+node --max-old-space-size=4096 app.js
+```
+
+`process.memoryUsage()` 实时观察：
+
+```js
+console.log(process.memoryUsage())
+// {
+//   rss: 30 MB,        进程驻留集
+//   heapTotal: 6 MB,   V8 已分配堆
+//   heapUsed: 3.5 MB,  实际使用
+//   external: 1 MB,    C++ 对象
+//   arrayBuffers: 0    typed arrays
+// }
+```
+
+## 优化建议
+
+1. **减少分配**：循环中避免重复创建对象 / 数组；预分配结构
+2. **复用缓冲**：处理二进制 / 字符串大数据时使用 TypedArray + 复用 Buffer
+3. **及时解绑**：组件卸载时清除定时器、监听器、订阅
+4. **限制缓存**：使用 LRU 或 WeakMap
+5. **避免大型闭包**：仅捕获必要变量
+6. **拆分大对象**：单个超大对象常常无法移入新生代，直接进入老生代
+
+```js
+// 反模式：循环中 push 对象字面量
+const arr = []
+for (let i = 0; i < 1e6; i++) {
+  arr.push({ x: i, y: i * 2 })                // 100 万个对象
+}
+
+// 优化：使用 TypedArray
+const xs = new Int32Array(1e6)
+const ys = new Int32Array(1e6)
+for (let i = 0; i < 1e6; i++) {
+  xs[i] = i
+  ys[i] = i * 2
+}
+```
+
+## 小结
+
+- JavaScript 内存生命周期是分配 / 使用 / 释放，由 GC 自动完成第三步；
+- 现代引擎采用分代式追踪 GC，结合增量 / 并发 / 并行优化；
+- 内存泄漏的根因始终是"对象意外保持可达"，常见来源是定时器、监听器、闭包、缓存；
+- `WeakMap` / `WeakRef` / `FinalizationRegistry` 提供弱引用工具，但不应依赖回收时机；
+- DevTools Heap snapshot 是排查泄漏的标准手段。

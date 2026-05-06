@@ -1,0 +1,480 @@
+---
+title: Flexbox
+description: 一维布局完整指南：主轴、交叉轴、对齐、gap 与常见模式
+---
+
+# Flexbox
+
+Flexbox（Flexible Box Layout）是为**一维布局**（行或列）设计的现代 CSS 模型。它解决了传统 CSS 在垂直居中、等高列、空间分配上的痛点。
+
+> **心智模型**：父元素声明 `display: flex` 后，子元素沿"主轴"排列，垂直主轴的方向是"交叉轴"。所有 Flex 属性都围绕这两条轴线展开。
+
+## 心智模型
+
+```text
+                    flex-direction: row（默认）
+   ┌─────────────────────────────────────────┐
+   │  ▶ 主轴（main axis）→                    │
+   │ ┌────┐  ┌────┐  ┌────┐                 │
+   │ │ A  │  │ B  │  │ C  │  ↕ 交叉轴        │
+   │ └────┘  └────┘  └────┘                 │
+   └─────────────────────────────────────────┘
+```
+
+`flex-direction: column` 则交换：主轴垂直、交叉轴水平。
+
+## 启用 Flex
+
+```css
+.container {
+  display: flex;
+}
+```
+
+子元素自动成为 flex item。Flex 容器本身仍是 block 元素；如需容器自身行内排列：
+
+```css
+.inline-container { display: inline-flex; }
+```
+
+## 容器属性
+
+### `flex-direction`
+
+```css
+.container { flex-direction: row; }            /* 默认 */
+.container { flex-direction: row-reverse; }    /* 主轴反向 */
+.container { flex-direction: column; }
+.container { flex-direction: column-reverse; }
+```
+
+#### Tailwind
+
+```html
+<div class="flex flex-row">水平</div>
+<div class="flex flex-col">垂直</div>
+<div class="flex flex-row-reverse">水平反向</div>
+```
+
+### `flex-wrap`
+
+```css
+.container { flex-wrap: nowrap; }              /* 默认：不换行（可能溢出） */
+.container { flex-wrap: wrap; }                /* 换行 */
+.container { flex-wrap: wrap-reverse; }
+```
+
+```html
+<div class="flex flex-wrap">...</div>
+```
+
+### 简写：`flex-flow`
+
+```css
+.container { flex-flow: row wrap; }            /* = direction + wrap */
+```
+
+### `justify-content`（主轴对齐）
+
+```css
+.container { justify-content: flex-start; }    /* 默认：起点对齐 */
+.container { justify-content: flex-end; }
+.container { justify-content: center; }
+.container { justify-content: space-between; } /* 两端贴边、中间均分 */
+.container { justify-content: space-around; }  /* 每项左右各 1/2 间距 */
+.container { justify-content: space-evenly; }  /* 间距完全均等 */
+```
+
+视觉对比：
+
+```text
+flex-start:    [A][B][C]            
+center:           [A][B][C]         
+flex-end:                [A][B][C]  
+space-between: [A]      [B]      [C]
+space-around:  __[A]__ __[B]__ __[C]__
+space-evenly:  __[A]__[B]__[C]__
+```
+
+#### Tailwind
+
+```html
+<div class="flex justify-start">起点</div>
+<div class="flex justify-center">居中</div>
+<div class="flex justify-between">两端</div>
+<div class="flex justify-around">环绕</div>
+<div class="flex justify-evenly">均等</div>
+```
+
+### `align-items`（交叉轴对齐）
+
+```css
+.container { align-items: stretch; }           /* 默认：拉伸填满交叉轴 */
+.container { align-items: flex-start; }
+.container { align-items: flex-end; }
+.container { align-items: center; }
+.container { align-items: baseline; }          /* 文字基线对齐 */
+```
+
+```html
+<div class="flex items-stretch">...</div>
+<div class="flex items-center">居中（最常用）</div>
+<div class="flex items-baseline">基线对齐</div>
+```
+
+### `align-content`（多行交叉轴对齐）
+
+仅在多行（wrap）时生效——管理"行之间"的对齐：
+
+```css
+.container {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: space-between;
+}
+```
+
+```html
+<div class="flex flex-wrap content-between">...</div>
+```
+
+### `gap`
+
+```css
+.container {
+  display: flex;
+  gap: 16px;                                   /* 行列同 */
+  gap: 16px 24px;                              /* row-gap column-gap */
+  row-gap: 16px;
+  column-gap: 24px;
+}
+```
+
+`gap` **永远优于子元素的 margin**——避免折叠、避免边界 hack。
+
+#### Tailwind
+
+```html
+<div class="flex gap-4">默认</div>
+<div class="flex gap-x-4 gap-y-2">分别设置</div>
+```
+
+## 项目属性
+
+### `flex-grow`
+
+```css
+.item { flex-grow: 0; }                        /* 默认：不放大 */
+.item { flex-grow: 1; }                        /* 占据所有剩余空间 */
+.item { flex-grow: 2; }                        /* 比 1 多两倍剩余空间 */
+```
+
+### `flex-shrink`
+
+```css
+.item { flex-shrink: 1; }                      /* 默认：可缩小 */
+.item { flex-shrink: 0; }                      /* 不缩小（保持原始尺寸） */
+```
+
+### `flex-basis`
+
+```css
+.item { flex-basis: auto; }                    /* 默认：基于内容 */
+.item { flex-basis: 200px; }
+.item { flex-basis: 50%; }
+```
+
+### 简写：`flex`
+
+```css
+.item { flex: 0 1 auto; }                      /* 默认值 */
+.item { flex: 1; }                              /* = 1 1 0%（占据剩余） */
+.item { flex: auto; }                           /* = 1 1 auto */
+.item { flex: none; }                           /* = 0 0 auto（不增不减） */
+.item { flex: 0 0 200px; }                      /* 固定 200px，不增不减 */
+```
+
+#### Tailwind
+
+```html
+<div class="flex">
+  <div class="flex-none">固定</div>
+  <div class="flex-1">占据剩余</div>
+  <div class="flex-auto">基于内容 + 可增减</div>
+</div>
+```
+
+### `align-self`（覆盖 `align-items`）
+
+```css
+.item { align-self: flex-end; }                /* 单独把这一项贴底 */
+```
+
+```html
+<div class="flex">
+  <div>...</div>
+  <div class="self-end">右下贴底</div>
+</div>
+```
+
+### `order`
+
+```css
+.item { order: 0; }                            /* 默认 */
+.item { order: -1; }                           /* 提前 */
+.item { order: 99; }                           /* 推后 */
+```
+
+视觉重排，**不改变 DOM 顺序**——慎用，影响键盘 / 屏幕阅读器顺序。
+
+## 常见布局模式
+
+### 1. 垂直水平居中
+
+```css
+.center {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+```
+
+```html
+<div class="flex items-center justify-center min-h-screen">
+  <button>Click</button>
+</div>
+```
+
+### 2. 顶部 / 底部固定的列布局
+
+```css
+.layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.main { flex: 1; }                             /* 撑满剩余高度 */
+```
+
+```html
+<div class="flex flex-col min-h-screen">
+  <header>...</header>
+  <main class="flex-1">...</main>
+  <footer>...</footer>
+</div>
+```
+
+### 3. 导航：左 logo + 右菜单
+
+```css
+.nav { display: flex; justify-content: space-between; align-items: center; }
+```
+
+```html
+<nav class="flex justify-between items-center p-4">
+  <Logo />
+  <Menu />
+</nav>
+```
+
+### 4. 卡片自动撑满 + 操作贴底
+
+```css
+.card { display: flex; flex-direction: column; height: 300px; }
+.card-actions { margin-top: auto; }            /* 推到底 */
+```
+
+```html
+<div class="flex flex-col h-72">
+  <div>Title</div>
+  <div>Body</div>
+  <div class="mt-auto">Actions</div>
+</div>
+```
+
+`margin-top: auto` 是 Flex 的"魔法"——把元素推到容器尾部，效果等同 `justify-content: space-between` 但更细粒度。
+
+### 5. 等宽列（响应式）
+
+```css
+.cols {
+  display: flex;
+  gap: 16px;
+}
+.col { flex: 1; }                              /* 三列等宽 */
+```
+
+```html
+<div class="flex gap-4">
+  <div class="flex-1">A</div>
+  <div class="flex-1">B</div>
+  <div class="flex-1">C</div>
+</div>
+```
+
+### 6. 主内容 + 固定侧栏
+
+```css
+.layout { display: flex; gap: 24px; }
+.sidebar { flex: 0 0 240px; }                  /* 固定 240px */
+.main { flex: 1; }                             /* 撑满剩余 */
+```
+
+```html
+<div class="flex gap-6">
+  <aside class="w-60 flex-none">...</aside>
+  <main class="flex-1">...</main>
+</div>
+```
+
+### 7. 媒体对象（图标 + 内容）
+
+```css
+.media { display: flex; gap: 12px; }
+.media-icon { flex-shrink: 0; }
+.media-body { flex: 1; min-width: 0; }         /* min-width: 0 防止内容撑破 */
+```
+
+```html
+<div class="flex gap-3">
+  <Avatar class="flex-none" />
+  <div class="flex-1 min-w-0">
+    <p class="truncate">长内容...</p>
+  </div>
+</div>
+```
+
+### 8. 自动换行的标签集
+
+```css
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+```
+
+```html
+<div class="flex flex-wrap gap-2">
+  <span class="tag">JS</span>
+  <span class="tag">TS</span>
+  <span class="tag">React</span>
+</div>
+```
+
+### 9. 末尾不撑满最后一行
+
+`space-between` 在最后一行不足时会有奇怪的间隙：
+
+```css
+.grid { display: flex; flex-wrap: wrap; gap: 16px; }
+.item { flex: 1 1 200px; }                     /* 至少 200，超过则共享 */
+```
+
+或用 Grid 的 `grid-template-columns: repeat(auto-fill, minmax(200px, 1fr))`——见 [Grid](/css/grid)。
+
+## 易错点
+
+### 1. `flex: 1` 与 `width: 100%`
+
+```css
+.item { flex: 1; }                             /* 占据剩余空间 */
+.item { width: 100%; }                         /* 100% of 父容器（可能溢出） */
+```
+
+二者在多 item 时表现不同——`flex: 1` 自动按比例分配剩余，`width: 100%` 让每项都占 100% 引发溢出。
+
+### 2. `flex-basis: 0` vs `flex-basis: auto`
+
+```css
+.item { flex: 1 1 0; }                         /* 0 + 平均扩展 = 严格等宽 */
+.item { flex: 1 1 auto; }                      /* 内容宽度 + 平均扩展 = "内容多者更宽" */
+```
+
+视觉对比：
+
+```text
+auto：[Long content......] [Short]
+0:    [Long content...   ] [Short content......]
+```
+
+### 3. 内容溢出（不能 truncate）
+
+```css
+.item { display: flex; }
+.item p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* p 仍可能撑破容器 */
+```
+
+修复：在祖先 flex item 上加 `min-width: 0`：
+
+```css
+.item { display: flex; min-width: 0; }
+```
+
+Flex item 默认 `min-width: auto`（不能小于内容），需要显式置 0 才能让内部 truncate 生效。
+
+### 4. 子元素被自动拉伸（高度不一致）
+
+```css
+.row { display: flex; }
+/* 默认 align-items: stretch，子元素被拉到一样高 */
+```
+
+修复：
+
+```css
+.row { align-items: flex-start; }
+```
+
+## 与 Grid 的边界
+
+| 场景 | 优先 Flex | 优先 Grid |
+| ---- | --------- | --------- |
+| 一维（一行 / 一列） | ✅ | — |
+| 二维（行 × 列） | — | ✅ |
+| 不知道项数 | ✅ | ✅ |
+| 项之间需要对齐 | ✅ | ✅ |
+| 跨行 / 跨列 | — | ✅ |
+| 等高列 | ✅ | ✅ |
+| 复杂的"区域"布局 | — | ✅ |
+
+简单原则：**如果一个方向的对齐就够了，用 Flex；如果两个方向都需要控制，用 Grid**。
+
+## Flex Gotchas 速查表
+
+| 问题 | 解决 |
+| ---- | ---- |
+| 子元素文字 truncate 失效 | flex item 上加 `min-width: 0` |
+| 项不等宽 | `flex: 1 1 0`（不是 `flex: 1 1 auto`） |
+| 推到末尾 | `margin-{方向}: auto` |
+| 最后一行间隙怪 | 改用 Grid 的 `auto-fill / minmax` |
+| 高度都一致 | `align-items: flex-start` |
+| 包装行间距 | `align-content: ...`（不是 align-items） |
+
+## Tailwind Flex 速查
+
+| Tailwind | CSS |
+| -------- | --- |
+| `flex` / `inline-flex` | `display: flex / inline-flex` |
+| `flex-row` / `flex-col` | `flex-direction: row / column` |
+| `flex-wrap` / `flex-nowrap` / `flex-wrap-reverse` | `flex-wrap: ...` |
+| `justify-start` ~ `justify-evenly` | `justify-content` |
+| `items-start` ~ `items-stretch` | `align-items` |
+| `content-start` ~ `content-around` | `align-content` |
+| `self-auto` ~ `self-stretch` | `align-self` |
+| `flex-1` / `flex-auto` / `flex-none` | `flex` 简写 |
+| `grow` / `grow-0` | `flex-grow` |
+| `shrink` / `shrink-0` | `flex-shrink` |
+| `basis-*` | `flex-basis` |
+| `order-1` ~ `order-12` / `-order-1` | `order` |
+| `gap-*` / `gap-x-*` / `gap-y-*` | `gap` |
+
+## 小结
+
+- Flexbox 是一维布局的事实标准——主轴排列、交叉轴对齐；
+- `gap` 优于子元素 margin，不会触发折叠；
+- `flex: 1` 是占据剩余空间的最常用值；`flex: 0 0 200px` 是固定宽不增减；
+- `min-width: 0` 让 flex item 内部能 truncate；
+- 一维用 Flex，二维用 Grid；二者互补不替代；
+- Tailwind 的 `flex` / `items-*` / `justify-*` / `gap-*` 几乎一对一映射 CSS 属性。

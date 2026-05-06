@@ -1,0 +1,689 @@
+---
+title: 响应式图片
+description: srcset、sizes、picture 元素、aspect-ratio、CLS 防治与显示尺寸匹配
+---
+
+# 响应式图片
+
+> "Ensure to serve images that are close to your display size"（roadmap 条目）
+
+发送 1920×1080 的图给 375 px 宽的手机屏幕，约 80% 的字节是浪费——这是大多数项目首屏 LCP 慢的核心原因之一。响应式图片让浏览器**自主选择**最适合当前设备、视口、像素密度的版本。本章覆盖 `srcset` / `sizes` / `<picture>` 的工作机制、aspect-ratio 与 CLS 防治、客户端提示，以及框架集成。
+
+## 单源图片的浪费
+
+考虑这个常见写法：
+
+```html
+<img src="/hero.jpg" alt="hero" />
+```
+
+- 设计师给的是 3840×2160 的 4K 大图（2 MB）
+- 桌面用户在 1920×1080 看到，只需要 ~ 800 KB
+- 手机用户在 375×667 看到，只需要 ~ 60 KB
+- 而所有用户都下载了 2 MB
+
+```text
+设备 vs 实际需要 vs 单源传输
+
+iPhone 13 (390×844, 3x)     需要 1170 px 宽 ──► 实际下载 3840 px
+iPad (768, 2x)              需要 1536 px 宽 ──► 实际下载 3840 px
+桌面 1920×1080              需要 1920 px 宽 ──► 实际下载 3840 px
+
+每张图都浪费了 50–95% 的字节
+```
+
+## srcset：分辨率切换
+
+### 基础语法
+
+`srcset` 让浏览器从多个候选中**自动选**最合适的：
+
+```html
+<img
+  src="/hero-800.jpg"                  <!-- fallback -->
+  srcset="/hero-400.jpg 400w,
+          /hero-800.jpg 800w,
+          /hero-1200.jpg 1200w,
+          /hero-1920.jpg 1920w"
+  sizes="100vw"
+  alt="hero"
+/>
+```
+
+### `w` 描述符 vs `x` 描述符
+
+```html
+<!-- 像素密度版（适合固定尺寸，如图标） -->
+<img src="/icon.png"
+     srcset="/icon.png 1x, /icon@2x.png 2x, /icon@3x.png 3x" />
+
+<!-- 宽度版（适合响应式布局，配合 sizes） -->
+<img src="/hero.jpg"
+     srcset="/hero-400.jpg 400w, /hero-800.jpg 800w, /hero-1200.jpg 1200w"
+     sizes="(min-width: 768px) 50vw, 100vw" />
+```
+
+| 描述符 | 适用 |
+| ------ | ---- |
+| `Nx` | 固定 CSS 尺寸的元素（图标、头像） |
+| `Nw` | 响应式宽度的元素（hero、文章配图） |
+
+### sizes：告诉浏览器图片有多大
+
+`sizes` 是关键——它**告诉浏览器**图片在不同视口下的实际显示宽度，浏览器才能挑出合适的 `srcset` 候选：
+
+```html
+<img
+  srcset="/hero-400.jpg 400w,
+          /hero-800.jpg 800w,
+          /hero-1200.jpg 1200w"
+  sizes="(min-width: 1024px) 50vw,
+         (min-width: 640px) 75vw,
+         100vw"
+  src="/hero-800.jpg"
+  alt="hero"
+/>
+```
+
+读法：
+
+- 视口 ≥ 1024 px：图片占 50% 视口宽
+- 视口 ≥ 640 px：图片占 75% 视口宽
+- 否则：图片占 100% 视口宽
+
+浏览器选择逻辑（简化）：
+
+```text
+当前 1440 px 桌面 + DPR 2：
+  1. sizes 计算：50vw = 720 px
+  2. 实际需要：720 × 2 = 1440 px
+  3. 在 srcset 中找 ≥ 1440w 的最小一个 → 1200w 不够，选 1920w 才合适
+     （如未提供 1920w，会选最大的 1200w，可能略糊）
+
+手机 375 px + DPR 3：
+  1. sizes 计算：100vw = 375 px
+  2. 实际需要：375 × 3 = 1125 px
+  3. 在 srcset 中找 ≥ 1125w 的最小一个 → 1200w
+```
+
+### 常见 sizes 模式
+
+```html
+<!-- 全宽 hero -->
+sizes="100vw"
+
+<!-- 卡片网格：移动 1 列、平板 2 列、桌面 3 列 -->
+sizes="(min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw"
+
+<!-- 文章配图：有侧边栏的桌面 + 全宽移动 -->
+sizes="(min-width: 1024px) 700px, 100vw"
+
+<!-- 头像：固定 48px -->
+sizes="48px"
+
+<!-- 半屏 + 减去 padding -->
+sizes="(min-width: 1024px) calc(50vw - 32px), 100vw"
+```
+
+### 浏览器并不总是"挑最优"
+
+- 已经下载过更大尺寸 → 直接用（避免重复下载）
+- 网络条件检测（部分浏览器在弱网选小一点的）
+- 用户开启"省流量"模式
+
+这是设计妥协，记住 `srcset` 是**给浏览器的提示**，不是绝对指令。
+
+## picture：完全控制选择
+
+`<picture>` 让你**显式控制**浏览器在不同条件下选哪个 `<source>`：
+
+### 多格式 fallback
+
+```html
+<picture>
+  <source srcset="/hero.avif" type="image/avif">
+  <source srcset="/hero.webp" type="image/webp">
+  <img src="/hero.jpg" alt="hero" width="1200" height="600">
+</picture>
+```
+
+浏览器从上到下选第一个支持的 `type`，否则用 `<img>` 兜底。
+
+### 艺术指导（Art Direction）
+
+不同视口尺寸用**不同裁剪**的图——而不只是缩放：
+
+```html
+<picture>
+  <!-- 桌面：宽屏全景图 -->
+  <source media="(min-width: 1024px)"
+          srcset="/hero-wide.avif" type="image/avif">
+  <source media="(min-width: 1024px)"
+          srcset="/hero-wide.webp" type="image/webp">
+
+  <!-- 移动：竖屏裁剪图 -->
+  <source media="(max-width: 1023px)"
+          srcset="/hero-portrait.avif" type="image/avif">
+  <source media="(max-width: 1023px)"
+          srcset="/hero-portrait.webp" type="image/webp">
+
+  <img src="/hero-wide.jpg" alt="hero" width="1200" height="600">
+</picture>
+```
+
+### 暗色模式
+
+```html
+<picture>
+  <source srcset="/hero-dark.avif"
+          media="(prefers-color-scheme: dark)"
+          type="image/avif">
+  <source srcset="/hero.avif" type="image/avif">
+  <img src="/hero.jpg" alt="hero">
+</picture>
+```
+
+### 综合实战
+
+完整的多格式 + 多分辨率 + 艺术指导：
+
+```html
+<picture>
+  <!-- 桌面 AVIF -->
+  <source
+    media="(min-width: 1024px)"
+    type="image/avif"
+    srcset="/hero-wide-1280.avif 1280w,
+            /hero-wide-1920.avif 1920w,
+            /hero-wide-2560.avif 2560w"
+    sizes="100vw">
+
+  <!-- 桌面 WebP -->
+  <source
+    media="(min-width: 1024px)"
+    type="image/webp"
+    srcset="/hero-wide-1280.webp 1280w,
+            /hero-wide-1920.webp 1920w"
+    sizes="100vw">
+
+  <!-- 移动 AVIF -->
+  <source
+    type="image/avif"
+    srcset="/hero-portrait-480.avif 480w,
+            /hero-portrait-960.avif 960w"
+    sizes="100vw">
+
+  <!-- 移动 WebP -->
+  <source
+    type="image/webp"
+    srcset="/hero-portrait-480.webp 480w,
+            /hero-portrait-960.webp 960w"
+    sizes="100vw">
+
+  <!-- 兜底 -->
+  <img
+    src="/hero-portrait-960.jpg"
+    alt="hero"
+    width="1200"
+    height="600"
+    loading="lazy"
+    decoding="async">
+</picture>
+```
+
+看似冗长，但用框架（Next.js / Nuxt Image）可以一行配置生成。
+
+## 防治 CLS
+
+CLS（Cumulative Layout Shift）是 [Core Web Vitals](/performance/metrics#cls--cumulative-layout-shift) 之一。图片是 CLS 的常见来源。
+
+### 没指定尺寸的代价
+
+```html
+<!-- ❌ 浏览器加载完才知道图多大，导致下方内容跳变 -->
+<img src="/hero.jpg" alt="hero">
+
+<!-- 加载前的布局：              加载后的布局： -->
+<!-- ┌──────────────┐            ┌──────────────┐ -->
+<!-- │ 图（0 高）    │            │              │ -->
+<!-- ├──────────────┤            │     图       │ -->
+<!-- │ 文字段落...   │            │              │ -->
+<!-- │              │            ├──────────────┤ -->
+<!-- └──────────────┘            │ 文字段落... ←跳了│ -->
+<!--                             └──────────────┘ -->
+```
+
+用户阅读到一半时图加载完，下方内容突然下移——糟糕的体验。
+
+### 解法 1：显式 width / height
+
+```html
+<img src="/hero.jpg" width="1200" height="600" alt="hero" />
+```
+
+浏览器据 width/height 算出 `aspect-ratio`，预留正确空间。
+
+CSS 可以再覆盖：
+
+```css
+img {
+  width: 100%;       /* 实际显示宽度 */
+  height: auto;      /* 高度自动按 aspect-ratio */
+}
+```
+
+### 解法 2：CSS aspect-ratio
+
+```html
+<img src="/hero.jpg" alt="hero"
+     style="aspect-ratio: 16 / 9; width: 100%" />
+```
+
+或在 CSS 中：
+
+```css
+.hero-img {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  object-fit: cover;
+}
+```
+
+### 解法 3：父容器固定比例（旧版浏览器兼容）
+
+```html
+<div class="aspect-16-9">
+  <img src="/hero.jpg" alt="hero">
+</div>
+```
+
+```css
+.aspect-16-9 {
+  position: relative;
+  padding-bottom: 56.25%;  /* 9/16 = 56.25% */
+}
+.aspect-16-9 img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+```
+
+CSS `aspect-ratio` 普及前的标准做法，仍兼容性好。
+
+### 占位符策略（perceived performance）
+
+加载期间的"占位"也影响体验：
+
+#### 纯色占位
+
+```css
+img {
+  background: #eee;
+}
+```
+
+#### LQIP（Low Quality Image Placeholder）
+
+模糊的小图占位，加载完替换：
+
+```html
+<img
+  src="/hero-tiny.jpg"        <!-- 20×20 模糊小图，~200B -->
+  data-full="/hero-1200.jpg"
+  style="filter: blur(8px); transition: filter 0.3s"
+  onload="this.style.filter='none'; this.src=this.dataset.full"
+/>
+```
+
+#### BlurHash / ThumbHash
+
+把图片编码为短字符串（30 字符内），客户端解码为模糊预览：
+
+```jsx
+import { Blurhash } from 'react-blurhash'
+
+<Blurhash
+  hash="LEHV6nWB2yk8pyo0adR*.7kCMdnj"
+  width={1200} height={600}
+/>
+```
+
+短字符串可以内联到 HTML 而不增加多少体积。
+
+#### Next.js / Nuxt 自动 LQIP
+
+```jsx
+// Next.js
+<Image src="/hero.jpg" placeholder="blur" blurDataURL="..." />
+
+// Nuxt
+<NuxtImg src="/hero.jpg" placeholder />
+```
+
+## 显示尺寸匹配
+
+### 检测"过大图片"
+
+DevTools → Network → Image 类型 → 看 "Resource Size" vs "Display Size"。
+
+```text
+hero.jpg
+  Resource Size: 350 KB (1920×1080)
+  Display Size:  600×338      ← 实际只用 600 px
+```
+
+差距大 = 浪费。
+
+### Lighthouse 审计
+
+`Properly size images` 会列出所有尺寸过大的图，并估算节省字节数。
+
+### 实测：尺寸不匹配的浪费
+
+| 显示尺寸 | 设计师给的图 | 浪费 |
+| -------- | ------------ | ---- |
+| 600×400 | 1920×1280 | 90% |
+| 200×200（头像） | 1024×1024 | 95% |
+| 1200×800 | 4K（3840×2160） | 87% |
+
+## 客户端提示（Client Hints）
+
+让浏览器**主动告诉服务器**它的能力，服务器再返回最优图：
+
+```http
+# 浏览器请求（启用了 Client Hints）
+GET /hero.jpg
+Accept: image/avif, image/webp, image/jpeg
+Sec-CH-DPR: 2.0
+Sec-CH-Viewport-Width: 768
+Sec-CH-Width: 600
+```
+
+服务器据此返回：
+
+```http
+HTTP/1.1 200 OK
+Content-Type: image/avif
+Vary: Accept, DPR, Width
+```
+
+启用方式：
+
+```http
+# 服务器响应中通告需要哪些 Client Hints
+Accept-CH: DPR, Width, Viewport-Width
+```
+
+```html
+<!-- 或在 HTML 中 -->
+<meta http-equiv="Accept-CH" content="DPR, Width, Viewport-Width">
+```
+
+```html
+<!-- 标记图片希望接收 hint -->
+<img src="/hero.jpg" sizes="100vw" />
+```
+
+Client Hints 让你**摆脱**手写 srcset/sizes/picture——服务器接管选择逻辑。商业图片 CDN（Cloudinary / Imgix）原生支持。
+
+## decoding 与异步解码
+
+```html
+<img src="/hero.jpg" decoding="async">
+```
+
+| 值 | 行为 |
+| -- | ---- |
+| `sync` | 同步解码（阻塞渲染） |
+| `async` | 异步解码（不阻塞，可能延迟显示） |
+| `auto` | 浏览器决定（默认） |
+
+**实践**：
+
+- 首屏关键图（LCP 元素）：`decoding="sync"`（避免延迟）
+- 视口外或非关键图：`decoding="async"`
+
+## fetchpriority 提升关键图
+
+```html
+<!-- LCP 图：高优先级 -->
+<img src="/hero.webp" fetchpriority="high"
+     width="1200" height="600" alt="hero">
+
+<!-- 装饰图：低优先级 + lazy -->
+<img src="/decoration.webp" fetchpriority="low"
+     loading="lazy" alt="">
+```
+
+详见 [资源预加载 § fetchpriority](/performance/preload#fetchpriority)。
+
+## 框架集成
+
+### Next.js Image
+
+```jsx
+import Image from 'next/image'
+
+// 已知尺寸
+<Image
+  src="/hero.jpg"
+  width={1200} height={600}
+  alt="hero"
+  priority                            // LCP 元素
+  sizes="(min-width: 1024px) 50vw, 100vw"
+  placeholder="blur"
+/>
+
+// 填充父容器
+<div style={{ position: 'relative', aspectRatio: '16/9' }}>
+  <Image
+    src="/hero.jpg"
+    fill                              // 跟随父容器
+    style={{ objectFit: 'cover' }}
+    alt="hero"
+    sizes="100vw"
+  />
+</div>
+```
+
+`next.config.js` 控制全局：
+
+```js
+module.exports = {
+  images: {
+    formats: ['image/avif', 'image/webp'],
+    deviceSizes: [640, 750, 828, 1080, 1200, 1920],
+    minimumCacheTTL: 31536000
+  }
+}
+```
+
+### Nuxt Image
+
+```vue
+<template>
+  <NuxtImg
+    src="/hero.jpg"
+    width="1200" height="600"
+    sizes="100vw md:50vw"
+    format="avif"
+    quality="60"
+    loading="lazy"
+  />
+
+  <!-- 或更全面的 NuxtPicture -->
+  <NuxtPicture
+    src="/hero.jpg"
+    width="1200" height="600"
+    sizes="sm:100vw md:50vw lg:33vw"
+    :img-attrs="{ alt: 'hero' }"
+  />
+</template>
+```
+
+`nuxt.config.ts`：
+
+```ts
+export default {
+  modules: ['@nuxt/image'],
+  image: {
+    quality: 80,
+    format: ['avif', 'webp'],
+    domains: ['cdn.example.com'],
+    screens: {
+      xs: 320, sm: 640, md: 768, lg: 1024, xl: 1280, xxl: 1536
+    }
+  }
+}
+```
+
+### Astro Image
+
+```astro
+---
+import { Image, Picture } from 'astro:assets'
+import hero from '../assets/hero.jpg'
+---
+
+<Image
+  src={hero}
+  widths={[400, 800, 1200]}
+  sizes="(min-width: 800px) 800px, 100vw"
+  format="avif"
+  alt="hero"
+/>
+```
+
+构建期生成所有变体，零运行时开销。
+
+### Vue 通用
+
+无框架时手写：
+
+```vue
+<script setup>
+import { computed } from 'vue'
+
+const props = defineProps(['src', 'alt', 'sizes'])
+const widths = [400, 800, 1200, 1920]
+
+const srcset = computed(() =>
+  widths.map(w => `${props.src}?w=${w} ${w}w`).join(', ')
+)
+</script>
+
+<template>
+  <img
+    :src="`${src}?w=800`"
+    :srcset="srcset"
+    :sizes="sizes"
+    :alt="alt"
+    loading="lazy"
+    decoding="async">
+</template>
+```
+
+## 背景图的响应式
+
+CSS 背景图也能做响应式，但比 `<img>` 麻烦：
+
+### `image-set()`
+
+```css
+.hero {
+  background-image: image-set(
+    url('/hero-1x.webp') 1x,
+    url('/hero-2x.webp') 2x,
+    url('/hero-3x.webp') 3x
+  );
+}
+```
+
+### media query 切换
+
+```css
+.hero {
+  background-image: url('/hero-mobile.webp');
+}
+@media (min-width: 768px) {
+  .hero {
+    background-image: url('/hero-tablet.webp');
+  }
+}
+@media (min-width: 1280px) {
+  .hero {
+    background-image: url('/hero-desktop.webp');
+  }
+}
+```
+
+⚠️ **CSS 背景图不能 lazy load**（除非用 IntersectionObserver 切换 class）。能用 `<img>` 时优先 `<img>`。
+
+## SVG 的响应式
+
+SVG 默认就是响应式的——但要确保用相对单位：
+
+```html
+<!-- ❌ 固定尺寸，不响应 -->
+<svg width="200" height="100">...</svg>
+
+<!-- ✅ viewBox + CSS 控制尺寸 -->
+<svg viewBox="0 0 200 100" style="width: 100%; height: auto">...</svg>
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 单 `src` 给所有设备 | 移动端浪费几 MB | `srcset` + `sizes` |
+| `srcset` 没配 `sizes` | 浏览器猜不出实际宽 | 显式声明 `sizes` |
+| `<img>` 没 width/height | CLS 偏移 | 显式声明 |
+| LCP 图 `loading="lazy"` | LCP 推迟 | 改 `eager` + `fetchpriority="high"` |
+| 头像图 1024×1024 直出 | 95% 字节浪费 | 服务端缩到显示尺寸 |
+| 桌面手机用同一张裁剪 | 移动看不全主体 | `<picture>` 艺术指导 |
+| 背景图懒加载 | 实际不会触发 | 改用 `<img>` 或 IntersectionObserver |
+
+## 监控
+
+### Lighthouse
+
+| 项 | 含义 |
+| -- | ---- |
+| Properly size images | 图片尺寸是否过大 |
+| Defer offscreen images | 视口外图是否懒加载 |
+| Image elements have explicit width and height | 是否声明尺寸 |
+| Avoid large layout shifts | CLS 来源 |
+
+### PerformanceObserver
+
+```js
+// 监控 LCP 元素是否是图片
+new PerformanceObserver(list => {
+  for (const entry of list.getEntries()) {
+    if (entry.element instanceof HTMLImageElement) {
+      console.log('LCP image:', {
+        src: entry.url,
+        renderTime: entry.renderTime || entry.loadTime,
+        size: entry.size  // intrinsic 像素
+      })
+    }
+  }
+}).observe({ type: 'largest-contentful-paint', buffered: true })
+```
+
+### Coverage 与 NetworkObserver 对比
+
+DevTools → Network → 看每张图的 Transferred / Resource Size，对比显示区域大小。
+
+## 小结
+
+- `srcset` + `sizes` 让浏览器自主选最合适的分辨率，是响应式图片的最低门槛；
+- `<picture>` 用于多格式 fallback 与艺术指导，配合 `<source media>` 实现完全控制；
+- 显式声明 `width` / `height` 或 `aspect-ratio` 是 CLS 防治的硬性要求；
+- LCP 图三件套：`fetchpriority="high"` + `decoding="sync"` + `loading="eager"`；
+- 非首屏图四件套：`loading="lazy"` + `decoding="async"` + `fetchpriority="low"` + 占位符；
+- Client Hints 是更现代的方案，让服务器接管选择逻辑，但需配合图片 CDN；
+- Next.js Image / Nuxt Image / Astro Image 是日常开发的最佳工具，几行配置实现完整响应式。

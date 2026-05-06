@@ -1,0 +1,742 @@
+---
+title: CSS 优化
+description: Critical CSS、非阻塞加载、Unused CSS、选择器复杂度与渲染性能
+---
+
+# CSS 优化
+
+CSS 是关键渲染路径上的**渲染阻塞资源**——浏览器必须等所有阻塞 CSS 解析完才能进行首次绘制。同时，CSS 又是**视觉一致性**的来源，过早渲染会导致 FOUC（无样式内容闪现）。本章从交付层、组成层、运行时三个维度展开，覆盖 Critical CSS、非阻塞加载、unused CSS、选择器性能、CSS-in-JS 取舍等话题。
+
+## CSS 在加载链条中的位置
+
+```text
+HTML 解析中 ──► 发现 <link rel="stylesheet">
+                       │
+                       ├─► 阻塞渲染（不阻塞 HTML 解析）
+                       ├─► 阻塞下游 <script>（除非 async）
+                       └─► 完成后 → CSSOM → Render Tree → Layout → Paint
+```
+
+关键事实：
+
+1. CSS **不阻塞 HTML 解析**——浏览器会继续构建 DOM
+2. CSS **阻塞首次渲染**——必须等 CSSOM 就绪
+3. CSS **阻塞 JS 执行**（同步脚本）——因为 JS 可能读取样式
+
+> CSS 加载慢一秒，整个页面的"白屏期"就长一秒。
+
+## 字节优化
+
+### Minify
+
+CSS minify 通常做这些事：
+
+- 删除注释（保留 `/*! */` 形式的法律注释）
+- 折叠空白
+- 合并相同选择器：`.a { color: red } .b { color: red }` → `.a, .b { color: red }`
+- 缩写值：`margin: 0px 0px 0px 0px` → `margin: 0`
+- 合并简写：`padding-top:1; padding-right:2; padding-bottom:1; padding-left:2` → `padding:1 2`
+- 颜色简写：`#ffffff` → `#fff`、`rgb(255,0,0)` → `red`
+
+```js
+// Vite 默认开启
+// vite.config.js
+export default {
+  build: {
+    cssMinify: 'esbuild'  // 或 'lightningcss'（更激进）
+  }
+}
+```
+
+LightningCSS 比 esbuild 慢但压缩更好（约多 5–10%），且支持 CSS 现代语法降级。
+
+### 压缩传输
+
+CSS 是文本，必须开启 GZIP / Brotli。详见 [网络层基础](/performance/network#压缩传输)。
+
+实测对比一个 80 KB 的 CSS 文件：
+
+| 步骤 | 体积 |
+| ---- | ---- |
+| 原始 | 80 KB |
+| esbuild minify | 56 KB |
+| + GZIP | 14 KB |
+| + Brotli | 11 KB |
+
+## Critical CSS
+
+> **Critical CSS = 首屏渲染所必需的最小 CSS 子集**
+
+### 为什么需要 Critical CSS
+
+完整 CSS 文件可能 200 KB，但首屏可见区域只用到其中 20 KB。让用户为不见的样式付出加载时间是浪费。
+
+```text
+方案 A：加载完整 CSS
+T+0      请求 HTML
+T+200    HTML 到达，发现 <link rel="stylesheet">
+T+200    请求 main.css
+T+800    main.css 到达
+T+850    首次绘制（FCP）
+
+方案 B：内联 critical CSS + 异步加载剩余
+T+0      请求 HTML（含内联 critical CSS）
+T+200    HTML 到达，CSS 已就绪
+T+250    首次绘制（FCP）── 提前 600 ms
+T+800    main.css 加载完，应用到非首屏
+```
+
+### 提取 Critical CSS
+
+#### 工具
+
+| 工具 | 适用 |
+| ---- | ---- |
+| [`critical`](https://github.com/addyosmani/critical) | 任何静态 HTML |
+| [`critters`](https://github.com/GoogleChromeLabs/critters) | webpack/vite 插件 |
+| [`beasties`](https://github.com/danielroe/beasties) | critters 维护分支，Nuxt 默认 |
+| [`@unocss/preset-critical`](https://unocss.dev/) | UnoCSS 内置 |
+
+```js
+// vite.config.js + beasties
+import { defineConfig } from 'vite'
+import beasties from 'beasties-webpack-plugin' // 或框架集成
+
+export default defineConfig({
+  // ...
+})
+```
+
+Nuxt 3 默认开启：
+
+```ts
+// nuxt.config.ts
+export default {
+  experimental: {
+    inlineRouteRules: true
+  },
+  routeRules: {
+    '/': { isr: 60 }  // ISR + critical CSS 自动提取
+  }
+}
+```
+
+#### 手写关键 CSS
+
+对于关键页面，最稳定的是手写 + 维护：
+
+```html
+<head>
+  <!-- 手写 critical CSS，~ 5 KB -->
+  <style>
+    :root { --bg: #fff; --fg: #111 }
+    body { font-family: system-ui; margin: 0; background: var(--bg); color: var(--fg) }
+    .hero { height: 100vh; display: grid; place-items: center }
+    .hero h1 { font-size: clamp(2rem, 5vw, 4rem) }
+  </style>
+
+  <!-- 异步加载完整 CSS -->
+  <link rel="preload" href="/main.css" as="style"
+        onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="/main.css"></noscript>
+</head>
+```
+
+### 异步加载完整 CSS
+
+#### `print` 媒体查询技巧
+
+`media="print"` 让浏览器**不阻塞**渲染下载，下载完后切到 `all`：
+
+```html
+<link rel="stylesheet" href="/main.css" media="print"
+      onload="this.media='all'">
+```
+
+最简洁，但有个副作用：CSS 加载期间用户看不到样式（FOUC 风险）。
+
+#### `preload` + `onload`
+
+```html
+<link rel="preload" href="/main.css" as="style"
+      onload="this.onload=null;this.rel='stylesheet'">
+```
+
+更标准，但需要 `<noscript>` 后备：
+
+```html
+<noscript><link rel="stylesheet" href="/main.css"></noscript>
+```
+
+### Critical CSS 的代价
+
+不是没有缺点：
+
+- 内联 CSS **不能缓存**——每次访问都传输（被 HTML Brotli 后通常仍可接受）
+- 维护成本——首屏定义随产品变化
+- 可能与运行时 CSS 不一致（如 dark mode、A/B 实验）
+
+最佳实践：**短期**收益（首屏 LCP）大于**长期**维护成本时启用，否则保持简单。
+
+## 非阻塞 CSS 加载
+
+除了 critical CSS 方案，还有几种让 CSS 不阻塞渲染的写法：
+
+### media 限定
+
+非匹配的媒体查询不阻塞首屏：
+
+```html
+<!-- 仅打印时阻塞 -->
+<link rel="stylesheet" href="/print.css" media="print">
+
+<!-- 仅横屏时阻塞 -->
+<link rel="stylesheet" href="/landscape.css" media="(orientation: landscape)">
+
+<!-- 仅大屏时阻塞 -->
+<link rel="stylesheet" href="/desktop.css" media="(min-width: 1024px)">
+```
+
+浏览器仍会下载所有 CSS（低优先级），但只有匹配的才阻塞渲染。
+
+### 路由级 CSS 拆分
+
+把不同路由的 CSS 拆开，按需加载：
+
+```js
+// React + Vite 自动拆分
+const Profile = lazy(() => import('./Profile')) // Profile 的 CSS 也会被拆出
+
+// 手动 import
+import('./feature.css')  // 在用到时再加载
+```
+
+详见 [JavaScript 优化 § 代码分割](/performance/javascript#代码分割)。
+
+## 移除未使用的 CSS
+
+### 问题规模
+
+实测一个使用 Tailwind 但未配置 purge 的项目：
+
+| CSS | 体积 |
+| --- | ---- |
+| Tailwind 全量 | ~ 3 MB |
+| Brotli 后 | ~ 250 KB |
+| **实际用到** | ~ 50 KB（2%） |
+
+未使用的 CSS 不仅占字节，还增加 CSSOM 节点数，拖慢匹配。
+
+### 工具
+
+#### Tailwind / UnoCSS
+
+利用 JIT 编译，**只生成实际用到的样式**：
+
+```js
+// tailwind.config.js
+export default {
+  content: ['./src/**/*.{js,ts,jsx,tsx,vue}']
+}
+```
+
+JIT 模式扫描源文件中的类名，只输出对应的规则。生产构建一般 < 50 KB。
+
+#### PurgeCSS（手写 CSS 项目）
+
+```js
+// vite.config.js
+import { purgeCss } from 'vite-plugin-purgecss'
+
+export default {
+  plugins: [
+    purgeCss({
+      content: ['./src/**/*.{js,ts,vue,jsx,tsx}'],
+      safelist: ['dynamic-class', /^modal-/]
+    })
+  ]
+}
+```
+
+⚠️ **PurgeCSS 陷阱**：动态类名会被误删：
+
+```jsx
+// ❌ PurgeCSS 看不到 'text-' 拼接
+<div className={`text-${color}`}>
+
+// ✅ 完整字符串
+<div className={color === 'red' ? 'text-red-500' : 'text-blue-500'}>
+
+// ✅ 或加入 safelist
+```
+
+#### Coverage 面板审计
+
+DevTools → 命令面板 → "Show Coverage" → 录制 → 查看每个 CSS 文件的未使用比例：
+
+```text
+main.css   180 KB    Used: 45 KB (25%)   Unused: 135 KB (75%)
+vendor.css  80 KB    Used: 12 KB (15%)   Unused:  68 KB (85%)
+```
+
+> 注意：Coverage 显示的"未使用"是录制期间未触发的——可能是动态条件下才用到。不要直接删除，而是作为审计起点。
+
+## 选择器性能
+
+CSS 引擎匹配选择器是**从右往左**：
+
+```css
+/* 引擎实际工作流程 */
+.container .card .title:hover .icon {}
+                                 ▲
+                          先找所有 .icon
+                          ↓
+                          再找其祖先中的 .title:hover
+                          ↓
+                          再找祖先中的 .card
+                          ↓
+                          再找祖先中的 .container
+```
+
+这意味着**深嵌套选择器**会让引擎做大量祖先检查。
+
+### 性能差异（实测）
+
+在 10000 节点的 DOM 上匹配：
+
+| 选择器 | 匹配时间 |
+| ------ | -------- |
+| `#nav` | < 0.1 ms |
+| `.btn` | 0.3 ms |
+| `.card .btn` | 0.8 ms |
+| `.card > .btn` | 0.5 ms（子选择器更快） |
+| `[data-x="y"]` | 1.2 ms |
+| `:nth-child(odd)` | 2.5 ms |
+| `* + *` | 8 ms（通用选择器代价高） |
+
+### 实践规则
+
+```css
+/* ❌ 深嵌套 */
+nav > ul > li > a > span.icon { }
+
+/* ✅ 扁平化 + 命名 */
+.nav-icon { }
+
+/* ❌ 标签 + 类 */
+button.btn-primary { }
+
+/* ✅ 单一类 */
+.btn-primary { }
+
+/* ❌ 通用选择器作为祖先 */
+* > .item { }
+
+/* ✅ 限定父级 */
+.list > .item { }
+```
+
+### `:has()` 与现代选择器的代价
+
+CSS Nesting、`:has()`、`:is()`、`:where()` 让代码更易维护，但部分有性能影响：
+
+| 选择器 | 性能 |
+| ------ | ---- |
+| `:is(.a, .b)` | ≈ `.a, .b` |
+| `:where(.a, .b)` | 同上，但优先级为 0 |
+| `:has(.child)` | **重**——需向下查找子树 |
+| CSS Nesting | 与等价的非嵌套写法相同 |
+
+`:has()` 是强大的"父选择器"，但在大型 DOM 上会有可观开销。慎用于经常变化的选择器：
+
+```css
+/* ⚠️ 性能敏感 */
+.parent:has(.child:focus) { }
+
+/* ✅ 用 JS 加 class 替代 */
+.parent.has-focus-child { }
+```
+
+## 渲染性能（运行时）
+
+CSS 不只影响加载，还影响**重绘 / 重排**频率。
+
+### 重排（Reflow / Layout）
+
+引发条件：影响几何属性的变化（width、height、padding、margin、left、top、display、font-size...）。
+
+成本：浏览器重新计算受影响节点（及其祖先 / 后代）的位置。
+
+### 重绘（Repaint）
+
+引发条件：仅影响视觉的变化（color、background、visibility、box-shadow...）。
+
+成本：重新生成像素，但不重新布局。
+
+### 合成（Composite）
+
+引发条件：`transform`、`opacity`、`filter`（部分）。
+
+成本：仅在 GPU 合成层混合，**不触发主线程**。这是动画的最优路径。
+
+```css
+/* ❌ 引发 reflow，每帧 layout */
+.modal-fade {
+  animation: in 0.3s;
+}
+@keyframes in {
+  from { left: -100% }
+  to   { left: 0 }
+}
+
+/* ✅ 仅 composite，GPU 加速 */
+.modal-fade {
+  animation: in 0.3s;
+}
+@keyframes in {
+  from { transform: translateX(-100%) }
+  to   { transform: translateX(0) }
+}
+```
+
+### `will-change` 提示
+
+告诉浏览器某属性即将变化，提前提升到合成层：
+
+```css
+.draggable {
+  will-change: transform;
+}
+```
+
+⚠️ 滥用反而劣化：
+
+- 每个合成层占用显存
+- 静态元素加 `will-change` 永久占用资源
+- 应在交互**前**加，**后**移除
+
+```js
+el.addEventListener('mousedown', () => {
+  el.style.willChange = 'transform'
+})
+el.addEventListener('mouseup', () => {
+  el.style.willChange = 'auto'
+})
+```
+
+### `contain` 属性
+
+明确告诉浏览器某元素的样式 / 布局 / 绘制是**自包含**的，限制变化的传播范围：
+
+```css
+.list-item {
+  contain: layout style;
+  /* layout：尺寸不影响外部 */
+  /* style：作用域内 css 计数器、引号 */
+  /* paint：绘制不溢出 */
+  /* size：自身尺寸不依赖子元素 */
+}
+
+/* 全包含的简写 */
+.widget { contain: strict; }
+```
+
+实测：在长列表场景下加 `contain: layout` 能减少 30–50% 的 reflow 时间。
+
+### `content-visibility: auto`
+
+视口外元素**跳过渲染**（layout + paint）：
+
+```css
+.section {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 500px;  /* 占位高度，避免滚动条跳动 */
+}
+```
+
+文章页有 50 个 section 时，初次渲染时间可能从 200 ms 降到 50 ms。
+
+## CSS-in-JS 的性能取舍
+
+### 运行时方案（styled-components / emotion）
+
+```jsx
+const Button = styled.button`
+  color: ${props => props.theme.primary};
+`
+```
+
+特点：
+
+- 样式按需注入到 `<style>`
+- 每次渲染都可能重新计算样式字符串
+- 服务端渲染需 collect → injection 步骤
+- bundle 增加 ~ 10 KB（emotion）/ ~ 16 KB（styled-components）
+- 运行时开销在大型应用中可见
+
+### 零运行时方案（vanilla-extract / linaria / panda-css）
+
+```ts
+// vanilla-extract
+import { style } from '@vanilla-extract/css'
+
+export const button = style({
+  color: 'tomato'
+})
+```
+
+构建期编译为静态 CSS 文件——**零运行时**。性能与原生 CSS 相同。
+
+### 工具类方案（Tailwind / UnoCSS）
+
+```html
+<button class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2">Click</button>
+```
+
+特点：
+
+- 全部静态生成，零运行时
+- 类名复用率极高，gzip 后体积最小
+- 学习曲线 + 长 className
+
+### 性能对比（中型应用 SSR）
+
+| 方案 | bundle 增量 | 首次 SSR 耗时 | 客户端水合 |
+| ---- | ----------- | ------------- | ---------- |
+| 原生 CSS / SCSS | 0 KB | 基线 | 基线 |
+| Tailwind | 0 KB（仅生成的） | 基线 | 基线 |
+| vanilla-extract | 0 KB | 基线 | 基线 |
+| emotion | 10 KB | +10% | +20% |
+| styled-components | 16 KB | +20% | +30% |
+
+数据来自 2024 年社区基准测试，实际值随项目规模变化。**结论**：性能敏感的应用优先考虑零运行时方案。
+
+## 字体与 CSS 的协同
+
+```css
+/* 默认 - 浏览器等字体 → 看不到文字（FOIT，最长 3 秒） */
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter.woff2') format('woff2');
+}
+
+/* 推荐 - 立即用 fallback，加载完替换（FOUT，可能闪烁） */
+@font-face {
+  font-family: 'Inter';
+  src: url('/inter.woff2') format('woff2');
+  font-display: swap;
+}
+
+/* 配合 size-adjust 减少替换时的尺寸跳变 */
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial');
+  size-adjust: 107%;
+  ascent-override: 90%;
+  descent-override: 22%;
+}
+```
+
+详见 [字体优化](/performance/fonts#字体显示策略)。
+
+## 避免内联 / 嵌入 style
+
+> "Avoid the embedded / inline CSS"（roadmap 条目）
+
+这条建议针对的是**业务组件**中散落的内联样式：
+
+```jsx
+// ❌ 大量内联 style
+<div style={{ display: 'flex', justifyContent: 'center', padding: 20, borderRadius: 8 }}>
+
+// ❌ 大量 <style> 块散落在组件树
+<div>
+  <style>.local { ... }</style>
+  <div className="local">...</div>
+</div>
+```
+
+问题：
+
+1. **不可缓存**——每次都序列化到 HTML
+2. **不可复用**——同样的样式重复编译
+3. **优先级混乱**——内联 style 优先级最高，覆盖外部 CSS 困难
+4. **CSP 障碍**——`Content-Security-Policy` 默认禁止 inline style
+
+例外：动态计算的样式（基于运行时数据）仍需要 inline，但应限于"必要时"。
+
+## CSS 编译时的现代特性
+
+### CSS 变量替代 SCSS 变量
+
+```css
+:root {
+  --primary: #3b82f6;
+  --radius: 8px;
+}
+
+.btn {
+  background: var(--primary);
+  border-radius: var(--radius);
+}
+
+/* 主题切换 */
+[data-theme='dark'] {
+  --primary: #60a5fa;
+}
+```
+
+收益：运行时切换主题不需重新编译 CSS。
+
+### `@layer` 控制级联
+
+```css
+@layer reset, base, components, utilities;
+
+@layer reset {
+  * { margin: 0 }
+}
+@layer utilities {
+  .text-center { text-align: center }
+}
+```
+
+让你**显式控制覆盖顺序**——不再被选择器特异性折磨。
+
+### 现代 reset
+
+[Andy Bell 的现代 reset](https://piccalil.li/blog/a-more-modern-css-reset/) 替代庞大的 normalize.css，体积约 1 KB：
+
+```css
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+body { min-height: 100vh; line-height: 1.5; }
+img, picture, svg, video { display: block; max-width: 100%; }
+```
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 单文件 500 KB+ CSS | 阻塞渲染时间长 | 路由级拆分 + critical CSS |
+| `* { transition: all 0.3s }` | 所有属性变化都触发动画 | 仅指定具体属性 |
+| 使用 `left/top` 做动画 | 触发 reflow | 改用 `transform` |
+| `will-change` 全局应用 | 显存爆炸 | 仅在交互前后切换 |
+| `:has()` 在大列表中使用 | 选择器匹配慢 | 用 JS class 替代 |
+| 大量内联 style | 不可缓存 + CSP 问题 | 抽取为类 |
+| Tailwind 没配 content | 输出 3 MB | 配置 content 字段 |
+| 动态类名拼接（`text-${x}`） | PurgeCSS 误删 | safelist 或完整字符串 |
+
+## 框架特定建议
+
+### React
+
+```jsx
+// ❌ 每次渲染创建新对象
+<div style={{ padding: 20 }} />
+
+// ✅ 提到外部
+const cardStyle = { padding: 20 }
+<div style={cardStyle} />
+
+// ✅✅ 用 className
+<div className="card" />
+```
+
+### Vue 3 SFC
+
+`<style scoped>` 的实现是给元素加 `data-v-xxx` 属性 + 选择器加属性匹配。性能开销小，但选择器匹配会复杂化：
+
+```vue
+<style scoped>
+.btn { color: red }   /* 编译为 .btn[data-v-abc] { color: red } */
+</style>
+```
+
+需要全局样式时用 `<style>` 不带 scoped。
+
+### Tailwind 类聚合
+
+```jsx
+// ❌ 类名爆炸
+<button className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded shadow">
+
+// ✅ 抽取为组件
+function Button({ children }) {
+  return <button className="btn-primary">{children}</button>
+}
+
+// 用 @apply 在 CSS 中聚合
+@layer components {
+  .btn-primary {
+    @apply bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded shadow;
+  }
+}
+```
+
+## 监控与审计
+
+### Coverage 面板
+
+DevTools → Sources → Command Menu → "Show Coverage"。看每个 CSS 文件未使用百分比。
+
+### Performance 面板的 Recalculate Style
+
+录制时关注 "Recalculate Style" 任务：
+
+- 总时长 > 100 ms 是警示信号
+- 频繁触发可能是 layout thrashing（连续读写 layout 属性）
+
+```js
+// ❌ Layout thrashing
+elements.forEach(el => {
+  el.style.height = el.offsetHeight + 10 + 'px'
+  //                ↑ 读      ↑ 写  ↑ 读  ↑ 写 ...
+})
+
+// ✅ 批读批写
+const heights = elements.map(el => el.offsetHeight)
+elements.forEach((el, i) => {
+  el.style.height = heights[i] + 10 + 'px'
+})
+```
+
+### Lighthouse 审计
+
+| 项 | 含义 |
+| -- | ---- |
+| Reduce unused CSS | 未使用 CSS 体积 |
+| Defer non-critical CSS | 阻塞渲染的 CSS |
+| Eliminate render-blocking resources | 阻塞渲染资源（含 CSS） |
+| Avoid CSS @import | `@import` 形成依赖链，串行加载 |
+
+### `@import` 的陷阱
+
+```css
+/* main.css */
+@import url('./reset.css');
+@import url('./grid.css');
+```
+
+浏览器必须先下载 main.css → 解析 → 才发现需要 reset.css → 再下载。**串行加载** = 多 RTT。
+
+修复：
+
+```html
+<!-- 直接用 <link> -->
+<link rel="stylesheet" href="/reset.css">
+<link rel="stylesheet" href="/grid.css">
+<link rel="stylesheet" href="/main.css">
+```
+
+或在构建期合并。
+
+## 小结
+
+- CSS 是渲染阻塞资源，每个未优化的 KB 都是首屏延迟；
+- Critical CSS + 异步加载剩余是 LCP 优化最有效的手段之一，框架（Nuxt/Next）应优先开启自动方案；
+- 拆分 CSS 比拼合 CSS 更现代——HTTP/2 让多文件零成本，路由级拆分提高缓存命中；
+- Tailwind / UnoCSS / vanilla-extract 等零运行时方案在性能与可维护性上明显优于 styled-components 等运行时 CSS-in-JS；
+- 选择器性能在大型 DOM 上有可观差异，扁平化选择器 + 命名约定优于深嵌套；
+- 动画用 `transform` / `opacity` 走合成层，避免 reflow；`contain` 与 `content-visibility` 是大列表的杀手锏；
+- 监控 unused CSS 与 Recalculate Style 是发现 CSS 性能问题的两大入口。

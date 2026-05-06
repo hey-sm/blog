@@ -1,0 +1,376 @@
+---
+title: 状态管理
+description: Context、Zustand、Jotai、MobX 与 Redux Toolkit 的选型与对比
+---
+
+# 状态管理
+
+React 自带的 `useState` / `useReducer` / `useContext` 已能覆盖**单组件 / 同一子树**的状态需求。当出现以下情况时，需要引入专门的状态管理库：
+
+- 跨组件树共享、且**频繁变化**的状态（用户、主题、购物车）
+- 多组件**并发修改同一份数据**
+- 状态变更逻辑**复杂或可派生**（衍生选择器、撤销 / 重做、时间旅行调试）
+- **服务端状态**——API 数据的缓存、失效、重试（实际属于"数据请求"范畴，详见 [数据请求](/react/api-calls)）
+
+本章覆盖客户端状态管理的主流方案。**服务端状态用 TanStack Query / SWR 处理**——别用 Redux 装 API 数据。
+
+## 选型对比
+
+| 库 | 风格 | 心智成本 | 包大小 | TS 体验 | 适合场景 |
+| -- | ---- | -------- | ------ | ------- | -------- |
+| Context + useReducer | 原生 | 低 | 0 | ✅ | 主题、本地化、用户身份等"低频"状态 |
+| Zustand | 函数式、外部 store | 极低 | ~1 KB | ✅ | 中小型应用，最小化样板 |
+| Jotai | 原子化、自底向上 | 中 | ~3 KB | ✅ | 状态拆分细，需要派生 |
+| Redux Toolkit | reducer + slice | 中 | ~12 KB（含 RTK） | ✅ | 大型团队，需要严格的 action 流 |
+| MobX | 响应式、可变 | 中（习惯切换） | ~16 KB | ✅ | 偏 OOP 风格、大量派生 |
+| Valtio | Proxy + 可变 | 低 | ~3 KB | ✅ | 喜欢 Vue 的响应式心智的团队 |
+
+## Context + useReducer
+
+无外部依赖。适合"很少变化"的全局状态：
+
+```tsx filename="contexts/Auth.tsx"
+import { createContext, useContext, useReducer, ReactNode } from 'react'
+
+type State = { user: User | null }
+type Action = { type: 'login'; user: User } | { type: 'logout' }
+
+const reducer = (state: State, action: Action): State => {
+  switch (action.type) {
+    case 'login':  return { user: action.user }
+    case 'logout': return { user: null }
+  }
+}
+
+const StateCtx = createContext<State | null>(null)
+const DispatchCtx = createContext<React.Dispatch<Action> | null>(null)
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [state, dispatch] = useReducer(reducer, { user: null })
+  return (
+    <StateCtx.Provider value={state}>
+      <DispatchCtx.Provider value={dispatch}>
+        {children}
+      </DispatchCtx.Provider>
+    </StateCtx.Provider>
+  )
+}
+
+export const useAuth = () => {
+  const v = useContext(StateCtx)
+  if (!v) throw new Error('useAuth must be inside <AuthProvider>')
+  return v
+}
+
+export const useAuthDispatch = () => {
+  const v = useContext(DispatchCtx)
+  if (!v) throw new Error('useAuthDispatch must be inside <AuthProvider>')
+  return v
+}
+```
+
+**关键技巧**：拆分 state 与 dispatch 两个 Context。dispatch 引用稳定，订阅 dispatch 的组件不会因为 state 变化而重渲染。
+
+#### 何时不要用 Context
+
+- **高频更新**：鼠标坐标、滚动位置、动画进度——所有消费者都会重渲染
+- **大型对象**：单个 Context 暴露大对象时，任意字段变化都触发全局重渲染
+- **需要细粒度订阅**：Context 没有 selector 机制
+
+后两种场景应使用 Zustand / Jotai。
+
+## Zustand
+
+```bash
+pnpm add zustand
+```
+
+定义 store：
+
+```tsx filename="stores/counter.ts"
+import { create } from 'zustand'
+
+type CounterStore = {
+  count: number
+  inc: () => void
+  dec: () => void
+  reset: () => void
+}
+
+export const useCounter = create<CounterStore>(set => ({
+  count: 0,
+  inc: () => set(s => ({ count: s.count + 1 })),
+  dec: () => set(s => ({ count: s.count - 1 })),
+  reset: () => set({ count: 0 })
+}))
+```
+
+使用：
+
+```tsx
+function Counter() {
+  // 选择需要的字段，仅在该字段变化时重渲染
+  const count = useCounter(s => s.count)
+  const inc   = useCounter(s => s.inc)
+
+  return <button onClick={inc}>{count}</button>
+}
+
+// 选择多个字段时使用 shallow 对比，避免对象引用不等触发渲染
+import { shallow } from 'zustand/shallow'
+const { count, inc } = useCounter(s => ({ count: s.count, inc: s.inc }), shallow)
+```
+
+### 为什么 Zustand 这么轻
+
+它本质是一个**外部的 useSyncExternalStore**：
+
+- store 数据存在 React 之外
+- 通过 selector 订阅特定字段，selector 返回值变化才触发 re-render
+- API 简洁：`set` / `get`，没有 action / reducer / dispatcher
+
+### 中间件
+
+```tsx
+import { create } from 'zustand'
+import { persist, devtools, immer } from 'zustand/middleware'
+
+const useStore = create(
+  devtools(                                   // Redux DevTools
+    persist(                                  // 持久化到 localStorage
+      immer(                                  // 允许"可变写法"
+        set => ({
+          count: 0,
+          inc: () => set(s => { s.count++ })  // 直接改，不用 spread
+        })
+      ),
+      { name: 'counter-storage' }
+    )
+  )
+)
+```
+
+### 在 store 外操作
+
+```tsx
+useCounter.getState().inc()
+useCounter.subscribe(s => s.count, c => console.log('count changed:', c))
+useCounter.setState({ count: 0 })
+```
+
+无需 Hook 即可访问，便于在事件回调、工具函数中操作。
+
+### 切片模式（slice pattern）
+
+大型 store 拆分为多个 slice：
+
+```tsx
+type AuthSlice = { user: User | null; login: () => void }
+type CartSlice = { items: Item[]; add: (i: Item) => void }
+
+const createAuthSlice: StateCreator<AuthSlice & CartSlice, [], [], AuthSlice> = (set) => ({
+  user: null,
+  login: () => set({ user: { /* ... */ } })
+})
+
+const createCartSlice: StateCreator<AuthSlice & CartSlice, [], [], CartSlice> = (set) => ({
+  items: [],
+  add: i => set(s => ({ items: [...s.items, i] }))
+})
+
+const useStore = create<AuthSlice & CartSlice>()((...a) => ({
+  ...createAuthSlice(...a),
+  ...createCartSlice(...a)
+}))
+```
+
+## Jotai
+
+原子化（atomic）模型——状态被拆分为多个独立的 **atom**，组件订阅自己用到的那部分。
+
+```bash
+pnpm add jotai
+```
+
+```tsx
+import { atom, useAtom, useAtomValue, useSetAtom } from 'jotai'
+
+const countAtom = atom(0)
+const doubleAtom = atom(get => get(countAtom) * 2)        // 派生 atom
+
+function Counter() {
+  const [count, setCount] = useAtom(countAtom)
+  const double = useAtomValue(doubleAtom)
+  return (
+    <>
+      <p>{count} × 2 = {double}</p>
+      <button onClick={() => setCount(c => c + 1)}>+</button>
+    </>
+  )
+}
+```
+
+### 异步 atom
+
+```tsx
+const userAtom = atom(async get => {
+  const id = get(userIdAtom)
+  const res = await fetch(`/api/users/${id}`)
+  return res.json() as Promise<User>
+})
+
+function UserProfile() {
+  const user = useAtomValue(userAtom)         // 自动配合 Suspense
+  return <h1>{user.name}</h1>
+}
+```
+
+### 何时选 Jotai 而非 Zustand
+
+- 状态自然地由小颗粒组成、有大量派生
+- 喜欢"自下而上"的组合（先定义 atom，再合成）
+- 已经在用 Suspense / 异步派生
+
+## Redux Toolkit
+
+历史上的事实标准。Redux Toolkit (RTK) 大幅减少了样板代码：
+
+```bash
+pnpm add @reduxjs/toolkit react-redux
+```
+
+```tsx filename="store/index.ts"
+import { configureStore, createSlice, PayloadAction } from '@reduxjs/toolkit'
+
+const counterSlice = createSlice({
+  name: 'counter',
+  initialState: { count: 0 },
+  reducers: {
+    inc: state => { state.count++ },          // immer 集成，可"可变写法"
+    add: (state, action: PayloadAction<number>) => { state.count += action.payload }
+  }
+})
+
+export const { inc, add } = counterSlice.actions
+
+export const store = configureStore({
+  reducer: { counter: counterSlice.reducer }
+})
+
+export type RootState = ReturnType<typeof store.getState>
+export type AppDispatch = typeof store.dispatch
+```
+
+```tsx filename="hooks.ts"
+import { useDispatch, useSelector } from 'react-redux'
+import type { RootState, AppDispatch } from './store'
+
+export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
+export const useAppSelector = useSelector.withTypes<RootState>()
+```
+
+```tsx
+function Counter() {
+  const count = useAppSelector(s => s.counter.count)
+  const dispatch = useAppDispatch()
+  return <button onClick={() => dispatch(inc())}>{count}</button>
+}
+```
+
+### Redux 仍适用的场景
+
+- 大团队需要**严格的状态变更协议**（每次变更必须是显式 action）
+- 需要 **Redux DevTools** 的时间旅行 / action 重放
+- 已有 Redux 中间件生态依赖（saga、observable 等）
+
+新项目从零开始时，Zustand / Jotai 几乎总是更合适——它们覆盖了 80% 的 Redux 用例，且体积与心智成本都更低。
+
+## MobX
+
+```bash
+pnpm add mobx mobx-react-lite
+```
+
+响应式、可变范式：
+
+```tsx
+import { makeAutoObservable } from 'mobx'
+import { observer } from 'mobx-react-lite'
+
+class CounterStore {
+  count = 0
+  constructor() {
+    makeAutoObservable(this)                  // 自动把字段变 observable，方法变 action，getter 变 computed
+  }
+
+  inc() { this.count++ }
+  get double() { return this.count * 2 }
+}
+
+const store = new CounterStore()
+
+const Counter = observer(() => (
+  <button onClick={() => store.inc()}>
+    {store.count} → {store.double}
+  </button>
+))
+```
+
+适合习惯 OOP 的团队，与 Vue 的响应式更接近。但 MobX 的"魔法感"（依赖追踪自动收集）对未接触过的人有学习曲线。
+
+## 状态管理的设计原则
+
+无论选哪个库：
+
+### 1. 区分客户端状态与服务端状态
+
+```text
+客户端状态（client state）         服务端状态（server state）
+─ 只读到 / 只写到本地             ─ 远程数据的本地缓存
+─ 主题、UI 显隐、表单草稿         ─ 用户列表、订单、配置
+─ Zustand / Jotai / Context       ─ TanStack Query / SWR
+```
+
+不要把 API 数据塞进 Zustand——失效、重试、并发请求这些问题由 TanStack Query 处理得更好。
+
+### 2. 状态尽量靠近使用方
+
+```tsx
+// ✗ 顶层 store 持有 dropdown 是否展开
+useGlobalStore(s => s.dropdownOpen)
+
+// ✓ 局部 useState
+const [open, setOpen] = useState(false)
+```
+
+state 越靠近使用者，影响范围越小，重渲染范围越受控。
+
+### 3. 派生 > 同步
+
+```tsx
+// ✗ 多份 source of truth：fullName 与 firstName/lastName 容易不同步
+useStore.setState({ firstName: 'A', lastName: 'B', fullName: 'A B' })
+
+// ✓ 计算派生
+const fullName = `${firstName} ${lastName}`   // 直接计算，或用 selector / computed
+```
+
+## 在 React 19 下的变化
+
+React 19 引入 Server Components 与 Actions 后，**部分以前需要客户端状态库的场景**可以改用：
+
+- **数据获取**：直接在 Server Component 里 `await fetch`，不再需要客户端 store
+- **表单提交**：`<form action={fn}>` + `useActionState`，无需手写 loading / error 状态机
+- **乐观 UI**：`useOptimistic` 内置，不需要在 store 里维护"pending 列表"
+
+但**纯客户端的全局状态**（主题、UI 状态、本地草稿）依然需要 Zustand / Jotai。
+
+详见 [框架](/react/frameworks#nextjs-app-router) 中 Next.js Server Actions 的具体用法。
+
+## 小结
+
+- 优先 `useState` / `useReducer`，必要时升级到外部 store；
+- 客户端状态用 Zustand / Jotai，服务端状态用 TanStack Query / SWR；
+- Context 适合"低频、广泛"的状态，不要塞高频更新；
+- Redux Toolkit 仍是大团队 / 强协议场景的合理选择，但对新项目 Zustand 的简洁性几乎总是赢家；
+- React 19 的 Actions 与 Server Components 缩减了一部分传统 store 的职责。

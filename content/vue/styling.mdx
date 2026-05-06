@@ -1,0 +1,743 @@
+---
+title: 样式方案
+description: CSS Modules、Tailwind CSS、Vuetify、Element Plus 与样式最佳实践
+---
+
+# 样式方案
+
+Vue 支持多种样式解决方案，从原生 CSS 到 UI 组件库。
+
+## Scoped CSS
+
+### 基础用法
+
+```vue filename="components/Button.vue"
+<template>
+  <button class="btn">
+    <slot />
+  </button>
+</template>
+
+<style scoped>
+.btn {
+  padding: 8px 16px;
+  background: #42b883;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.btn:hover {
+  background: #35a372;
+}
+
+.btn:active {
+  background: #2d8f63;
+}
+</style>
+```
+
+### 深度选择器
+
+修改子组件样式：
+
+```vue
+<template>
+  <div class="wrapper">
+    <ChildComponent />
+  </div>
+</template>
+
+<style scoped>
+/* ❌ 不生效 */
+.child-class {
+  color: red;
+}
+
+/* ✅ 使用 :deep() */
+:deep(.child-class) {
+  color: red;
+}
+
+/* ✅ 或使用 >>> (某些预处理器不支持) */
+>>> .child-class {
+  color: red;
+}
+</style>
+```
+
+### 插槽选择器
+
+```vue
+<template>
+  <div class="container">
+    <slot />
+  </div>
+</template>
+
+<style scoped>
+/* 修改插槽内容样式 */
+:slotted(.slot-content) {
+  color: green;
+  font-weight: bold;
+}
+
+/* 修改特定标签 */
+:slotted(p) {
+  margin: 10px 0;
+}
+</style>
+```
+
+### 全局选择器
+
+```vue
+<style scoped>
+/* 在 scoped 中定义全局样式 */
+:global(.global-class) {
+  font-size: 16px;
+}
+
+/* 混合使用 */
+.local-class :global(.global-class) {
+  color: blue;
+}
+</style>
+```
+
+## CSS Modules
+
+### 基础用法
+
+```vue filename="components/Card.vue"
+<template>
+  <div :class="$style.card">
+    <h3 :class="$style.title">{{ title }}</h3>
+    <p :class="$style.content">{{ content }}</p>
+  </div>
+</template>
+
+<script setup lang="ts">
+defineProps<{
+  title: string
+  content: string
+}>()
+</script>
+
+<style module>
+.card {
+  padding: 20px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+.title {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.content {
+  margin: 0;
+  color: #666;
+}
+</style>
+```
+
+### 自定义模块名
+
+```vue
+<template>
+  <div :class="classes.container">
+    <p :class="classes.text">Hello</p>
+  </div>
+</template>
+
+<style module="classes">
+.container {
+  padding: 20px;
+}
+
+.text {
+  color: blue;
+}
+</style>
+```
+
+### 组合类名
+
+```vue
+<script setup lang="ts">
+import { computed } from 'vue'
+
+const props = defineProps<{
+  variant: 'primary' | 'secondary'
+  size: 'small' | 'large'
+}>()
+
+const buttonClass = computed(() => [
+  $style.btn,
+  $style[`btn-${props.variant}`],
+  $style[`btn-${props.size}`]
+])
+</script>
+
+<template>
+  <button :class="buttonClass">
+    <slot />
+  </button>
+</template>
+
+<style module>
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+}
+
+.btn-primary {
+  background: #42b883;
+  color: white;
+}
+
+.btn-secondary {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.btn-small {
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.btn-large {
+  font-size: 18px;
+  padding: 12px 24px;
+}
+</style>
+```
+
+## CSS 变量注入
+
+在 `<style>` 中使用 `<script>` 的变量：
+
+```vue filename="components/ThemedButton.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const theme = ref({
+  color: '#42b883',
+  bgColor: '#f0f0f0',
+  fontSize: 16
+})
+
+function changeTheme() {
+  theme.value = {
+    color: '#ff6b6b',
+    bgColor: '#ffe66d',
+    fontSize: 18
+  }
+}
+</script>
+
+<template>
+  <button @click="changeTheme">
+    Themed Button
+  </button>
+</template>
+
+<style scoped>
+button {
+  color: v-bind('theme.color');
+  background: v-bind('theme.bgColor');
+  font-size: v-bind('theme.fontSize + "px"');
+  padding: 10px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+</style>
+```
+
+## Sass / SCSS
+
+### 安装
+
+```bash
+npm install -D sass
+```
+
+### 使用
+
+```vue filename="components/Card.vue"
+<template>
+  <div class="card">
+    <div class="card-header">
+      <h3 class="card-title">{{ title }}</h3>
+    </div>
+    <div class="card-body">
+      <slot />
+    </div>
+    <div class="card-footer">
+      <slot name="footer" />
+    </div>
+  </div>
+</template>
+
+<style lang="scss" scoped>
+$border-color: #ddd;
+$border-radius: 8px;
+$spacing: 20px;
+
+.card {
+  border: 1px solid $border-color;
+  border-radius: $border-radius;
+  overflow: hidden;
+  
+  &-header {
+    padding: $spacing;
+    background: #f5f5f5;
+    border-bottom: 1px solid $border-color;
+  }
+  
+  &-title {
+    margin: 0;
+    font-size: 18px;
+    font-weight: bold;
+  }
+  
+  &-body {
+    padding: $spacing;
+  }
+  
+  &-footer {
+    padding: $spacing;
+    background: #f9f9f9;
+    border-top: 1px solid $border-color;
+  }
+}
+</style>
+```
+
+### 全局样式变量
+
+```scss filename="assets/styles/variables.scss"
+// 颜色
+$primary-color: #42b883;
+$secondary-color: #35495e;
+$danger-color: #ff6b6b;
+$warning-color: #ffa502;
+$success-color: #26de81;
+
+// 间距
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 16px;
+$spacing-lg: 24px;
+$spacing-xl: 32px;
+
+// 断点
+$breakpoint-sm: 576px;
+$breakpoint-md: 768px;
+$breakpoint-lg: 992px;
+$breakpoint-xl: 1200px;
+```
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+export default defineConfig({
+  plugins: [vue()],
+  css: {
+    preprocessorOptions: {
+      scss: {
+        additionalData: `@import "@/assets/styles/variables.scss";`
+      }
+    }
+  }
+})
+```
+
+```vue filename="components/Button.vue"
+<style lang="scss" scoped>
+// 可以直接使用全局变量
+.btn {
+  background: $primary-color;
+  padding: $spacing-md;
+  
+  @media (max-width: $breakpoint-md) {
+    padding: $spacing-sm;
+  }
+}
+</style>
+```
+
+## Tailwind CSS
+
+### 安装与配置
+
+```bash
+npm install -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+```
+
+```js filename="tailwind.config.js"
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{vue,js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        primary: '#42b883',
+        secondary: '#35495e'
+      },
+      spacing: {
+        '128': '32rem',
+        '144': '36rem'
+      },
+      borderRadius: {
+        '4xl': '2rem'
+      }
+    },
+  },
+  plugins: [],
+}
+```
+
+```css filename="src/assets/main.css"
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .btn-primary {
+    @apply bg-primary text-white px-4 py-2 rounded hover:bg-primary/90 transition;
+  }
+  
+  .card {
+    @apply bg-white rounded-lg shadow-md p-6;
+  }
+}
+```
+
+### 使用
+
+```vue filename="components/UserCard.vue"
+<script setup lang="ts">
+defineProps<{
+  name: string
+  email: string
+  avatar: string
+}>()
+</script>
+
+<template>
+  <div class="card max-w-sm mx-auto">
+    <div class="flex items-center space-x-4">
+      <img :src="avatar" alt="Avatar" class="w-16 h-16 rounded-full">
+      <div>
+        <h3 class="text-lg font-bold text-gray-900">{{ name }}</h3>
+        <p class="text-sm text-gray-600">{{ email }}</p>
+      </div>
+    </div>
+    <div class="mt-4 flex space-x-2">
+      <button class="btn-primary flex-1">Follow</button>
+      <button class="bg-gray-200 text-gray-800 px-4 py-2 rounded hover:bg-gray-300 transition flex-1">
+        Message
+      </button>
+    </div>
+  </div>
+</template>
+```
+
+### 响应式设计
+
+```vue
+<template>
+  <div class="container mx-auto px-4">
+    <!-- 移动端单列，平板双列，桌面三列 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div v-for="item in items" :key="item.id" class="card">
+        {{ item.name }}
+      </div>
+    </div>
+    
+    <!-- 响应式文字大小 -->
+    <h1 class="text-2xl md:text-3xl lg:text-4xl font-bold">
+      Responsive Title
+    </h1>
+    
+    <!-- 响应式间距 -->
+    <div class="p-4 md:p-6 lg:p-8">
+      Content
+    </div>
+  </div>
+</template>
+```
+
+## Element Plus
+
+### 安装
+
+```bash
+npm install element-plus
+```
+
+### 完整引入
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
+import App from './App.vue'
+
+const app = createApp(App)
+
+app.use(ElementPlus)
+app.mount('#app')
+```
+
+### 按需引入
+
+```bash
+npm install -D unplugin-vue-components unplugin-auto-import
+```
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+
+export default defineConfig({
+  plugins: [
+    vue(),
+    AutoImport({
+      resolvers: [ElementPlusResolver()],
+    }),
+    Components({
+      resolvers: [ElementPlusResolver()],
+    }),
+  ],
+})
+```
+
+### 使用
+
+```vue filename="components/UserForm.vue"
+<script setup lang="ts">
+import { ref, reactive } from 'vue'
+import { ElMessage } from 'element-plus'
+
+const formData = reactive({
+  name: '',
+  email: '',
+  age: 0
+})
+
+const rules = {
+  name: [
+    { required: true, message: '请输入姓名', trigger: 'blur' }
+  ],
+  email: [
+    { required: true, message: '请输入邮箱', trigger: 'blur' },
+    { type: 'email', message: '请输入正确的邮箱', trigger: 'blur' }
+  ]
+}
+
+const formRef = ref()
+
+async function handleSubmit() {
+  await formRef.value.validate()
+  
+  ElMessage.success('提交成功')
+}
+</script>
+
+<template>
+  <el-form
+    ref="formRef"
+    :model="formData"
+    :rules="rules"
+    label-width="80px"
+  >
+    <el-form-item label="姓名" prop="name">
+      <el-input v-model="formData.name" />
+    </el-form-item>
+    
+    <el-form-item label="邮箱" prop="email">
+      <el-input v-model="formData.email" type="email" />
+    </el-form-item>
+    
+    <el-form-item label="年龄">
+      <el-input-number v-model="formData.age" :min="0" :max="120" />
+    </el-form-item>
+    
+    <el-form-item>
+      <el-button type="primary" @click="handleSubmit">提交</el-button>
+      <el-button @click="formRef.reset()">重置</el-button>
+    </el-form-item>
+  </el-form>
+</template>
+```
+
+## Vuetify
+
+### 安装
+
+```bash
+npm install vuetify@next
+npm install -D vite-plugin-vuetify
+```
+
+```ts filename="vite.config.ts"
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import vuetify from 'vite-plugin-vuetify'
+
+export default defineConfig({
+  plugins: [
+    vue(),
+    vuetify({ autoImport: true })
+  ]
+})
+```
+
+```ts filename="plugins/vuetify.ts"
+import { createVuetify } from 'vuetify'
+import * as components from 'vuetify/components'
+import * as directives from 'vuetify/directives'
+import 'vuetify/styles'
+
+export default createVuetify({
+  components,
+  directives,
+  theme: {
+    defaultTheme: 'light',
+    themes: {
+      light: {
+        colors: {
+          primary: '#42b883',
+          secondary: '#35495e'
+        }
+      }
+    }
+  }
+})
+```
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import App from './App.vue'
+import vuetify from './plugins/vuetify'
+
+createApp(App).use(vuetify).mount('#app')
+```
+
+### 使用
+
+```vue
+<template>
+  <v-app>
+    <v-app-bar color="primary">
+      <v-app-bar-title>My App</v-app-bar-title>
+    </v-app-bar>
+    
+    <v-main>
+      <v-container>
+        <v-row>
+          <v-col cols="12" md="6">
+            <v-card>
+              <v-card-title>Card Title</v-card-title>
+              <v-card-text>Card content</v-card-text>
+              <v-card-actions>
+                <v-btn color="primary">Action</v-btn>
+              </v-card-actions>
+            </v-card>
+          </v-col>
+        </v-row>
+      </v-container>
+    </v-main>
+  </v-app>
+</template>
+```
+
+## 最佳实践
+
+### ✅ 使用 CSS 变量实现主题
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const theme = ref<'light' | 'dark'>('light')
+
+function toggleTheme() {
+  theme.value = theme.value === 'light' ? 'dark' : 'light'
+}
+</script>
+
+<template>
+  <div :class="theme">
+    <button @click="toggleTheme">Toggle Theme</button>
+    <div class="content">Content</div>
+  </div>
+</template>
+
+<style scoped>
+.light {
+  --bg-color: #ffffff;
+  --text-color: #333333;
+}
+
+.dark {
+  --bg-color: #1a1a1a;
+  --text-color: #ffffff;
+}
+
+.content {
+  background: var(--bg-color);
+  color: var(--text-color);
+  padding: 20px;
+}
+</style>
+```
+
+### ✅ 组织样式文件
+
+```text
+assets/
+├── styles/
+│   ├── variables.scss    # 变量
+│   ├── mixins.scss       # 混入
+│   ├── base.scss         # 基础样式
+│   ├── utilities.scss    # 工具类
+│   └── main.scss         # 主入口
+```
+
+### ❌ 避免过度使用 !important
+
+```vue
+<!-- ❌ 错误 -->
+<style scoped>
+.btn {
+  color: red !important;
+}
+</style>
+
+<!-- ✅ 正确：提高选择器优先级 -->
+<style scoped>
+.container .btn {
+  color: red;
+}
+</style>
+```
+
+下一章 [数据请求](/vue/api-calls) 介绍 API 调用。

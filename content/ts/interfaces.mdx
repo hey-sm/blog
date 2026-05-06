@@ -1,0 +1,570 @@
+---
+title: 接口
+description: TypeScript Interface 接口声明、扩展继承、声明合并、混合类型、接口 vs 类型别名决策框架
+---
+
+# 接口
+
+接口（Interface）是 TypeScript 核心的类型定义机制。它描述对象的形状，支持声明合并、扩展继承等独特能力。
+
+## 接口声明
+
+### 基本语法
+
+```ts
+interface User {
+  id: number
+  name: string
+  email: string
+  createdAt: Date
+}
+
+const user: User = {
+  id: 1,
+  name: 'Alice',
+  email: 'alice@example.com',
+  createdAt: new Date()
+}
+```
+
+### 可选属性与只读属性
+
+```ts
+interface Config {
+  readonly apiBaseUrl: string
+  timeout?: number
+  retries?: number
+}
+
+const config: Config = {
+  apiBaseUrl: 'https://api.example.com'
+}
+
+config.apiBaseUrl = 'xxx'  // ❌ 错误：只读
+```
+
+### 索引签名
+
+```ts
+interface StringDictionary {
+  [key: string]: string
+}
+
+interface MixedDictionary {
+  name: string           // ✅ name 是 string，与索引签名兼容
+  age: number            // ❌ 错误：number 与索引签名 string 不兼容
+  [key: string]: string
+}
+
+// ✅ 修复：索引签名使用联合类型
+interface MixedDictionary {
+  name: string
+  age: number
+  [key: string]: string | number
+}
+```
+
+## 接口扩展（extends）
+
+### 单继承
+
+```ts
+interface Animal {
+  name: string
+}
+
+interface Dog extends Animal {
+  breed: string
+  bark: () => void
+}
+
+const dog: Dog = {
+  name: 'Max',
+  breed: 'Golden Retriever',
+  bark: () => console.log('Woof!')
+}
+```
+
+### 多继承
+
+```ts
+interface Named {
+  name: string
+}
+
+interface Aged {
+  age: number
+}
+
+interface Employed {
+  company: string
+  salary: number
+}
+
+interface Person extends Named, Aged, Employed {
+  email: string
+}
+
+const person: Person = {
+  name: 'Alice',
+  age: 30,
+  company: 'Tech Co',
+  salary: 100000,
+  email: 'alice@example.com'
+}
+```
+
+### 扩展类
+
+接口可以继承类的类型（包含 private/protected 成员）：
+
+```ts
+class Control {
+  private state: string = ''
+}
+
+// SelectableControl 只能由 Control 的子类实现
+interface SelectableControl extends Control {
+  select(): void
+}
+
+class Button extends Control implements SelectableControl {
+  select() { /* ... */ }
+}
+
+class TextBox extends Control implements SelectableControl {
+  select() { /* ... */ }
+}
+
+// ❌ 错误：不是 Control 的子类，无法匹配 private state
+class Dropdown implements SelectableControl {
+  private state: string = ''  // 这是新的 state，不是继承的
+  select() { /* ... */ }
+}
+```
+
+## 声明合并
+
+**接口独有的特性**——同名接口自动合并：
+
+```ts
+interface User {
+  name: string
+}
+
+interface User {
+  age: number
+}
+
+interface User {
+  email: string
+}
+
+// 自动合并为
+interface User {
+  name: string
+  age: number
+  email: string
+}
+
+const user: User = {
+  name: 'Alice',
+  age: 25,
+  email: 'alice@example.com'
+}
+```
+
+### 声明合并的规则
+
+```ts
+// 同名非函数成员：类型必须兼容
+interface A {
+  x: string
+}
+interface A {
+  x: number  // ❌ 错误：类型冲突
+}
+
+// 同名函数成员：变为函数重载
+interface Fn {
+  handle(value: string): void
+}
+interface Fn {
+  handle(value: number): void
+}
+// 合并后：handle(value: string): void 和 handle(value: number): void 两个重载
+```
+
+### 扩展全局类型
+
+```ts
+// 扩展 Window 类型
+declare global {
+  interface Window {
+    __CUSTOM_CONFIG__: {
+      apiBaseUrl: string
+    }
+  }
+}
+
+// 现在可以在任何地方访问
+window.__CUSTOM_CONFIG__.apiBaseUrl
+
+// 扩展 Array
+interface Array<T> {
+  last(): T | undefined
+}
+
+Array.prototype.last = function <T>(this: T[]) {
+  return this[this.length - 1]
+}
+
+const arr = [1, 2, 3]
+arr.last()  // 3
+```
+
+**React 示例——扩展第三方类型**：
+
+```tsx
+// 扩展 @types/react 的 CSSProperties
+declare module 'react' {
+  interface CSSProperties {
+    [key: `--${string}`]: string | number  // CSS 变量
+  }
+}
+
+// 现在可以使用 CSS 自定义属性
+const style: React.CSSProperties = {
+  '--primary-color': '#3b82f6',
+  '--spacing': 16
+}
+```
+
+## implements 关键字
+
+类通过 `implements` 确保遵循接口约定：
+
+```ts
+interface Logger {
+  log(message: string): void
+  error(message: string): void
+}
+
+interface Persistable {
+  save(): Promise<void>
+  load(): Promise<void>
+}
+
+class FileService implements Logger, Persistable {
+  log(message: string) {
+    console.log(`[INFO] ${message}`)
+  }
+
+  error(message: string) {
+    console.error(`[ERROR] ${message}`)
+  }
+
+  async save() {
+    // 持久化逻辑
+  }
+
+  async load() {
+    // 加载逻辑
+  }
+}
+```
+
+**React 示例——服务类模式**：
+
+```tsx
+interface AuthService {
+  login(credentials: { email: string; password: string }): Promise<string>
+  logout(): void
+  getToken(): string | null
+  isAuthenticated(): boolean
+}
+
+class JwtAuthService implements AuthService {
+  private token: string | null = null
+
+  async login(credentials: { email: string; password: string }) {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(credentials)
+    })
+    const { token } = await response.json()
+    this.token = token
+    return token
+  }
+
+  logout() { this.token = null }
+
+  getToken() { return this.token }
+
+  isAuthenticated() { return this.token !== null }
+}
+
+// 在 React 中使用
+const AuthContext = React.createContext<AuthService | null>(null)
+
+function useAuth() {
+  const auth = useContext(AuthContext)
+  if (!auth) throw new Error('AuthContext not provided')
+  return auth
+}
+```
+
+## 混合类型（Hybrid Types）
+
+接口可以描述同时可调用、可实例化、又带有属性的对象：
+
+```ts
+// 可调用 + 属性
+interface CallableCounter {
+  (): number
+  count: number
+  reset(): void
+}
+
+function createCounter(): CallableCounter {
+  const counter = (() => counter.count++) as CallableCounter
+  counter.count = 0
+  counter.reset = () => { counter.count = 0 }
+  return counter
+}
+
+const c = createCounter()
+c()         // 0
+c()         // 1
+c.count     // 2
+c.reset()
+c()         // 0
+```
+
+**React 示例**：
+
+```tsx
+// 组件 + 静态属性
+interface MyComponentType extends React.FC<MyProps> {
+  displayName: string
+  defaultProps: Partial<MyProps>
+}
+
+// 或更常见的模式
+interface FormComponent extends React.FC<FormProps> {
+  Item: typeof FormItem
+  Submit: typeof FormSubmit
+}
+
+const Form: FormComponent = (props) => { /* ... */ }
+Form.Item = FormItem
+Form.Submit = FormSubmit
+
+// 使用
+<Form>
+  <Form.Item label="Name">
+    <input />
+  </Form.Item>
+  <Form.Submit />
+</Form>
+```
+
+## Interface vs Type 决策框架
+
+| 场景 | 推荐 | 原因 |
+|------|------|------|
+| 对象形状描述 | `interface` | 更清晰、更快的类型检查 |
+| 需要声明合并 | `interface` | Type 不支持 |
+| 公共 API（库/包） | `interface` | 允许使用者扩展 |
+| 联合/交叉类型 | `type` | Interface 不支持联合 |
+| 元组类型 | `type` | Interface 表达力不足 |
+| 映射类型 | `type` | Interface 只支持有限映射 |
+| 函数类型 | `type` | 更简洁，配合条件类型 |
+| 从原始类型推导 | `type` | Interface 只能描述对象 |
+
+```ts
+// ✅ Interface：库开发者暴露 API
+export interface Plugin {
+  name: string
+  install(): void
+}
+// 使用者可以扩展
+declare module './plugin' {
+  interface Plugin {
+    version: string  // 声明合并增强
+  }
+}
+
+// ✅ Type：内部复杂类型组合
+export type InternalState =
+  | { phase: 'init' }
+  | { phase: 'running'; pid: number }
+  | { phase: 'stopped'; exitCode: number }
+
+// ✅ Type：工具类型
+export type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K]
+}
+```
+
+## 高级接口模式
+
+### 1. 泛型接口约束
+
+```ts
+interface Repository<T, ID extends string | number> {
+  findById(id: ID): Promise<T | null>
+  findAll(): Promise<T[]>
+  save(entity: T): Promise<T>
+  delete(id: ID): Promise<void>
+}
+
+interface User {
+  id: number
+  name: string
+}
+
+class UserRepository implements Repository<User, User['id']> {
+  async findById(id: number) { /* ... */ return null }
+  async findAll() { return [] as User[] }
+  async save(user: User) { return user }
+  async delete(id: number) { /* ... */ }
+}
+```
+
+### 2. 自引用接口
+
+```ts
+interface TreeNode {
+  value: string
+  left: TreeNode | null
+  right: TreeNode | null
+}
+
+interface FileNode {
+  name: string
+  isDirectory: boolean
+  children: FileNode[]
+  parent: FileNode | null
+}
+```
+
+### 3. 函数签名重载
+
+```ts
+interface OverloadedFn {
+  (value: string): string
+  (value: number): number
+  (value: string | number): string | number
+}
+
+const process: OverloadedFn = (value: string | number): string | number => {
+  if (typeof value === 'string') return value.toUpperCase()
+  return value * 2
+}
+
+process('hello')   // string
+process(42)        // number
+```
+
+## 陷阱
+
+### 1. Index 签名与已知属性的类型冲突
+
+```ts
+interface Bad {
+  [key: string]: string
+  length: number  // ❌ 类型 'number' 不能赋值给 'string'
+}
+
+// ✅ 修正
+interface Good {
+  [key: string]: string | number
+  length: number
+}
+```
+
+### 2. interface 与 class 的 private 字段
+
+```ts
+class Base {
+  private secret = 'hidden'
+}
+
+// ❌ 错误：继承包含 private 成员的类时，只能通过子类实现
+interface Derived extends Base {}
+
+class Implementation extends Base implements Derived {}
+// ✅ 只能通过 extends Base 的子类实现
+```
+
+### 3. 声明合并可能带来意外行为
+
+```ts
+// 文件 A
+interface Config { timeout: number }
+
+// 文件 B（可能是第三方库）
+interface Config { timeout: string }  // ❌ 合并冲突但可能不报错
+```
+
+## 最佳实践
+
+### ✅ 默认使用 interface，需要时切换到 type
+
+```ts
+// ✅ 默认使用 interface
+interface ProductCardProps {
+  product: Product
+  onAddToCart: (id: number) => void
+}
+
+// ✅ 需要联合/映射时用 type
+type ProductStatus = 'draft' | 'published' | 'archived'
+type ProductFormData = Omit<Product, 'id' | 'createdAt'>
+```
+
+### ✅ 使用 declaration merging 扩展第三方模块
+
+```ts
+// 扩展 express Request
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { id: number; role: string }
+    }
+  }
+}
+```
+
+### ✅ 遵守接口分离原则
+
+```ts
+// ❌ 过大的接口
+interface ApplicationService {
+  login(): void
+  logout(): void
+  fetchProducts(): void
+  createOrder(): void
+  sendNotification(): void
+  reportAnalytics(): void
+}
+
+// ✅ 按职责分离
+interface AuthService {
+  login(credentials: Credentials): Promise<Token>
+  logout(): void
+}
+
+interface ProductService {
+  getProducts(filter: Filter): Promise<Product[]>
+  getProduct(id: number): Promise<Product>
+}
+
+interface OrderService {
+  createOrder(items: CartItem[]): Promise<Order>
+  getOrder(id: number): Promise<Order>
+}
+```
+
+下一章 [类](/ts/classes) 深入 TypeScript 类的类型系统。

@@ -1,0 +1,483 @@
+---
+title: 组件注册与通信
+description: 全局/局部注册、Props、Events、Attribute Inheritance
+---
+
+# 组件注册与通信
+
+Vue 组件是可复用的 Vue 实例，拥有独立的作用域和生命周期。
+
+## 组件注册
+
+### 局部注册（推荐）
+
+在 `<script setup>` 中，导入的组件自动注册：
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import Button from './components/Button.vue'
+import Card from './components/Card.vue'
+</script>
+
+<template>
+  <Card>
+    <Button>Click me</Button>
+  </Card>
+</template>
+```
+
+### 全局注册
+
+在 `main.ts` 中注册：
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import App from './App.vue'
+import Button from './components/Button.vue'
+
+const app = createApp(App)
+
+app.component('Button', Button)
+
+app.mount('#app')
+```
+
+```vue filename="AnyComponent.vue"
+<template>
+  <Button>Global Button</Button>
+</template>
+```
+
+**何时使用全局注册**：
+- 基础 UI 组件（Button、Input、Card）
+- 在多处使用的组件
+- 第三方组件库
+
+### 动态组件名
+
+```vue filename="components/DynamicLoader.vue"
+<script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
+
+const components = import.meta.glob('./components/*.vue')
+
+const loadComponent = (name: string) => {
+  return defineAsyncComponent(() => components[`./components/${name}.vue`]())
+}
+</script>
+```
+
+## Props：父传子
+
+### 基础用法
+
+```vue filename="components/UserCard.vue"
+<script setup lang="ts">
+interface Props {
+  name: string
+  age: number
+  email?: string
+}
+
+const props = defineProps<Props>()
+</script>
+
+<template>
+  <div class="user-card">
+    <h3>{{ props.name }}</h3>
+    <p>Age: {{ props.age }}</p>
+    <p v-if="props.email">Email: {{ props.email }}</p>
+  </div>
+</template>
+```
+
+父组件使用：
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import UserCard from './components/UserCard.vue'
+</script>
+
+<template>
+  <UserCard name="Alice" :age="25" email="alice@example.com" />
+</template>
+```
+
+### 默认值
+
+```vue
+<script setup lang="ts">
+interface Props {
+  name: string
+  age?: number
+  role?: 'admin' | 'user'
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  age: 18,
+  role: 'user'
+})
+</script>
+```
+
+### Props 校验（运行时）
+
+```vue
+<script setup lang="ts">
+const props = defineProps({
+  name: {
+    type: String,
+    required: true
+  },
+  age: {
+    type: Number,
+    default: 18,
+    validator: (value: number) => value >= 0 && value <= 120
+  },
+  tags: {
+    type: Array as PropType<string[]>,
+    default: () => []
+  }
+})
+</script>
+```
+
+### Props 单向数据流
+
+**Props 是只读的**，不应在子组件中修改：
+
+```vue
+<!-- ❌ 错误：直接修改 prop -->
+<script setup lang="ts">
+const props = defineProps<{ count: number }>()
+
+function increment() {
+  props.count++  // ❌ 运行时警告
+}
+</script>
+
+<!-- ✅ 正确：使用本地状态 -->
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const props = defineProps<{ initialCount: number }>()
+const count = ref(props.initialCount)
+
+function increment() {
+  count.value++
+}
+</script>
+
+<!-- ✅ 正确：通过事件通知父组件 -->
+<script setup lang="ts">
+const props = defineProps<{ count: number }>()
+const emit = defineEmits<{ increment: [] }>()
+</script>
+
+<template>
+  <button @click="emit('increment')">{{ count }}</button>
+</template>
+```
+
+## Events：子传父
+
+### 定义事件
+
+```vue filename="components/Counter.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+const emit = defineEmits<{
+  update: [value: number]
+  delete: []
+  change: [id: number, value: string]
+}>()
+
+function increment() {
+  count.value++
+  emit('update', count.value)
+}
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+  <button @click="emit('delete')">Delete</button>
+</template>
+```
+
+### 监听事件
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import Counter from './components/Counter.vue'
+
+function handleUpdate(value: number) {
+  console.log('Updated:', value)
+}
+
+function handleDelete() {
+  console.log('Deleted')
+}
+</script>
+
+<template>
+  <Counter 
+    @update="handleUpdate"
+    @delete="handleDelete"
+  />
+</template>
+```
+
+### 事件校验
+
+```vue
+<script setup lang="ts">
+const emit = defineEmits({
+  update: (value: number) => {
+    if (value < 0) {
+      console.warn('Value must be positive')
+      return false
+    }
+    return true
+  }
+})
+</script>
+```
+
+## Attribute Inheritance
+
+### 透传 Attributes
+
+未声明为 props 的属性会自动透传到根元素：
+
+```vue filename="components/Button.vue"
+<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+
+<template>
+  <button>{{ label }}</button>
+</template>
+```
+
+```vue filename="App.vue"
+<template>
+  <!-- class 和 id 会自动透传到 <button> -->
+  <Button label="Click" class="primary" id="btn-1" />
+</template>
+```
+
+渲染为：
+
+```html
+<button class="primary" id="btn-1">Click</button>
+```
+
+### 禁用 Attribute 继承
+
+```vue filename="components/CustomInput.vue"
+<script setup lang="ts">
+defineOptions({
+  inheritAttrs: false
+})
+
+defineProps<{ label: string }>()
+</script>
+
+<template>
+  <div class="input-wrapper">
+    <label>{{ label }}</label>
+    <!-- 手动绑定 $attrs -->
+    <input v-bind="$attrs">
+  </div>
+</template>
+```
+
+### 多根节点
+
+多根节点组件需要显式绑定 `$attrs`：
+
+```vue
+<script setup lang="ts">
+defineOptions({
+  inheritAttrs: false
+})
+</script>
+
+<template>
+  <header>Header</header>
+  <!-- 显式绑定到 main -->
+  <main v-bind="$attrs">
+    Content
+  </main>
+  <footer>Footer</footer>
+</template>
+```
+
+### 访问透传属性
+
+```vue
+<script setup lang="ts">
+import { useAttrs } from 'vue'
+
+const attrs = useAttrs()
+
+console.log(attrs.class)
+console.log(attrs.id)
+</script>
+```
+
+## 组件通信模式
+
+### 1. Props + Events（父子）
+
+```vue filename="Parent.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+import Child from './Child.vue'
+
+const count = ref(0)
+</script>
+
+<template>
+  <Child :count="count" @update="count = $event" />
+</template>
+```
+
+### 2. v-model（双向绑定）
+
+```vue filename="components/CustomInput.vue"
+<script setup lang="ts">
+const modelValue = defineModel<string>()
+</script>
+
+<template>
+  <input v-model="modelValue">
+</template>
+```
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+import CustomInput from './components/CustomInput.vue'
+
+const text = ref('')
+</script>
+
+<template>
+  <CustomInput v-model="text" />
+  <p>{{ text }}</p>
+</template>
+```
+
+### 3. Provide / Inject（跨层级）
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import { provide, ref } from 'vue'
+
+const theme = ref('dark')
+provide('theme', theme)
+</script>
+```
+
+```vue filename="components/DeepChild.vue"
+<script setup lang="ts">
+import { inject } from 'vue'
+
+const theme = inject<Ref<string>>('theme')
+</script>
+
+<template>
+  <div :class="theme">Content</div>
+</template>
+```
+
+### 4. 模板引用（父访问子）
+
+```vue filename="Parent.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+import Child from './Child.vue'
+
+const childRef = ref<InstanceType<typeof Child>>()
+
+function callChildMethod() {
+  childRef.value?.reset()
+}
+</script>
+
+<template>
+  <Child ref="childRef" />
+  <button @click="callChildMethod">Reset Child</button>
+</template>
+```
+
+```vue filename="Child.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+
+function reset() {
+  count.value = 0
+}
+
+defineExpose({ reset })
+</script>
+```
+
+## 最佳实践
+
+### ✅ Props 命名
+
+```vue
+<!-- ✅ camelCase in script -->
+<script setup lang="ts">
+defineProps<{ userName: string }>()
+</script>
+
+<!-- ✅ kebab-case in template -->
+<template>
+  <UserCard user-name="Alice" />
+</template>
+```
+
+### ✅ 事件命名
+
+```vue
+<!-- ✅ kebab-case -->
+<script setup lang="ts">
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  'item-selected': [id: number]
+}>()
+</script>
+```
+
+### ❌ 避免 Prop 突变
+
+```vue
+<!-- ❌ 错误 -->
+<script setup lang="ts">
+const props = defineProps<{ items: string[] }>()
+
+function addItem(item: string) {
+  props.items.push(item)  // ❌ 修改了父组件的数据
+}
+</script>
+
+<!-- ✅ 正确 -->
+<script setup lang="ts">
+const props = defineProps<{ items: string[] }>()
+const emit = defineEmits<{ 'add-item': [item: string] }>()
+
+function addItem(item: string) {
+  emit('add-item', item)
+}
+</script>
+```
+
+下一章 [Props、Events、v-model](/vue/props-events) 深入探讨组件通信机制。

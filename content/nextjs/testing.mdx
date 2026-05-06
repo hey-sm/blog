@@ -1,0 +1,294 @@
+---
+title: 测试
+description: Vitest + React Testing Library、Playwright E2E、Server Components 测试策略与 CI 集成
+---
+
+# 测试
+
+Next.js 不绑定特定的测试框架，但生态的默认选择是 **Vitest**（单元/组件测试）+ **Playwright** 或 **Cypress**（端到端测试）。
+
+## 测试策略
+
+| 层次 | 工具 | 覆盖 | 速度 |
+| ---- | ---- | ---- | ---- |
+| 单元测试 | Vitest | 纯逻辑函数、工具函数 | 极快 |
+| 组件测试 | Vitest + Testing Library | 组件渲染与交互 | 快 |
+| 集成测试 | Vitest + MSW | Server Actions、API 流程 | 中 |
+| E2E | Playwright / Cypress | 完整的用户流程 | 慢 |
+
+## Vitest 配置
+
+```bash
+pnpm add -D vitest @vitejs/plugin-react jsdom @testing-library/react @testing-library/jest-dom
+```
+
+```ts filename="vitest.config.ts"
+import { defineConfig } from 'vitest/config'
+import react from '@vitejs/plugin-react'
+import path from 'path'
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./test/setup.ts'],
+  },
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+})
+```
+
+```ts filename="test/setup.ts"
+import '@testing-library/jest-dom/vitest'
+```
+
+### 纯逻辑测试
+
+```ts filename="src/lib/__tests__/utils.test.ts"
+import { describe, it, expect } from 'vitest'
+import { cn } from '@/lib/utils'
+
+describe('cn', () => {
+  it('merges classes correctly', () => {
+    expect(cn('px-4', 'py-2')).toBe('px-4 py-2')
+  })
+
+  it('handles conditional classes', () => {
+    expect(cn('base', false && 'hidden', 'extra')).toBe('base extra')
+  })
+
+  it('tailwind-merge overrides', () => {
+    expect(cn('px-2 px-4')).toBe('px-4')
+  })
+})
+```
+
+### 组件测试
+
+```tsx filename="src/app/__tests__/Counter.test.tsx"
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, it, expect } from 'vitest'
+import { Counter } from '../Counter'
+
+describe('Counter', () => {
+  it('increments count on click', async () => {
+    render(<Counter />)
+    const button = screen.getByRole('button', { name: /count:/i })
+
+    expect(button).toHaveTextContent('Count: 0')
+    await userEvent.click(button)
+    expect(button).toHaveTextContent('Count: 1')
+  })
+})
+```
+
+### Server Actions 测试
+
+```ts filename="src/app/__tests__/actions.test.ts"
+import { describe, it, expect } from 'vitest'
+import { createPost } from '@/app/actions'
+
+// 直接 import Server Action — 它只是函数
+describe('createPost', () => {
+  it('validates title and content', async () => {
+    const formData = new FormData()
+    formData.set('title', '')
+    formData.set('content', 'short')
+
+    const result = await createPost(formData)
+    expect(result.errors).toBeDefined()
+    expect(result.errors?.title).toBeTruthy()
+    expect(result.errors?.content).toBeTruthy()
+  })
+})
+```
+
+Server Actions 可以在 Vitest 中**直接调用**（不需要浏览器）。但注意：需要 mock DB 连接（或使用测试数据库）。
+
+## Server Components 测试
+
+Server Components 不能直接渲染（无客户端 hook），但可以：
+
+1. 测试 async 函数（组件即函数）：
+
+```tsx
+// 直接调用 async 组件函数
+test('renders posts', async () => {
+  const html = await PostsPage()
+  // 验证返回值是 React Element
+})
+```
+
+2. 用 `@testing-library/react` render 嵌套在必要 Context 中的 Server Component（将其作为子组件的 children）。
+
+## E2E 测试 —— Playwright
+
+```bash
+pnpm add -D @playwright/test
+npx playwright install
+```
+
+```ts filename="e2e/navigation.spec.ts"
+import { test, expect } from '@playwright/test'
+
+test.describe('Navigation', () => {
+  test('navigates to about page', async ({ page }) => {
+    await page.goto('/')
+    await page.click('text=About')
+    await expect(page).toHaveURL('/about')
+    await expect(page.locator('h1')).toContainText('About')
+  })
+
+  test('shows 404 for invalid post', async ({ page }) => {
+    const response = await page.goto('/posts/non-existent')
+    expect(response?.status()).toBe(404)
+  })
+})
+```
+
+### Playwright 配置
+
+```ts filename="playwright.config.ts"
+import { defineConfig } from '@playwright/test'
+
+export default defineConfig({
+  testDir: './e2e',
+  use: {
+    baseURL: 'http://localhost:3000',
+  },
+  webServer: {
+    command: 'pnpm build && pnpm start',
+    port: 3000,
+    reuseExistingServer: true,
+  },
+})
+```
+
+## API 测试 (MSW)
+
+```bash
+pnpm add -D msw
+```
+
+```ts filename="src/app/__tests__/posts.test.tsx"
+import { http, HttpResponse } from 'msw'
+import { setupServer } from 'msw/node'
+
+const server = setupServer(
+  http.get('https://api.example.com/posts', () => {
+    return HttpResponse.json([
+      { id: '1', title: 'Post 1' },
+      { id: '2', title: 'Post 2' },
+    ])
+  })
+)
+
+beforeAll(() => server.listen())
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
+```
+
+## CI 集成 (GitHub Actions)
+
+```yaml filename=".github/workflows/test.yml"
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+      - name: E2E
+        run: pnpm exec playwright test
+```
+
+## `pnpm test` 与 Vitest
+
+```json filename="package.json"
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  }
+}
+```
+
+## 陷阱
+
+### 不要 mock `next/navigation` 的全部 API
+
+```ts
+// ✗ 过度 mock — 失去了实际路由验证
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn() }),
+  usePathname: () => '/',
+}))
+```
+
+Mock 只应在测试中隔离系统无法控制的部分。对于路由，考虑用 Playwright 的 E2E 测试来验证实际行为。
+
+### JSDOM 与 Browser API 差异
+
+JSDOM 没有 `window.matchMedia`、`IntersectionObserver`、`ResizeObserver`。如果组件使用了这类 API（例如 `useRef` + 手势），在测试 setup 中 mock：
+
+```ts
+beforeAll(() => {
+  Object.defineProperty(window, 'matchMedia', {
+    value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), ... })),
+  })
+})
+```
+
+### 测试中的数据库写入
+
+```ts
+// 测试中直接运行 ORM 查询 → 测试数据库被污染
+await db.post.create({ data: { ... } })
+```
+
+选项：
+- 使用事务回滚（每个测试一个事务，结束回滚）
+- 使用内存数据库（SQLite :memory:）
+- 使用测试专用的数据库，且并行化时要锁
+
+### `serverComponentsExternalPackages` 与 Vitest
+
+如果 `next.config.ts` 中有 `serverExternalPackages`，Vitest 在解析这些包时可能出错。在 `vitest.config.ts` 配置去外部化：
+
+```ts
+test: {
+  server: {
+    deps: {
+      inline: ['some-external-package'],
+    },
+  },
+}
+```
+
+### 直接在 Playwright 中验证 SSR HTML 不完整
+
+静态渲染在 Playwright 的 dev 模式下无效。E2E 测试必须对 `next build && next start` 的输出执行，才能捕获真实性能与 SSR 行为。
+
+## 小结
+
+- Vitest + React Testing Library 用于单元和组件测试；
+- Playwright / Cypress 用于 E2E，验证完整的用户流程；
+- Server Actions 作为纯函数可在 Vitest 中直接测试，无需浏览器；
+- MSW 用于 mock API 层，隔离网络依赖；
+- 测试数据库需要用事务回滚或内存方案，防止测试间污染；
+- CI 中同时执行 lint → 单元测试 → build → E2E 的顺序。

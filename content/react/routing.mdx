@@ -1,0 +1,405 @@
+---
+title: 路由
+description: React Router v7 与 TanStack Router 的核心 API、嵌套路由、数据加载与代码分割
+---
+
+# 路由
+
+React 自身不包含路由——这是它"小核心 + 大生态"哲学的体现。本章覆盖两个主流方案：
+
+- [**React Router**](https://reactrouter.com)：生态最大、长期维护，v7 起整合 Remix 的数据 API
+- [**TanStack Router**](https://tanstack.com/router)：晚出，类型安全 / 文件路由 / Search Params 一等公民
+
+如使用 Next.js / Remix，路由由框架接管，无需选库——见 [框架](/react/frameworks)。
+
+## 选型对比
+
+| 维度 | React Router v7 | TanStack Router |
+| ---- | --------------- | --------------- |
+| 包大小 | ~25 KB | ~33 KB |
+| 类型安全 | 中（v7 改进，仍非完全推断） | 极强（路径、search、params 全推断） |
+| 路由声明 | 配置式 / JSX | 配置式 / 文件式 |
+| 数据加载 | loader / action / `clientLoader` | beforeLoad / loader |
+| Search Params | 字符串 API | 类型化 + Schema 校验 |
+| SSR | 同 Remix 集成 | 实验性 |
+| 学习曲线 | 平缓 | 中（类型机制较多） |
+
+## React Router v7
+
+```bash
+pnpm add react-router
+```
+
+### 基本用法
+
+```tsx filename="main.tsx"
+import { createRoot } from 'react-dom/client'
+import { BrowserRouter, Routes, Route, Link, Outlet } from 'react-router'
+import App from './App'
+
+createRoot(document.getElementById('root')!).render(
+  <BrowserRouter>
+    <Routes>
+      <Route path="/" element={<App />}>
+        <Route index element={<Home />} />
+        <Route path="about" element={<About />} />
+        <Route path="users/:id" element={<UserDetail />} />
+        <Route path="*" element={<NotFound />} />
+      </Route>
+    </Routes>
+  </BrowserRouter>
+)
+
+function App() {
+  return (
+    <>
+      <nav>
+        <Link to="/">Home</Link>
+        <Link to="/about">About</Link>
+      </nav>
+      <Outlet />                              {/* 子路由渲染位置 */}
+    </>
+  )
+}
+```
+
+### Hooks
+
+```tsx
+import {
+  useNavigate, useParams, useSearchParams, useLocation,
+  useNavigationType, useMatch, useResolvedPath
+} from 'react-router'
+
+function UserDetail() {
+  const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
+  const tab = params.get('tab') ?? 'info'
+
+  return (
+    <>
+      <h1>User {id} - {tab}</h1>
+      <button onClick={() => setParams({ tab: 'posts' })}>Posts</button>
+      <button onClick={() => navigate(-1)}>Back</button>
+      <button onClick={() => navigate('/about', { replace: true })}>About</button>
+    </>
+  )
+}
+```
+
+### NavLink：高亮当前路由
+
+```tsx
+<NavLink to="/about" className={({ isActive }) => isActive ? 'active' : ''}>
+  About
+</NavLink>
+```
+
+### 路由配置式（推荐）
+
+```tsx filename="routes.tsx"
+import { createBrowserRouter, RouterProvider } from 'react-router'
+
+const router = createBrowserRouter([
+  {
+    path: '/',
+    element: <App />,
+    children: [
+      { index: true, element: <Home /> },
+      { path: 'about', element: <About /> },
+      { path: 'users/:id', element: <UserDetail />, loader: userLoader },
+      { path: '*', element: <NotFound /> }
+    ]
+  }
+])
+
+createRoot(document.getElementById('root')!).render(
+  <RouterProvider router={router} />
+)
+```
+
+配置式比 JSX 式更便于：
+
+- 类型推导
+- 与 `loader` / `action` / `errorElement` 协同
+- 路由层级在一份配置中清晰可见
+
+### Loader 与 Action
+
+`loader` 在路由匹配时**预加载数据**，组件挂载前执行：
+
+```tsx
+async function userLoader({ params }: LoaderFunctionArgs) {
+  const res = await fetch(`/api/users/${params.id}`)
+  if (!res.ok) throw new Response('Not found', { status: 404 })
+  return res.json()
+}
+
+function UserDetail() {
+  const user = useLoaderData() as User
+  return <h1>{user.name}</h1>
+}
+```
+
+`action` 处理表单提交：
+
+```tsx
+async function userAction({ request, params }: ActionFunctionArgs) {
+  const data = await request.formData()
+  await updateUser(params.id!, Object.fromEntries(data))
+  return redirect(`/users/${params.id}`)
+}
+
+function EditUser() {
+  return (
+    <Form method="post">
+      <input name="name" />
+      <button type="submit">Save</button>
+    </Form>
+  )
+}
+
+// 配置
+{ path: 'users/:id/edit', element: <EditUser />, action: userAction }
+```
+
+### 错误边界
+
+```tsx
+{
+  path: '/',
+  element: <App />,
+  errorElement: <RootError />,                // 捕获所有未处理的渲染 / loader / action 错误
+  children: [...]
+}
+
+function RootError() {
+  const error = useRouteError()
+  if (isRouteErrorResponse(error)) {
+    return <h1>{error.status} {error.statusText}</h1>
+  }
+  return <h1>Unexpected error</h1>
+}
+```
+
+### 代码分割
+
+```tsx
+{
+  path: 'reports',
+  lazy: async () => {
+    const { Reports, reportsLoader } = await import('./Reports')
+    return { element: <Reports />, loader: reportsLoader }
+  }
+}
+```
+
+`lazy` 让该路由的组件与 loader 都按需加载——首屏只下载当前路径所需代码。
+
+### Framework Mode（v7）
+
+React Router v7 把 Remix 整体并入，提供"框架模式"：文件式路由、SSR、`createServer` API。如需要 SSR / 数据 API 的全套体验，可直接用框架模式或 Remix。
+
+## TanStack Router
+
+类型安全是其最大卖点：路径参数、search 参数、loader 返回值，全部由 TS 自动推断。
+
+```bash
+pnpm add @tanstack/react-router
+pnpm add -D @tanstack/router-plugin
+```
+
+### 文件式路由
+
+```text
+src/routes/
+├── __root.tsx                   # 根布局
+├── index.tsx                    # /
+├── about.tsx                    # /about
+├── users/
+│   ├── route.tsx                # /users 布局
+│   ├── index.tsx                # /users
+│   └── $id.tsx                  # /users/:id
+└── _authenticated/              # _ 前缀 = 不出现在 URL（pathless layout）
+    └── settings.tsx             # /settings
+```
+
+```tsx filename="src/routes/__root.tsx"
+import { Outlet, createRootRoute, Link } from '@tanstack/react-router'
+
+export const Route = createRootRoute({
+  component: () => (
+    <>
+      <nav>
+        <Link to="/">Home</Link>
+        <Link to="/users">Users</Link>
+      </nav>
+      <Outlet />
+    </>
+  )
+})
+```
+
+```tsx filename="src/routes/users/$id.tsx"
+import { createFileRoute } from '@tanstack/react-router'
+import { z } from 'zod'
+
+export const Route = createFileRoute('/users/$id')({
+  loader: ({ params }) => fetchUser(params.id),
+  validateSearch: z.object({
+    tab: z.enum(['info', 'posts']).default('info')
+  }),
+  component: UserDetail
+})
+
+function UserDetail() {
+  const user = Route.useLoaderData()          // 类型自动推断为 User
+  const { id } = Route.useParams()            // params.id: string
+  const { tab } = Route.useSearch()           // tab: 'info' | 'posts'
+  return <h1>{user.name} - {tab}</h1>
+}
+```
+
+### 类型化 Link
+
+```tsx
+<Link to="/users/$id" params={{ id: '123' }} search={{ tab: 'posts' }}>
+  View
+</Link>
+
+// ✗ 编译期报错：缺 id / 多余字段 / tab 不在枚举
+<Link to="/users/$id" params={{}} />
+<Link to="/users/$id" params={{ id: '123' }} search={{ tab: 'wrong' }} />
+```
+
+所有路由信息在编译期就能验证，无运行时拼路径错误。
+
+### Loader 与缓存
+
+```tsx
+export const Route = createFileRoute('/users/$id')({
+  loader: ({ params, context }) => context.queryClient.ensureQueryData({
+    queryKey: ['user', params.id],
+    queryFn: () => fetchUser(params.id)
+  }),
+  staleTime: 1000 * 60                        // 1 分钟内复用数据
+})
+```
+
+可以与 TanStack Query 无缝集成，loader 直接复用 Query 缓存（详见 [数据请求](/react/api-calls)）。
+
+### Search Params 是头等公民
+
+```tsx
+const Route = createFileRoute('/products')({
+  validateSearch: z.object({
+    page: z.number().default(1),
+    sort: z.enum(['price', 'rating']).default('rating'),
+    tags: z.array(z.string()).default([])
+  })
+})
+
+function Products() {
+  const search = Route.useSearch()            // { page, sort, tags } 全部类型化
+  const navigate = Route.useNavigate()
+  return (
+    <button onClick={() => navigate({ search: prev => ({ ...prev, page: prev.page + 1 }) })}>
+      Next page
+    </button>
+  )
+}
+```
+
+URL 即状态——分页、排序、过滤等参数自动序列化到 query string，刷新与分享链接都保持一致。
+
+## 路由模式选择
+
+什么时候用哪个？
+
+| 需求 | 选择 |
+| ---- | ---- |
+| SPA、生态成熟、团队熟悉 | React Router |
+| 类型安全极致、Search Params 复杂 | TanStack Router |
+| SSR / 路由文件约定 / Edge runtime | Next.js / Remix / TanStack Start（框架，不再选路由库） |
+| 静态站点、内容主导（博客 / 文档） | Astro |
+
+## 路由层面的最佳实践
+
+### 1. 路由文件即模块边界
+
+每个路由对应一个文件夹，包含：
+
+```text
+routes/users/$id/
+├── route.tsx                    # 路由定义 + loader
+├── components/                  # 该路由专属的小组件
+└── hooks/
+```
+
+跨路由复用的代码上移到 `src/components` / `src/lib`。
+
+### 2. 数据加载下沉到路由
+
+```tsx
+// ✗ 在组件里 useEffect 取数据
+function UserDetail() {
+  const [user, setUser] = useState(null)
+  useEffect(() => { fetch(...).then(setUser) }, [])
+}
+
+// ✓ 路由 loader（瀑布消失，可与 SSR 配合）
+export const Route = createFileRoute('/users/$id')({
+  loader: ({ params }) => fetchUser(params.id),
+  component: UserDetail
+})
+```
+
+Loader 让数据在路由匹配阶段并行加载，避免组件挂载后才发请求的"组件 + 数据瀑布"。
+
+### 3. 用 Search Params 表达可分享状态
+
+筛选、排序、分页应放在 URL 而非组件内部 state——刷新页面、分享链接、浏览器前进后退都能正确工作。
+
+### 4. 受保护路由
+
+```tsx
+// React Router
+const router = createBrowserRouter([
+  {
+    element: <RequireAuth />,
+    children: [
+      { path: 'dashboard', element: <Dashboard /> },
+      { path: 'settings', element: <Settings /> }
+    ]
+  }
+])
+
+function RequireAuth() {
+  const auth = useAuth()
+  if (!auth.user) return <Navigate to="/login" replace />
+  return <Outlet />
+}
+```
+
+```tsx
+// TanStack Router
+export const Route = createFileRoute('/_authenticated')({
+  beforeLoad: ({ context, location }) => {
+    if (!context.auth.user) {
+      throw redirect({ to: '/login', search: { redirect: location.href } })
+    }
+  }
+})
+```
+
+### 5. 滚动恢复
+
+React Router 的 `<ScrollRestoration />` 与 TanStack Router 的内置滚动管理都支持"导航后回到正确位置"。SPA 默认不重置滚动位置，需要手动配置。
+
+## 小结
+
+- 自建 SPA 选 React Router 与 TanStack Router 二者之一；
+- TanStack Router 在类型安全与 Search Params 上有显著优势；React Router 胜在生态与平缓的学习曲线；
+- 数据加载下沉到 loader，用 URL 表达可分享状态，是无论用哪个库都通用的好习惯；
+- 全栈应用（SSR、文件路由约定）应直接选框架（Next.js / Remix），路由不再单选。

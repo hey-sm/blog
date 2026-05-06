@@ -1,0 +1,345 @@
+---
+title: 性能指标与预算
+description: Core Web Vitals、TTFB、FCP、TTI 与性能预算的衡量与优化目标
+---
+
+# 性能指标与预算
+
+> "If you can't measure it, you can't improve it." — Peter Drucker
+
+性能优化的第一步永远是**衡量**。本章梳理现代 Web 性能指标体系，以及如何为项目制定可量化的性能预算。所有后续章节的优化效果都将映射到这些指标上。
+
+## 为什么需要指标
+
+凭主观感觉判断"快"或"慢"会带来三个问题：
+
+1. **不可比较**：开发者的 MacBook M3 和用户的低端 Android 完全是两个世界；
+2. **不可监控**：没有数值就无法报警，性能回归会悄无声息地累积；
+3. **不可沟通**：业务方需要"加载快了多少秒"，而不是"我们做了一些优化"。
+
+Google 在 2020 年提出 [Core Web Vitals](https://web.dev/articles/vitals)，将性能体验抽象为三个用户视角的指标。它们不仅是搜索引擎排名的因子，也是行业事实标准。
+
+## Core Web Vitals
+
+### LCP — Largest Contentful Paint
+
+**定义**：视口内最大可见内容（图片、视频海报、大块文本）渲染完成的时间点。
+
+**衡量**：用户主观"页面加载完了吗"的客观替身。
+
+| 阈值 | 评级 |
+| ---- | ---- |
+| ≤ 2.5 s | Good |
+| 2.5–4.0 s | Needs Improvement |
+| > 4.0 s | Poor |
+
+**典型 LCP 元素**：
+
+- `<img>`、`<picture>` 中的图片
+- `<video>` 的 `poster` 帧
+- 含有背景图的 `<div>`
+- 包含文本节点的块级元素
+
+LCP 慢的根因通常是：
+
+1. 服务器响应慢（TTFB 高）
+2. 阻塞渲染的资源（CSS / JS）
+3. 关键资源加载晚（LCP 图片没 preload）
+4. 客户端渲染（CSR）需要等 JS 执行完才能渲染
+
+```js
+// 在生产环境采集 LCP
+new PerformanceObserver((entryList) => {
+  const entries = entryList.getEntries()
+  const lastEntry = entries[entries.length - 1]
+  console.log('LCP:', lastEntry.startTime, lastEntry.element)
+}).observe({ type: 'largest-contentful-paint', buffered: true })
+```
+
+LCP 是一个**变动值**——浏览器会持续上报当前最大的内容元素，直到用户首次交互（点击、滚动、键盘输入）才停止。这意味着懒加载的大图如果在用户滚动前就被加载，可能成为 LCP 元素。
+
+### INP — Interaction to Next Paint
+
+**定义**：从用户交互（点击、敲键、点按）到下一帧绘制完成所经历的最长时间（页面生命周期内取最差值）。
+
+**历史**：2024 年 3 月正式取代 [FID（First Input Delay）](https://web.dev/articles/fid)。FID 只测量首次交互的等待时间，INP 衡量整个会话期间所有交互的最差表现，更贴近真实体验。
+
+| 阈值 | 评级 |
+| ---- | ---- |
+| ≤ 200 ms | Good |
+| 200–500 ms | Needs Improvement |
+| > 500 ms | Poor |
+
+**INP 慢的根因**：
+
+1. 长任务阻塞主线程（> 50 ms 的 JS 任务）
+2. 输入处理函数本身复杂（大量 DOM 更新）
+3. requestAnimationFrame / 渲染过重
+4. 第三方脚本（埋点、A/B、广告）
+
+```js
+// 监听 INP（需要 web-vitals 库或手动整合）
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    // duration 包含 inputDelay + processingTime + presentationDelay
+    console.log('Interaction:', entry.name, 'Duration:', entry.duration)
+  }
+}).observe({ type: 'event', buffered: true, durationThreshold: 16 })
+```
+
+### CLS — Cumulative Layout Shift
+
+**定义**：页面整个生命周期内所有非用户预期布局偏移分数的累计。
+
+**计算**：`impact fraction × distance fraction`，分数越小越好。
+
+| 阈值 | 评级 |
+| ---- | ---- |
+| ≤ 0.1 | Good |
+| 0.1–0.25 | Needs Improvement |
+| > 0.25 | Poor |
+
+**CLS 高的根因**：
+
+1. 图片 / 视频 / iframe 没有指定 `width` 和 `height`
+2. 广告 / 嵌入内容晚于布局完成才插入
+3. Web Font 切换时 FOUT 引起字体回流
+4. 客户端动态注入内容（如骨架屏 → 真实内容尺寸不一致）
+
+```html
+<!-- 反例：图片加载完后下方内容会跳变 -->
+<img src="hero.jpg" />
+
+<!-- 正例：浏览器据 width/height 推算 aspect-ratio，预留空间 -->
+<img src="hero.jpg" width="1200" height="600" />
+
+<!-- 现代写法：CSS aspect-ratio -->
+<img src="hero.jpg" style="aspect-ratio: 2 / 1; width: 100%" />
+```
+
+详见 [响应式图片](/performance/image-responsive#防治-cls)。
+
+## 其他重要指标
+
+Core Web Vitals 之外，以下指标在排查特定问题时仍是关键工具。
+
+### TTFB — Time To First Byte
+
+**定义**：浏览器发出请求到收到响应第一个字节的时间。
+
+**目标**：< **800 ms**（Good），< **1.3 s** 是路线图建议的硬上限。
+
+TTFB 的构成：
+
+```text
+Redirect → DNS → TCP → TLS → Request → Server Processing → First Byte
+                                            ↑
+                                        TTFB 包含到这里
+```
+
+TTFB 慢的常见根因：
+
+| 现象 | 优化方向 |
+| ---- | -------- |
+| DNS 解析慢 | 使用 [`dns-prefetch`](/performance/preload#dns-prefetch) |
+| 没用 HTTP/2 多路复用 | 升级 HTTP/2 / HTTP/3 |
+| 服务器距离远 | 部署 [CDN](/performance/cdn) 或边缘函数 |
+| SSR 同步阻塞 | 流式渲染、缓存计算结果 |
+| 数据库慢查询 | 后端范畴，加索引或缓存层 |
+
+```js
+const navEntry = performance.getEntriesByType('navigation')[0]
+console.log('TTFB:', navEntry.responseStart - navEntry.requestStart)
+```
+
+### FCP — First Contentful Paint
+
+**定义**：浏览器渲染出第一个 DOM 节点（文本、图片、SVG、Canvas）的时间。
+
+**目标**：≤ **1.8 s**（Good）。
+
+FCP 与 LCP 的差异：FCP 是"屏幕上有任何东西"的瞬间，LCP 是"屏幕上的主内容"的瞬间。极端情况下骨架屏会让 FCP 很快，但 LCP 仍很慢。
+
+### TTI — Time to Interactive
+
+**定义**：页面完全可交互（主线程长任务停止 5 s）的时间。Lighthouse 实验室指标，未在 RUM 中标准化。
+
+### TBT — Total Blocking Time
+
+**定义**：FCP 到 TTI 之间，所有长任务（> 50 ms）超出 50 ms 部分的累计。
+
+**目标**：≤ **200 ms**（Good）。
+
+TBT 是 INP 的实验室代理——TBT 高的页面，INP 大概率也差。
+
+### Speed Index
+
+视觉填充的"积分"，越快填满屏幕分数越低。WebPageTest 的拿手指标。
+
+## 指标关系全景图
+
+```text
+┌─ TTFB ─┬─ FCP ─┬───── LCP ──────┬─── TTI ───┐
+│        │       │                │           │
+│ 网络层  │ HTML 解析+CSS+首批 JS │ JS 执行结束 │
+│        │                                    │
+└────────┴── TBT 累计在 FCP→TTI 之间 ─────────┘
+
+INP = 用户交互后到下一帧的延迟（与上面是正交的，覆盖整个生命周期）
+CLS = 整个生命周期的布局偏移累计
+```
+
+## 实验室 vs 真实用户
+
+| 维度 | Lab Data（实验室） | RUM（Real User Monitoring） |
+| ---- | ------------------ | --------------------------- |
+| 工具 | Lighthouse、WebPageTest | `web-vitals` 库、CrUX |
+| 网络环境 | 受控（如 Slow 4G） | 真实用户 |
+| 设备 | 模拟器 | 真实设备 |
+| 用途 | 开发期调试、回归对比 | 监控线上质量 |
+| 缺点 | 与真实分布有差异 | 难以单点排查 |
+
+**两者都需要**：实验室数据用于开发期定位问题，RUM 用于反映用户实际体验。Google 的 [CrUX (Chrome User Experience Report)](https://developer.chrome.com/docs/crux) 是公开可查的全球真实数据集。
+
+## 采集真实用户数据
+
+`web-vitals` 是 Google 官方维护的轻量库（< 2 KB）：
+
+```bash
+npm install web-vitals
+```
+
+```js
+import { onLCP, onINP, onCLS, onFCP, onTTFB } from 'web-vitals'
+
+function sendToAnalytics(metric) {
+  // 推荐用 sendBeacon 防止页面卸载时丢失
+  navigator.sendBeacon('/analytics', JSON.stringify({
+    name: metric.name,
+    value: metric.value,
+    rating: metric.rating,    // 'good' | 'needs-improvement' | 'poor'
+    delta: metric.delta,
+    id: metric.id,            // 同一指标的多次更新共享 id
+    navigationType: metric.navigationType
+  }))
+}
+
+onLCP(sendToAnalytics)
+onINP(sendToAnalytics)
+onCLS(sendToAnalytics)
+onFCP(sendToAnalytics)
+onTTFB(sendToAnalytics)
+```
+
+### 关注分位数，而不是平均数
+
+性能数据是**长尾分布**——99% 用户体验良好的页面，剩下 1% 可能糟糕到 30 秒。平均值会被中位数主导，掩盖最差体验。
+
+| 分位 | 含义 | 用途 |
+| ---- | ---- | ---- |
+| P50 | 中位数 | 大多数用户体验 |
+| P75 | Web Vitals 默认 | 平衡覆盖率与异常 |
+| P95 | 长尾 | 性能预算的硬上限 |
+| P99 | 极端长尾 | 排查异常根因 |
+
+**业界共识**：以 P75 作为达标标准——意味着 75% 的用户都达到 Good 阈值。
+
+## 性能预算（Performance Budget）
+
+性能预算是项目级别的硬约束：
+
+> "首页 JS bundle 不超过 200 KB（gzipped），LCP 在 P75 分位 ≤ 2.5 s。"
+
+### 预算维度
+
+| 维度 | 示例 |
+| ---- | ---- |
+| 时间 | LCP ≤ 2.5 s, TTFB ≤ 800 ms |
+| 字节 | JS ≤ 200 KB, 总页面 ≤ 1.5 MB |
+| 数量 | HTTP 请求 ≤ 50, 第三方脚本 ≤ 5 |
+| 评分 | Lighthouse Performance ≥ 90 |
+
+### roadmap.sh 推荐值（保守起点）
+
+| 项 | 目标 | 理想 |
+| --- | ---- | ---- |
+| 总页面大小 | < 1500 KB | < 500 KB |
+| 加载时间 | < 3 s | < 2 s |
+| TTFB | < 1.3 s | < 800 ms |
+
+### 在 CI 中强制执行
+
+**Lighthouse CI** 是最常见的方案，能在 PR 合并前阻止性能回归：
+
+```yaml
+# .github/workflows/lighthouse.yml
+name: Lighthouse CI
+on: pull_request
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci && npm run build
+      - run: npm install -g @lhci/cli
+      - run: lhci autorun
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+```
+
+`lighthouserc.json`：
+
+```json
+{
+  "ci": {
+    "assert": {
+      "assertions": {
+        "categories:performance": ["error", { "minScore": 0.9 }],
+        "largest-contentful-paint": ["error", { "maxNumericValue": 2500 }],
+        "cumulative-layout-shift": ["error", { "maxNumericValue": 0.1 }],
+        "total-blocking-time": ["warn", { "maxNumericValue": 200 }]
+      }
+    }
+  }
+}
+```
+
+### 预算的执行哲学
+
+预算的价值不在数字本身，而在 **"超预算就必须有人决策"** 这个流程：
+
+- 加入新依赖让 bundle 涨了 30 KB？产品经理批准还是工程师优化？
+- 第三方脚本加了 200 ms TTFB？是否值得？
+
+没有预算的项目，性能会单调劣化——这是熵增定律在前端工程上的体现。
+
+<details>
+<summary>预算应该多严？</summary>
+
+太严会变成形式主义（每次 PR 都被拦），太松等于没有。建议起步策略：
+
+1. 先采集 1 个月的现状数据
+2. 取 P75 当前值的 90% 作为初始目标
+3. 每季度收紧 5–10%
+4. 当业务方需要"加新功能"时，把预算冲突摊到决策桌上
+
+</details>
+
+## 何时停止优化？
+
+**当指标稳定达 Good 阈值，且优化的边际成本超过收益时停止**。把精力转向：
+
+- **真实用户监控**：发现"开发机看不到"的问题
+- **业务指标**：性能 → 转化率 / 留存的关联（A/B 测试验证）
+- **回归防护**：CI 性能门槛、PR 自动评论 bundle 变化
+
+## 小结
+
+- Core Web Vitals 是衡量用户体验的事实标准：LCP（加载）、INP（响应）、CLS（稳定）；
+- TTFB / FCP / TTI / TBT 是辅助诊断工具，理解它们的因果关系比记数字更重要；
+- 实验室数据用于调试，RUM 数据反映真相，两者互补；
+- 关注 P75 分位，而非平均值——长尾分布让平均数撒谎；
+- 性能预算的真正价值是把"超预算"变成必须有人决策的事；
+- 优化没有终点，但有合理的停止点——边际收益递减时转向监控与防回归。

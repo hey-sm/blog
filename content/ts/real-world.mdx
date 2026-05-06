@@ -1,0 +1,422 @@
+---
+title: 实战案例
+description: TypeScript + React 完整 CRUD 实战项目：领域类型设计、API 层、状态管理、错误处理与从 JS 迁移策略
+---
+
+# 实战案例
+
+通过构建一个"任务管理"应用，将前面所学的 TypeScript 类型系统应用到实际项目中。
+
+## 项目结构
+
+```
+src/
+├── types/
+│   └── domain.ts          # 核心领域类型
+├── services/
+│   └── task-service.ts    # API 调用层
+├── hooks/
+│   └── use-tasks.ts       # 状态管理 Hook
+├── components/
+│   ├── task-card.tsx       # 单任务卡片
+│   ├── task-list.tsx       # 任务列表
+│   ├── task-form.tsx       # 创建/编辑表单
+│   └── task-filters.tsx    # 筛选器
+└── app.tsx                 # 根组件
+```
+
+## 第一步：领域类型设计
+
+```ts filename="src/types/domain.ts"
+// 核心实体
+export interface Task {
+  id: number
+  title: string
+  description: string
+  status: TaskStatus
+  priority: Priority
+  assigneeId: number | null
+  tags: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+// 枚举使用联合类型
+export type TaskStatus = 'todo' | 'in_progress' | 'review' | 'done'
+export type Priority = 'low' | 'medium' | 'high' | 'urgent'
+
+// ✅ 从实体派生 CRUD 的 DTO
+export type CreateTaskDTO = Omit<Task, 'id' | 'createdAt' | 'updatedAt'>
+export type UpdateTaskDTO = Partial<Omit<CreateTaskDTO, 'assigneeId'>>
+
+// ✅ 筛选参数
+export interface TaskFilters {
+  status?: TaskStatus
+  priority?: Priority
+  assigneeId?: number
+  search?: string
+}
+
+// ✅ API 响应包装
+export type ApiResponse<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; code: number }
+
+// ✅ 分页
+export interface Paginated<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+}
+```
+
+## 第二步：API 服务层
+
+```ts filename="src/services/task-service.ts"
+import type { Task, CreateTaskDTO, UpdateTaskDTO, TaskFilters, ApiResponse, Paginated } from '../types/domain'
+
+const BASE_URL = '/api/tasks'
+
+async function request<T>(url: string, options?: RequestInit): Promise<ApiResponse<T>> {
+  try {
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options
+    })
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      return {
+        ok: false,
+        error: (body as { message?: string }).message ?? response.statusText,
+        code: response.status
+      }
+    }
+
+    const data = await response.json() as T
+    return { ok: true, data }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Network error',
+      code: 0
+    }
+  }
+}
+
+function buildQuery(filters: TaskFilters): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined) params.set(key, String(value))
+  }
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+export const taskService = {
+  async list(filters: TaskFilters): Promise<ApiResponse<Paginated<Task>>> {
+    return request(`${BASE_URL}${buildQuery(filters)}`)
+  },
+
+  async getById(id: number): Promise<ApiResponse<Task>> {
+    return request(`${BASE_URL}/${id}`)
+  },
+
+  async create(input: CreateTaskDTO): Promise<ApiResponse<Task>> {
+    return request(BASE_URL, {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  },
+
+  async update(id: number, input: UpdateTaskDTO): Promise<ApiResponse<Task>> {
+    return request(`${BASE_URL}/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input)
+    })
+  },
+
+  async remove(id: number): Promise<ApiResponse<void>> {
+    return request(`${BASE_URL}/${id}`, { method: 'DELETE' })
+  }
+}
+```
+
+## 第三步：自定义 Hook——状态管理
+
+```ts filename="src/hooks/use-tasks.ts"
+import { useState, useCallback } from 'react'
+import { taskService } from '../services/task-service'
+import type { Task, CreateTaskDTO, UpdateTaskDTO, TaskFilters } from '../types/domain'
+
+type MutationStatus = 'idle' | 'pending' | 'success' | 'error'
+
+export function useTasks(initialFilters: TaskFilters = {}) {
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [total, setTotal] = useState(0)
+  const [filters, setFilters] = useState<TaskFilters>(initialFilters)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [mutationStatus, setMutationStatus] = useState<MutationStatus>('idle')
+
+  const fetchTasks = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    const result = await taskService.list(filters)
+    if (result.ok) {
+      setTasks(result.data.items)
+      setTotal(result.data.total)
+    } else {
+      setError(result.error)
+    }
+    setLoading(false)
+  }, [filters])
+
+  const createTask = async (input: CreateTaskDTO) => {
+    setMutationStatus('pending')
+    const result = await taskService.create(input)
+    if (result.ok) {
+      setTasks(prev => [result.data, ...prev])
+      setMutationStatus('success')
+    } else {
+      setMutationStatus('error')
+      setError(result.error)
+    }
+    return result
+  }
+
+  const updateTask = async (id: number, input: UpdateTaskDTO) => {
+    setMutationStatus('pending')
+    const result = await taskService.update(id, input)
+    if (result.ok) {
+      setTasks(prev => prev.map(t => t.id === id ? result.data : t))
+      setMutationStatus('success')
+    } else {
+      setMutationStatus('error')
+      setError(result.error)
+    }
+    return result
+  }
+
+  const deleteTask = async (id: number) => {
+    setMutationStatus('pending')
+    const result = await taskService.remove(id)
+    if (result.ok) {
+      setTasks(prev => prev.filter(t => t.id !== id))
+      setMutationStatus('success')
+    } else {
+      setMutationStatus('error')
+      setError(result.error)
+    }
+    return result
+  }
+
+  return {
+    tasks, total, filters, loading, error, mutationStatus,
+    setFilters, fetchTasks, createTask, updateTask, deleteTask
+  } as const
+}
+```
+
+## 第四步：组件实现
+
+### TaskCard
+
+```tsx filename="src/components/task-card.tsx"
+import type { Task } from '../types/domain'
+
+interface TaskCardProps {
+  task: Task
+  onEdit: (id: number) => void
+  onDelete: (id: number) => void
+  onStatusChange: (id: number, status: Task['status']) => void
+}
+
+const STATUS_LABELS: Record<Task['status'], string> = {
+  todo: 'To Do',
+  in_progress: 'In Progress',
+  review: 'In Review',
+  done: 'Done'
+}
+
+const PRIORITY_COLORS: Record<Task['priority'], string> = {
+  low: 'bg-gray-100',
+  medium: 'bg-blue-100',
+  high: 'bg-orange-100',
+  urgent: 'bg-red-100'
+}
+
+export function TaskCard({ task, onEdit, onDelete, onStatusChange }: TaskCardProps) {
+  return (
+    <div className="task-card border rounded p-4">
+      <div className="flex justify-between items-start">
+        <h3 className="font-semibold">{task.title}</h3>
+        <span className={`text-xs px-2 py-1 rounded ${PRIORITY_COLORS[task.priority]}`}>
+          {task.priority}
+        </span>
+      </div>
+      <p className="text-gray-600 text-sm mt-2">{task.description}</p>
+      <div className="flex gap-2 mt-3 items-center">
+        <select
+          value={task.status}
+          onChange={e => onStatusChange(task.id, e.target.value as Task['status'])}
+          className="text-sm border rounded px-2 py-1"
+        >
+          {Object.entries(STATUS_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        {task.tags.map(tag => (
+          <span key={tag} className="text-xs bg-gray-200 px-2 py-0.5 rounded">{tag}</span>
+        ))}
+        <div className="ml-auto flex gap-2">
+          <button onClick={() => onEdit(task.id)} className="text-blue-600 text-sm">Edit</button>
+          <button onClick={() => onDelete(task.id)} className="text-red-600 text-sm">Delete</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+```
+
+### TaskFilters
+
+```tsx filename="src/components/task-filters.tsx"
+import type { TaskFilters, TaskStatus, Priority } from '../types/domain'
+
+interface FilterBarProps {
+  filters: TaskFilters
+  onChange: (filters: TaskFilters) => void
+}
+
+export function FilterBar({ filters, onChange }: FilterBarProps) {
+  const update = (partial: Partial<TaskFilters>) => {
+    onChange({ ...filters, ...partial })
+  }
+
+  return (
+    <div className="flex gap-4 mb-4">
+      <input
+        type="text"
+        placeholder="Search tasks..."
+        value={filters.search ?? ''}
+        onChange={e => update({ search: e.target.value || undefined })}
+        className="border rounded px-3 py-2 flex-1"
+      />
+      <select
+        value={filters.status ?? ''}
+        onChange={e => update({ status: (e.target.value || undefined) as TaskStatus | undefined })}
+        className="border rounded px-3 py-2"
+      >
+        <option value="">All Status</option>
+        <option value="todo">To Do</option>
+        <option value="in_progress">In Progress</option>
+        <option value="review">In Review</option>
+        <option value="done">Done</option>
+      </select>
+      <select
+        value={filters.priority ?? ''}
+        onChange={e => update({ priority: (e.target.value || undefined) as Priority | undefined })}
+        className="border rounded px-3 py-2"
+      >
+        <option value="">All Priority</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="urgent">Urgent</option>
+      </select>
+    </div>
+  )
+}
+```
+
+### 根组件 App
+
+```tsx filename="src/app.tsx"
+import { useEffect } from 'react'
+import { useTasks } from './hooks/use-tasks'
+import { TaskCard } from './components/task-card'
+import { FilterBar } from './components/task-filters'
+import { TaskForm } from './components/task-form'
+import type { CreateTaskDTO } from './types/domain'
+
+export function App() {
+  const {
+    tasks, loading, error, filters,
+    setFilters, fetchTasks, createTask, updateTask, deleteTask
+  } = useTasks()
+
+  useEffect(() => { fetchTasks() }, [fetchTasks])
+
+  const handleCreate = async (input: CreateTaskDTO) => {
+    await createTask(input)
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto p-8">
+      <h1 className="text-2xl font-bold mb-6">Task Manager</h1>
+
+      <FilterBar filters={filters} onChange={setFilters} />
+
+      <TaskForm onSubmit={handleCreate} />
+
+      {loading && <div>Loading...</div>}
+      {error && <div className="text-red-600 mb-4">{error}</div>}
+
+      <div className="space-y-3 mt-6">
+        {tasks.map(task => (
+          <TaskCard
+            key={task.id}
+            task={task}
+            onEdit={(id) => console.log('edit', id)}
+            onDelete={deleteTask}
+            onStatusChange={(id, status) => updateTask(id, { status })}
+          />
+        ))}
+      </div>
+
+      {!loading && tasks.length === 0 && (
+        <div className="text-gray-500 text-center py-8">No tasks found</div>
+      )}
+    </div>
+  )
+}
+```
+
+## 类型设计回顾
+
+这个案例体现了以下类型设计原则：
+
+| 原则 | 体现 |
+|------|------|
+| 单一数据源 | `Task` 是唯一实体，DTO 由 `Pick`/`Omit`/`Partial` 派生 |
+| 联合优于枚举 | `TaskStatus` 和 `Priority` 用联合类型，零运行时开销 |
+| Discriminated Union | `ApiResponse<T>` 用 `ok` 字段区分成功和失败 |
+| as const | `useTasks` 返回 `as const` 保留元组推断 |
+| Record 类型安全映射 | `STATUS_LABELS` 和 `PRIORITY_COLORS` 用 `Record` 保证穷尽性 |
+
+## 从 JavaScript 渐进迁移
+
+如果项目从 JavaScript 起步，以下迁移策略推荐：
+
+**阶段 1：基础设施**
+- 添加 `tsconfig.json`（`strict: false` + `allowJs: true`）
+- 将 `.js` 重命名为 `.ts`（不用 `tsc --init`）
+- 使用 `@ts-check` 注释先在 JS 文件中实验类型检查
+
+**阶段 2：类型地基**
+- 优先为 API 层加类型（请求/响应类型）
+- 为核心数据结构加类型（User、Product 等领域对象）
+- 启用 `noImplicitAny`，从 `unknown` 开始
+
+**阶段 3：严格模式**
+- 逐步开启 `strict` 的子项
+- `strictNullChecks` → `noImplicitAny` → `strictFunctionTypes`
+- 最后开启完整 `strict: true`
+
+## 总结
+
+TypeScript 的类型系统是递进的——你不需要一次性学会所有高级特性就可以获得价值。从基础的 Props 标注和 API 类型开始，逐步引入泛型、工具类型和条件类型，在需求驱动下学习。
+
+[回到 TypeScript 知识体系导读](/ts) 查看完整章节索引。

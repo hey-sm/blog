@@ -1,0 +1,422 @@
+---
+title: 样式方案
+description: CSS Modules、Tailwind、CSS-in-JS 与 Headless UI 组件库选型
+---
+
+# 样式方案
+
+React 不规定样式怎么写——任何 CSS 方案都能用。本章覆盖主流选项的工程对比与最佳实践：
+
+- **传统 CSS**：CSS Modules、PostCSS、Sass
+- **原子化 CSS**：Tailwind CSS、UnoCSS、Panda CSS
+- **CSS-in-JS**：Emotion、styled-components、vanilla-extract
+- **组件库**：Material UI、Chakra UI、Mantine
+- **Headless UI**：Radix、React Aria、shadcn/ui、Ark UI
+
+## 选型对比
+
+| 方案 | 心智成本 | 运行时开销 | TS 体验 | SSR / RSC | 适合场景 |
+| ---- | -------- | ---------- | ------- | --------- | -------- |
+| 全局 CSS | 低 | 0 | — | ✅ | 极简项目、Demo |
+| CSS Modules | 低 | 0 | ⚠️ 类型生成插件 | ✅ | 小到中型项目 |
+| Tailwind | 中 | 0 | ✅ | ✅ | 中大型，团队约定优先 |
+| Panda CSS | 中 | 0（编译期） | ✅ | ✅ | 想要 Tailwind 体验 + 设计令牌 |
+| Emotion / styled-components | 中 | 有（运行时注入） | ✅ | ⚠️ RSC 不友好 |
+| vanilla-extract | 中 | 0 | ✅ | ✅ | 类型安全 + 零运行时 |
+| Material UI | 低 | 中 | ✅ | ⚠️ | 需要"开箱即用"的应用 |
+| Radix + Tailwind | 中 | 0 | ✅ | ✅ | **现代主流**：可定制 + 无障碍 |
+| shadcn/ui | 中 | 0 | ✅ | ✅ | 复制式组件库（推荐） |
+
+### 当前主流（2026）
+
+社区共识正向**「Tailwind + Radix（或 React Aria）+ shadcn/ui」**收敛。Vercel、Linear、Cal.com、shadcn/ui 自身都采用这套组合。本章按此推荐展开。
+
+## CSS Modules
+
+每个 `.module.css` 文件作用域隔离——类名在编译期被改写为唯一标识：
+
+```css filename="Button.module.css"
+.button {
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+
+.primary {
+  background: blue;
+  color: white;
+}
+```
+
+```tsx filename="Button.tsx"
+import styles from './Button.module.css'
+
+export function Button({ variant }: { variant: 'primary' | 'secondary' }) {
+  return (
+    <button className={`${styles.button} ${styles[variant]}`}>
+      Click
+    </button>
+  )
+}
+```
+
+#### 类名拼接
+
+多个类名可用 [`clsx`](https://github.com/lukeed/clsx) 简化：
+
+```tsx
+import clsx from 'clsx'
+
+<button className={clsx(
+  styles.button,
+  styles[variant],
+  disabled && styles.disabled,
+  className
+)} />
+```
+
+#### 类型生成
+
+默认 `import styles from ...` 是 `Record<string, string>`，类名拼错不会报错。配合 [`typescript-plugin-css-modules`](https://github.com/mrmckeb/typescript-plugin-css-modules) 或 Vite 插件可获得精确类型。
+
+#### CSS Modules 的局限
+
+- 无法做条件值（媒体查询、变量动态切换需 inline style）
+- 复用样式靠组合多个类，比 Tailwind 啰嗦
+- 设计令牌的统一管理需要约定
+
+适合"组件相对独立、UI 不强需求统一"的项目。
+
+## Tailwind CSS
+
+原子化 CSS，把样式拆为单一职责的类，直接写在 className：
+
+```bash
+pnpm add -D tailwindcss @tailwindcss/vite
+```
+
+```ts filename="vite.config.ts"
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig({
+  plugins: [tailwindcss(), react()]
+})
+```
+
+```css filename="src/index.css"
+@import 'tailwindcss';
+```
+
+```tsx
+<button className="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+  Click
+</button>
+```
+
+### 心智模型
+
+- 不写自定义 CSS，所有样式由原子类组合
+- 设计令牌（颜色、间距、字号）来自 `tailwind.config`
+- 媒体查询：`md:px-6 lg:px-8`
+- 状态：`hover:` `focus:` `disabled:` `data-[state=open]:`
+
+### 抽象重复
+
+行内 className 写多了会冗长。常用模式：
+
+```tsx
+// 1. 抽组件（推荐）
+function PrimaryButton({ className, ...props }: ButtonProps) {
+  return (
+    <button
+      className={cn('px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700', className)}
+      {...props}
+    />
+  )
+}
+
+// 2. CVA（Class Variance Authority）：类型化变体
+import { cva } from 'class-variance-authority'
+
+const button = cva('rounded font-medium', {
+  variants: {
+    variant: {
+      primary: 'bg-blue-600 text-white hover:bg-blue-700',
+      ghost: 'hover:bg-gray-100'
+    },
+    size: {
+      sm: 'px-2 py-1 text-sm',
+      md: 'px-3 py-2',
+      lg: 'px-4 py-3 text-lg'
+    }
+  },
+  defaultVariants: { variant: 'primary', size: 'md' }
+})
+
+<button className={button({ variant: 'ghost', size: 'sm' })}>Click</button>
+```
+
+### `cn` 工具函数
+
+`clsx` + `tailwind-merge`，处理"后写的 utility 类覆盖前面的"：
+
+```tsx
+import { type ClassValue, clsx } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+cn('p-4 p-6')                                  // → 'p-6'   tw-merge 智能合并
+```
+
+### Tailwind 4 的变化
+
+Tailwind 4（2024 末发布）的关键变化：
+
+- **零配置**：无需 `tailwind.config.js`，CSS 中即可声明令牌
+- **CSS-first**：用 `@theme` 块定义设计令牌
+
+```css
+@import 'tailwindcss';
+
+@theme {
+  --color-brand: #1d4ed8;
+  --font-sans: 'Inter', system-ui, sans-serif;
+}
+```
+
+- **更快的编译**：基于 Lightning CSS（Rust），增量编译显著加速
+- **现代 CSS**：使用 `@layer`、容器查询、`@starting-style` 等新特性
+
+### Tailwind 的合理质疑
+
+> "类名太长，可读性差。"
+
+实践经验：经验多了之后，行内 utility **比命名 CSS 类更易读**——你能直接看到样式值，不必跳转到 CSS 文件。CVA 抽象处理超长情况。
+
+> "设计令牌散落在配置中。"
+
+Tailwind 4 的 `@theme` 块解决了这点。
+
+> "CSS 文件膨胀。"
+
+Tailwind 仅生成实际用到的类，扫描出多少类就生成多少。
+
+## Panda CSS
+
+零运行时 + 类型化 + 设计令牌一等公民——介于 Tailwind 与 vanilla-extract 之间：
+
+```tsx
+import { css } from '../styled-system/css'
+
+<button className={css({
+  px: '3',
+  py: '2',
+  bg: 'blue.600',
+  color: 'white',
+  _hover: { bg: 'blue.700' }
+})}>Click</button>
+```
+
+API 类似 Chakra UI / Stitches，但所有样式在编译期生成静态 CSS。适合喜欢"对象化样式 + 强类型"的团队。
+
+## CSS-in-JS（运行时）
+
+**Emotion** / **styled-components** 是经典代表：
+
+```tsx
+import styled from '@emotion/styled'
+
+const Button = styled.button<{ variant: 'primary' | 'ghost' }>`
+  padding: 8px 12px;
+  background: ${p => p.variant === 'primary' ? 'blue' : 'transparent'};
+`
+
+<Button variant="primary">Click</Button>
+```
+
+#### 缺点
+
+- 运行时注入样式：增加 bundle 与首屏耗时
+- **不兼容 React Server Components**（运行时需要 React Context）
+- 需要专门的 SSR 流式注入处理
+
+新项目除非有特殊需求（复杂的样式 prop 推断、与现有 styled-components 体系集成），不推荐采用。可改为 **vanilla-extract**：与 styled-components 类似的 API，但**编译期生成 CSS**，无运行时开销，与 RSC 兼容。
+
+## 组件库 vs Headless UI
+
+### 组件库
+
+**Material UI** / **Chakra UI** / **Mantine** / **Ant Design**：开箱即用的完整组件，自带样式与交互。
+
+优点：
+
+- 快速搭建管理后台
+- 设计风格立等可取
+
+缺点：
+
+- 改样式费劲，深度定制时常需要打补丁
+- 包大小较大
+- 与 Tailwind 等方案混用别扭
+
+### Headless UI
+
+只提供"行为 + 无障碍 + 状态"，**完全不带样式**——你用任何方式（Tailwind、CSS Modules、style）涂装。
+
+| 库 | 特点 |
+| -- | ---- |
+| [**Radix UI**](https://www.radix-ui.com) | 最流行，组件全，API 设计精良，无障碍一流 |
+| [**React Aria**](https://react-spectrum.adobe.com/react-aria/) | Adobe 出品，无障碍最强（WCAG）  |
+| [**Headless UI**](https://headlessui.com)（Tailwind 团队） | 与 Tailwind 一家出品，组件较少 |
+| [**Ark UI**](https://ark-ui.com) | 跨框架（React/Vue/Solid）共享行为 |
+
+### Radix UI 示例
+
+```tsx
+import * as Dialog from '@radix-ui/react-dialog'
+
+<Dialog.Root>
+  <Dialog.Trigger asChild>
+    <button className="px-3 py-2 bg-blue-600 text-white rounded">Open</button>
+  </Dialog.Trigger>
+  <Dialog.Portal>
+    <Dialog.Overlay className="fixed inset-0 bg-black/50" />
+    <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white p-6 rounded-lg">
+      <Dialog.Title>Are you sure?</Dialog.Title>
+      <Dialog.Description>This will delete the item.</Dialog.Description>
+      <Dialog.Close asChild>
+        <button>Cancel</button>
+      </Dialog.Close>
+    </Dialog.Content>
+  </Dialog.Portal>
+</Dialog.Root>
+```
+
+Radix 处理了所有难点：
+
+- 焦点陷阱与恢复
+- 键盘导航（ESC 关闭、Tab 循环）
+- ARIA 属性
+- 模态外点击关闭
+- Portal 渲染避免 z-index 冲突
+
+你只负责**给类名涂装**。
+
+## shadcn/ui
+
+```bash
+pnpm dlx shadcn@latest init
+pnpm dlx shadcn@latest add button dialog form
+```
+
+它**不是 npm 包**，而是 **CLI 把组件源码复制到你项目里**。每个组件是 Radix + Tailwind 的封装，源码完全归你。
+
+```text
+src/components/ui/
+├── button.tsx
+├── dialog.tsx
+├── form.tsx
+└── ...
+```
+
+```tsx
+import { Button } from '@/components/ui/button'
+
+<Button variant="default" size="lg">Click</Button>
+```
+
+### 为什么这种"反包管理"模式有效
+
+- **零黑盒**：组件源码可改，不需要 monkey-patch
+- **零版本锁**：库升级不影响你的组件
+- **零包大小负担**：未用的组件不存在
+- **设计统一**：所有组件共享同一套 token + 风格
+
+shadcn/ui 是当前 React 生态最受推崇的组件方案——Vercel、Linear、Cal.com、Resend 等都在用。
+
+## 实战推荐
+
+### 默认配方
+
+```text
+Tailwind CSS         样式
++ Radix UI           Headless 行为
++ shadcn/ui          复用模板
++ class-variance-authority   变体
++ tailwind-merge + clsx      类名工具
+```
+
+完整 `package.json` 大致：
+
+```json
+{
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.x",
+    "@radix-ui/react-dropdown-menu": "^2.x",
+    "class-variance-authority": "^0.7.x",
+    "clsx": "^2.x",
+    "lucide-react": "^0.x",
+    "tailwind-merge": "^2.x"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.x",
+    "@tailwindcss/vite": "^4.x"
+  }
+}
+```
+
+### 按项目规模
+
+| 规模 | 推荐 |
+| ---- | ---- |
+| 单页小工具 / Demo | 全局 CSS 或 CSS Modules |
+| 中型 SaaS / 后台 | Tailwind + shadcn/ui |
+| 设计系统强约束 | Panda CSS 或 Tailwind + 内部组件库 |
+| 后台管理（追求开发速度） | Mantine / Material UI |
+| 移动端 / 跨平台 | Tamagui / NativeWind |
+
+## 暗黑模式
+
+Tailwind 内置暗色支持：
+
+```tsx
+<div className="bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100">
+  ...
+</div>
+```
+
+切换实现：
+
+```tsx
+import { useState, useEffect } from 'react'
+
+function useTheme() {
+  const [theme, setTheme] = useState<'light' | 'dark'>(() =>
+    localStorage.getItem('theme') as 'light' | 'dark' || 'light'
+  )
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+    localStorage.setItem('theme', theme)
+  }, [theme])
+
+  return [theme, setTheme] as const
+}
+```
+
+或使用 [`next-themes`](https://github.com/pacocoursey/next-themes)（不止 Next 可用）：
+
+```tsx
+<ThemeProvider attribute="class" defaultTheme="system">
+  <App />
+</ThemeProvider>
+```
+
+## 小结
+
+- 没有"最好"的样式方案，只有最适合团队的——但 Tailwind + Radix + shadcn/ui 是当前生态最强的默认组合；
+- CSS Modules 适合简单项目；CSS-in-JS 在 RSC 时代已退居二线（除非选 vanilla-extract）；
+- Headless UI 把"行为 + 无障碍"与"视觉"解耦，是构建可定制设计系统的关键工具；
+- shadcn/ui 的"复制源码"模式让组件库的维护与定制都更简单。

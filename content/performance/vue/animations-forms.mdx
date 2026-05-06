@@ -1,0 +1,712 @@
+---
+title: 动画与表单
+description: Transition、TransitionGroup、v-model 性能、VueUse 防抖、表单库与 GPU 加速
+---
+
+# 动画与表单
+
+动画与表单是 Vue 应用中**两个最容易踩性能坑**的高频场景：
+
+- **动画**：每帧 16.67 ms 必须完成，错用 CSS 属性会让 FPS 降到 20
+- **表单**：v-model 高频更新可能让一个搜索框拖慢整页
+
+本章覆盖 Vue 3 的 Transition / TransitionGroup、CSS 动画属性选择、v-model 性能、VueUse 防抖、第三方表单库的取舍。
+
+## 动画的性能基础
+
+通用原则与 [React 动画](/performance/react/animations-forms#动画的性能基础) 一致——核心是：**只用 transform 和 opacity**。
+
+```text
+属性          触发的渲染阶段            成本
+transform     仅 Composite             极低（GPU）
+opacity       仅 Composite             极低（GPU）
+color         Paint                    中
+width/height  Layout + Paint           高
+left/top      Layout + Paint           高
+box-shadow    Paint（重绘）             高
+```
+
+```css
+/* ❌ 引发 layout */
+@keyframes slideIn {
+  from { left: -100%; }
+  to   { left: 0; }
+}
+
+/* ✅ 仅 composite */
+@keyframes slideIn {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(0); }
+}
+```
+
+详见通用章 [CSS 优化 § 渲染性能](/performance/css#渲染性能运行时)。
+
+## Vue 的 Transition
+
+`<Transition>` 是 Vue 内置的过渡组件——基于 CSS 类切换实现：
+
+```vue
+<template>
+  <Transition name="fade">
+    <p v-if="show">Hello</p>
+  </Transition>
+</template>
+
+<style>
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+</style>
+```
+
+### 类的状态机
+
+```text
+进入：
+  initial      → enter-from + enter-active
+  next frame   → enter-to (替换 enter-from) + enter-active
+  end          → 移除所有
+
+离开：
+  initial      → leave-from + leave-active
+  next frame   → leave-to (替换 leave-from) + leave-active
+  end          → 移除并卸载
+```
+
+### 性能特征
+
+```text
+Transition 本身：零运行时开销（仅类切换）
+关键看你的 CSS：
+  ├─ transform / opacity ──► 60 FPS
+  └─ width / height / left / top ──► 帧率不可预期
+```
+
+### enter/leave hooks（JS 动画）
+
+```vue
+<Transition
+  @before-enter="onBeforeEnter"
+  @enter="onEnter"
+  @after-enter="onAfterEnter"
+  @before-leave="onBeforeLeave"
+  @leave="onLeave"
+  @after-leave="onAfterLeave"
+  :css="false"                            /* 关闭 CSS 钩子 */
+>
+  <div v-if="show">Hello</div>
+</Transition>
+
+<script setup>
+function onEnter(el, done) {
+  // GSAP / Anime.js 等
+  gsap.to(el, { opacity: 1, y: 0, duration: 0.3, onComplete: done })
+}
+</script>
+```
+
+`:css="false"` 关闭 CSS 类自动切换——完全由 JS 控制。性能取决于动画库实现。
+
+### mode
+
+```vue
+<Transition name="fade" mode="out-in">
+  <component :is="currentTab" />
+</Transition>
+```
+
+| mode | 行为 |
+| ---- | ---- |
+| 默认 | 进入与离开同时发生 |
+| `out-in` | 先离开后进入（推荐） |
+| `in-out` | 先进入后离开 |
+
+`out-in` 是切换组件 / 路由时最常用的——避免新旧重叠。
+
+### 路由切换动画
+
+```vue
+<RouterView v-slot="{ Component }">
+  <Transition name="page" mode="out-in">
+    <component :is="Component" :key="$route.fullPath" />
+  </Transition>
+</RouterView>
+```
+
+```css
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.2s ease;
+}
+.page-enter-from,
+.page-leave-to {
+  opacity: 0;
+}
+```
+
+> 注意：路由动画时长应短（< 300ms），否则用户感觉"页面卡"。
+
+## TransitionGroup
+
+为列表的进入/离开/移动添加动画：
+
+```vue
+<TransitionGroup name="list" tag="ul">
+  <li v-for="item in items" :key="item.id">{{ item.name }}</li>
+</TransitionGroup>
+
+<style>
+.list-enter-active,
+.list-leave-active {
+  transition: all 0.3s ease;
+}
+.list-enter-from,
+.list-leave-to {
+  opacity: 0;
+  transform: translateX(30px);
+}
+.list-leave-active {
+  position: absolute;                    /* 让其它项平滑移动 */
+}
+.list-move {
+  transition: transform 0.3s ease;       /* 移动动画 */
+}
+</style>
+```
+
+`v-move` 利用 FLIP（First Last Invert Play）技术——测量前后位置 + 用 transform 模拟过渡。
+
+### 性能注意
+
+- TransitionGroup 内的项需要**唯一 stable key**
+- 大列表（500+）上动画会卡——考虑禁用动画或用 transform-only
+- 配合虚拟化时，进入/离开动画与虚拟化的卸载/挂载冲突——**慎用**
+
+## CSS 动画的高级技巧
+
+### will-change
+
+```css
+.draggable {
+  will-change: transform;
+}
+```
+
+提示浏览器"这个元素会变"——预先提升到合成层。
+
+⚠️ 滥用引发副作用：
+
+- 每个合成层占显存
+- 静态元素也加 `will-change` → 资源浪费
+- 应在交互**前**加，**后**移除：
+
+```vue
+<script setup>
+import { ref } from 'vue'
+
+const isDragging = ref(false)
+</script>
+
+<template>
+  <div
+    :style="{ willChange: isDragging ? 'transform' : 'auto' }"
+    @mousedown="isDragging = true"
+    @mouseup="isDragging = false"
+  >
+    Draggable
+  </div>
+</template>
+```
+
+### contain
+
+```css
+.card {
+  contain: layout style paint;
+}
+```
+
+告诉浏览器"这个元素的样式 / 布局 / 绘制是自包含的"——限制变化的传播范围。详见通用章 [CSS 优化 § contain](/performance/css#contain-属性)。
+
+### content-visibility
+
+```css
+.section {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 600px;
+}
+```
+
+视口外内容跳过 layout / paint——大文档场景可显著优化。
+
+## 表单的性能挑战
+
+### v-model 的成本
+
+```vue
+<template>
+  <input v-model="name" />
+  <input v-model="email" />
+  <input v-model="age" />
+</template>
+
+<script setup>
+import { reactive } from 'vue'
+
+const formData = reactive({
+  name: '', email: '', age: ''
+})
+</script>
+```
+
+每次输入：
+
+- v-model 触发 setter
+- 响应式系统通知所有依赖
+- 组件渲染 effect 触发
+- 所有输入框重新生成 vnode（PatchFlag 减少实际 DOM 操作）
+
+得益于编译时优化（PatchFlag），单字段变化大多只 patch 该 input——但若整组件含大量响应式 / 计算属性，输入仍会引发雪崩。
+
+### v-model 修饰符
+
+```vue
+<input v-model.lazy="name" />          <!-- change 事件，而非 input -->
+<input v-model.number="age" />         <!-- 自动转 Number -->
+<input v-model.trim="email" />         <!-- 自动 trim -->
+```
+
+`v-model.lazy` 减少高频更新——失焦才同步。适合不需要实时校验的字段。
+
+## 防抖与节流
+
+### 经典：搜索输入
+
+```vue
+<script setup>
+import { ref, watch } from 'vue'
+
+const query = ref('')
+const results = ref([])
+
+let timer
+watch(query, (val) => {
+  clearTimeout(timer)
+  timer = setTimeout(async () => {
+    results.value = await fetch(`/api/search?q=${val}`).then(r => r.json())
+  }, 300)
+})
+</script>
+```
+
+或用 VueUse：
+
+```vue
+<script setup>
+import { ref, watch } from 'vue'
+import { refDebounced } from '@vueuse/core'
+
+const query = ref('')
+const debouncedQuery = refDebounced(query, 300)
+
+watch(debouncedQuery, async (val) => {
+  results.value = await fetch(`/api/search?q=${val}`).then(r => r.json())
+})
+</script>
+
+<template>
+  <input v-model="query" />            <!-- query 立即更新 → 输入框流畅 -->
+  <ResultList :results="results" />    <!-- results 基于 debouncedQuery -->
+</template>
+```
+
+### refThrottled
+
+高频事件采样（resize、mousemove）：
+
+```ts
+import { useEventListener, refThrottled } from '@vueuse/core'
+
+const mouseY = ref(0)
+const throttledY = refThrottled(mouseY, 100)
+
+useEventListener('mousemove', (e) => mouseY.value = e.clientY)
+```
+
+或更直接：
+
+```ts
+import { useThrottleFn } from '@vueuse/core'
+
+const handleResize = useThrottleFn(() => {
+  // ...
+}, 200)
+
+useEventListener('resize', handleResize, { passive: true })
+```
+
+### useDebouncedRefHistory
+
+VueUse 的进阶——防抖 + 历史记录：
+
+```ts
+import { useRefHistory, useDebouncedRefHistory } from '@vueuse/core'
+
+const text = ref('')
+const { history, undo, redo } = useDebouncedRefHistory(text, { debounce: 500 })
+```
+
+实现"撤销/重做"——而不是每个字符一次记录。
+
+## 表单库选型
+
+Vue 3 表单库选项：
+
+| 库 | 特点 | 推荐场景 |
+| -- | ---- | -------- |
+| **VeeValidate** | 老牌、生态广 | 复杂校验 |
+| **FormKit** | 高度集成、UI 完整 | 快速开发 |
+| **vee-validate v4** | Composition API 友好 | 新项目 |
+| **@vorms** | 轻量 | 简单表单 |
+| **@vue-formily** | 工业级 | 大型表单 |
+| **@tanstack/vue-form** | TS 优先 | TypeScript 项目 |
+
+### VeeValidate 示例
+
+```vue
+<script setup>
+import { useForm, useField } from 'vee-validate'
+import * as yup from 'yup'
+
+const schema = yup.object({
+  email: yup.string().email().required(),
+  password: yup.string().min(8).required()
+})
+
+const { handleSubmit, errors } = useForm({ validationSchema: schema })
+const { value: email } = useField('email')
+const { value: password } = useField('password')
+
+const onSubmit = handleSubmit(async (values) => {
+  await api.login(values)
+})
+</script>
+
+<template>
+  <form @submit.prevent="onSubmit">
+    <input v-model="email" />
+    <span>{{ errors.email }}</span>
+    <input v-model="password" type="password" />
+    <span>{{ errors.password }}</span>
+    <button>Submit</button>
+  </form>
+</template>
+```
+
+### TanStack Vue Form
+
+```vue
+<script setup>
+import { useForm } from '@tanstack/vue-form'
+
+const form = useForm({
+  defaultValues: { email: '', password: '' },
+  onSubmit: async ({ value }) => {
+    await api.login(value)
+  }
+})
+</script>
+
+<template>
+  <form @submit.prevent="form.handleSubmit">
+    <form.Field name="email" v-slot="{ field, state }">
+      <input
+        :value="state.value"
+        @input="field.handleChange($event.target.value)"
+      />
+      <span v-if="state.meta.errors[0]">{{ state.meta.errors[0] }}</span>
+    </form.Field>
+    <button>Submit</button>
+  </form>
+</template>
+```
+
+字段级订阅——每个字段独立渲染，互不影响。
+
+### 性能对比（实测）
+
+10 个字段表单输入 100 字符：
+
+| 方案 | 总组件渲染数 |
+| ---- | ------------ |
+| 纯 v-model + reactive | ~500（依模板大小） |
+| VeeValidate | ~200 |
+| @tanstack/vue-form | < 50 |
+| FormKit | ~300 |
+
+差异主要来自字段级订阅——只渲染当前输入字段。
+
+## 大表单优化
+
+### 分步表单（Wizard）
+
+```vue
+<script setup>
+import { ref } from 'vue'
+
+const step = ref(1)
+const formData = reactive({ /* ... */ })
+</script>
+
+<template>
+  <Step1 v-if="step === 1" v-model="formData" @next="step = 2" />
+  <Step2 v-if="step === 2" v-model="formData" @next="step = 3" />
+  <Step3 v-if="step === 3" v-model="formData" @submit="handleSubmit" />
+</template>
+```
+
+只渲染当前步骤——其它步骤不在 DOM。
+
+### 字段级 v-model 拆分
+
+```vue
+<!-- 父组件：仅管理整体状态 -->
+<TextField :modelValue="formData.name" @update:modelValue="formData.name = $event" />
+```
+
+`<TextField>` 自治——内部状态独立，不引起父级重渲。
+
+### 配合 shallowRef + Map
+
+```vue
+<script setup>
+import { shallowRef, triggerRef } from 'vue'
+
+const formData = shallowRef(new Map())
+
+function setField(key, value) {
+  formData.value.set(key, value)
+  triggerRef(formData)                      // 手动触发响应
+}
+</script>
+```
+
+适合超大表单（100+ 字段）——避免每个字段成为响应源。
+
+## 滚动与触摸
+
+### passive listener
+
+```vue
+<script setup>
+import { useEventListener } from '@vueuse/core'
+
+useEventListener(window, 'scroll', () => {
+  // ...
+}, { passive: true })
+
+useEventListener(el, 'touchstart', () => {}, { passive: true })
+</script>
+```
+
+`passive: true` 让浏览器知道不会 preventDefault → 滚动不被阻塞。
+
+### IntersectionObserver
+
+替代 scroll 监听做"滚动到底加载更多"：
+
+```ts
+import { useIntersectionObserver } from '@vueuse/core'
+
+const sentinel = ref(null)
+
+useIntersectionObserver(sentinel, ([{ isIntersecting }]) => {
+  if (isIntersecting) loadMore()
+})
+```
+
+详见通用章 [图片懒加载](/performance/image-lazy)。
+
+## 高级动画方案
+
+### Motion for Vue
+
+[motion-v](https://motion.dev/docs/vue/) — Framer Motion 的 Vue 端口：
+
+```vue
+<script setup>
+import { Motion } from 'motion-v'
+</script>
+
+<template>
+  <Motion
+    :initial="{ opacity: 0, y: 20 }"
+    :animate="{ opacity: 1, y: 0 }"
+    :transition="{ duration: 0.3 }"
+  >
+    Hello
+  </Motion>
+</template>
+```
+
+适合复杂动画——layout 动画、AnimatePresence、物理 spring 等。
+
+### GSAP
+
+业界标杆动画库：
+
+```vue
+<script setup>
+import { onMounted, ref } from 'vue'
+import { gsap } from 'gsap'
+
+const el = ref(null)
+
+onMounted(() => {
+  gsap.from(el.value, {
+    opacity: 0,
+    y: 20,
+    duration: 0.3,
+    ease: 'power2.out'
+  })
+})
+</script>
+```
+
+适合：复杂时间线、SVG 动画、滚动驱动的动画（GSAP ScrollTrigger）。
+
+### View Transitions API
+
+浏览器原生过渡 API：
+
+```vue
+<script setup>
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
+
+async function navigate(to) {
+  if (!document.startViewTransition) {
+    return router.push(to)
+  }
+  document.startViewTransition(() => router.push(to))
+}
+</script>
+```
+
+```css
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.3s;
+}
+```
+
+Chrome 111+ / Edge 111+ 支持。Vue 3.4+ 实验集成。
+
+## 反模式清单
+
+| 反模式 | 后果 | 修复 |
+| ------ | ---- | ---- |
+| 用 left/top 做动画 | 触发 layout | 改 transform |
+| 全局加 will-change | 显存爆炸 | 仅交互前后切换 |
+| Transition 没指定 mode | 进出重叠 | mode="out-in" |
+| 100+ 字段表单全 v-model | 输入卡顿 | 字段级拆分 / 表单库 |
+| scroll 不 passive | 滚动卡顿 | `{ passive: true }` |
+| 输入实时搜索无防抖 | 过多请求 | refDebounced |
+| TransitionGroup + 大列表 | 动画卡 | 禁动画 / 限项数 |
+| 列表 :move 用非 transform | layout 触发 | 仅 transform |
+| 表单提交不防双击 | 重复请求 | disabled while pending |
+
+## 监控
+
+### 帧率监控
+
+```ts
+import { useRafFn } from '@vueuse/core'
+
+let lastTime = performance.now()
+let frames = 0
+
+useRafFn(() => {
+  frames++
+  const now = performance.now()
+  if (now - lastTime >= 1000) {
+    if (frames < 50) console.warn('Low FPS:', frames)
+    frames = 0
+    lastTime = now
+  }
+})
+```
+
+### 输入延迟（INP）
+
+```ts
+import { onINP } from 'web-vitals'
+
+onINP(metric => {
+  if (metric.value > 200) {
+    console.warn('Slow INP:', metric)
+  }
+})
+```
+
+详见通用章 [性能指标与预算 § INP](/performance/metrics#inp--interaction-to-next-paint)。
+
+## 实战：搜索 + 过滤 + 动画
+
+```vue
+<script setup>
+import { ref, computed } from 'vue'
+import { refDebounced } from '@vueuse/core'
+
+const query = ref('')
+const debounced = refDebounced(query, 300)
+const items = ref([/* ... */])
+
+const filtered = computed(() =>
+  items.value.filter(x => x.name.includes(debounced.value))
+)
+</script>
+
+<template>
+  <input v-model="query" />
+
+  <TransitionGroup name="list" tag="ul">
+    <li v-for="item in filtered.slice(0, 50)" :key="item.id">
+      {{ item.name }}
+    </li>
+  </TransitionGroup>
+</template>
+
+<style>
+.list-enter-active, .list-leave-active {
+  transition: opacity 0.2s, transform 0.2s;
+}
+.list-enter-from, .list-leave-to {
+  opacity: 0;
+  transform: translateX(20px);
+}
+.list-leave-active { position: absolute; }
+.list-move { transition: transform 0.2s; }
+</style>
+```
+
+输入流畅（query 立即响应，搜索防抖）+ 列表平滑过渡 + 限制 50 项防卡。
+
+## 小结
+
+- 动画属性只用 transform 与 opacity——其它属性触发 layout / paint，无法保证 60 FPS；
+- Vue 内置 Transition / TransitionGroup 是基于 CSS 类的零运行时方案，性能取决于你写的 CSS；
+- TransitionGroup 的 v-move 是 FLIP 实现，但大列表上仍需谨慎；
+- v-model 配合 .lazy 修饰符可减少高频更新；非高频字段优先用 .lazy；
+- VueUse 的 refDebounced / refThrottled / useThrottleFn 是表单优化的常用工具；
+- 大表单用 vee-validate / @tanstack/vue-form 等库的字段级订阅，避免全表单重渲染；
+- scroll / touch 监听必须 passive，非阻塞滚动是体验底线；
+- Motion for Vue / GSAP / View Transitions 是复杂动画的更高级方案，但 80% 场景内置 Transition 足够。

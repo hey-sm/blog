@@ -1,0 +1,178 @@
+---
+title: API 风格
+description: Options API vs Composition API 对比、选型与迁移
+---
+
+# API 风格
+
+Vue 3 支持两种 API 风格：**Options API**（Vue 2 风格）和 **Composition API**（Vue 3 推荐）。
+
+## Options API
+
+```vue filename="components/Counter.vue"
+<script lang="ts">
+import { defineComponent } from 'vue'
+
+export default defineComponent({
+  data() {
+    return {
+      count: 0
+    }
+  },
+  computed: {
+    double(): number {
+      return this.count * 2
+    }
+  },
+  methods: {
+    increment() {
+      this.count++
+    }
+  },
+  mounted() {
+    console.log('mounted')
+  }
+})
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+  <p>Double: {{ double }}</p>
+</template>
+```
+
+## Composition API
+
+```vue filename="components/Counter.vue"
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+
+const count = ref(0)
+const double = computed(() => count.value * 2)
+
+function increment() {
+  count.value++
+}
+
+onMounted(() => {
+  console.log('mounted')
+})
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+  <p>Double: {{ double }}</p>
+</template>
+```
+
+## 对比
+
+| 维度 | Options API | Composition API |
+| ---- | ----------- | --------------- |
+| 组织方式 | 按选项类型（data/methods/computed） | 按逻辑功能 |
+| 代码复用 | Mixins（易冲突） | 组合式函数（清晰） |
+| TypeScript | 类型推导弱 | 类型推导强 |
+| 学习曲线 | 平缓 | 稍陡 |
+| 代码量 | 较多样板代码 | 更简洁 |
+| 逻辑复用 | Mixins、HOC | 组合式函数 |
+| Tree-shaking | 不支持 | 支持 |
+
+## 逻辑复用对比
+
+### Options API：Mixins
+
+```ts filename="mixins/counter.ts"
+export default {
+  data() {
+    return {
+      count: 0
+    }
+  },
+  methods: {
+    increment() {
+      this.count++
+    }
+  }
+}
+```
+
+```vue
+<script lang="ts">
+import { defineComponent } from 'vue'
+import counterMixin from './mixins/counter'
+
+export default defineComponent({
+  mixins: [counterMixin]
+})
+</script>
+```
+
+**问题**：
+- 命名冲突
+- 来源不清晰
+- 难以传递参数
+
+### Composition API：组合式函数
+
+```ts filename="composables/useCounter.ts"
+import { ref } from 'vue'
+
+export function useCounter(initialValue = 0) {
+  const count = ref(initialValue)
+  
+  function increment() {
+    count.value++
+  }
+  
+  return { count, increment }
+}
+```
+
+```vue
+<script setup lang="ts">
+import { useCounter } from './composables/useCounter'
+
+const { count, increment } = useCounter(10)
+</script>
+```
+
+**优势**：
+- 无命名冲突
+- 来源清晰
+- 易于传递参数
+- 更好的类型推导
+
+## 选型建议
+
+### 使用 Options API
+
+- 简单组件
+- 团队熟悉 Vue 2
+- 不需要复杂逻辑复用
+
+### 使用 Composition API
+
+- 复杂组件
+- 需要逻辑复用
+- TypeScript 项目
+- 新项目（推荐）
+
+## 混合使用
+
+可以在同一项目中混合使用：
+
+```vue
+<script lang="ts">
+export default {
+  name: 'MyComponent'
+}
+</script>
+
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(0)
+</script>
+```
+
+下一章 [生命周期钩子](/vue/lifecycle) 详解组件生命周期。

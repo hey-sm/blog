@@ -1,0 +1,252 @@
+---
+title: Route Handlers
+description: route.ts 的 HTTP 方法处理、NextRequest/NextResponse、Edge vs Node.js runtime、CORS 与 Middleware 协作
+---
+
+# Route Handlers
+
+Route Handlers 是 Next.js 的 REST API 构建体。它们与 `page.tsx` 同处一个路由体系，但返回 `Response` 对象而非 UI。
+
+## 基本结构
+
+```ts filename="app/api/posts/route.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { db } from '@/lib/db'
+
+export async function GET(request: NextRequest) {
+  const posts = await db.post.findMany({ take: 20 })
+  return NextResponse.json(posts)
+}
+
+export async function POST(request: NextRequest) {
+  const body: { title: string; content: string } = await request.json()
+  const post = await db.post.create({ data: body })
+  return NextResponse.json(post, { status: 201 })
+}
+```
+
+Route Handler 的 HTTP 方法 = 导出的函数名：
+
+| 导出 | HTTP 方法 |
+| ---- | --------- |
+| `GET` | GET 请求 |
+| `POST` | POST 请求 |
+| `PUT` | PUT 请求 |
+| `PATCH` | PATCH 请求 |
+| `DELETE` | DELETE 请求 |
+| `HEAD` | HEAD 请求 |
+| `OPTIONS` | OPTIONS 请求 |
+
+**不能有默认导出**（与 `page.tsx` 区别）。
+
+## 请求与响应
+
+### 路径参数
+
+```ts filename="app/api/posts/[id]/route.ts"
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params
+  const post = await db.post.findUnique({ where: { id } })
+  if (!post) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  return NextResponse.json(post)
+}
+```
+
+### Query String
+
+```ts filename="app/api/search/route.ts"
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url)
+  const q = searchParams.get('q')
+  const limit = Number(searchParams.get('limit') ?? 10)
+
+  const results = await db.search(q ?? '', limit)
+  return NextResponse.json(results)
+}
+```
+
+### Request Body
+
+```ts filename="app/api/posts/route.ts"
+export async function POST(request: NextRequest) {
+  const body = await request.json()           // JSON
+  // 或
+  const formData = await request.formData()   // FormData
+}
+```
+
+### 设置 Cookies
+
+```ts
+export async function POST(request: NextRequest) {
+  const response = NextResponse.json({ ok: true })
+  response.cookies.set('session', 'abc123', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 7,   // 7 天
+  })
+  return response
+}
+```
+
+### Stream 响应
+
+```ts filename="app/api/stream/route.ts"
+export async function GET() {
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      for (let i = 0; i < 5; i++) {
+        controller.enqueue(encoder.encode(`data: chunk ${i}\n\n`))
+        await new Promise(r => setTimeout(r, 1000))
+      }
+      controller.close()
+    },
+  })
+
+  return new Response(stream, {
+    headers: { 'Content-Type': 'text/event-stream' },
+  })
+}
+```
+
+## Runtime 选择
+
+```ts filename="app/api/low-latency/route.ts"
+export const runtime = 'edge'   // Edge Runtime: 更低的 cold start
+```
+
+```ts filename="app/api/heavy-processing/route.ts"
+export const runtime = 'nodejs'   // Node.js Runtime: 完整 Node API（默认）
+```
+
+| 维度 | Node.js Runtime | Edge Runtime |
+| ---- | --------------- | ------------ |
+| 启动 | 很慢（500ms-2s） | 极快（~25ms） |
+| Node API | 全部可用 | 不可用 |
+| 地理位置 | 单区域 | 全球多区域 |
+| 最大时长 | 60s (Vercel) | 30s (Vercel) |
+| Buffer / Streams | ✓ | ✓（Web Streams） |
+
+## CORS
+
+```ts filename="app/api/external/route.ts"
+export async function GET(request: NextRequest) {
+  const data = await getData()
+
+  return NextResponse.json(data, {
+    headers: {
+      'Access-Control-Allow-Origin': 'https://example.com',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
+  })
+}
+
+export async function OPTIONS() {
+  return NextResponse.json({}, {
+    headers: {
+      'Access-Control-Allow-Origin': 'https://example.com',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
+  })
+}
+```
+
+CORS 也可以用 `middleware.ts` 或在 `next.config.ts` 的 `headers` 中全局配置。
+
+## Revalidation 与缓存
+
+```ts filename="app/api/posts/route.ts"
+export const dynamic = 'force-static'   // 不推荐：Route Handler 常在请求时动态
+export const revalidate = 60            // 60s ISR
+
+export async function GET() {
+  const posts = await db.post.findMany()
+  return NextResponse.json(posts)
+}
+```
+
+但通常无需设置——外部 API（如第三方 webhook）请求本不应被缓存。默认行为：
+
+- Route Handler 中用了 `cookies()` / `headers()` → 自动 `force-dynamic`
+- 未用 → 静态缓存（构建时确定）
+
+## Webhooks 示例
+
+```ts filename="app/api/webhooks/stripe/route.ts"
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import Stripe from 'stripe'
+import { updateUserSubscription } from '@/lib/billing'
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
+const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!
+
+export async function POST(request: NextRequest) {
+  const body = await request.text()
+  const signature = request.headers.get('stripe-signature')!
+
+  let event: Stripe.Event
+  try {
+    event = stripe.webhooks.constructEvent(body, signature, webhookSecret)
+  } catch {
+    return NextResponse.json({ error: 'Invalid signature' }, { status: 400 })
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object as Stripe.Checkout.Session
+    await updateUserSubscription(session)
+  }
+
+  return NextResponse.json({ received: true })
+}
+```
+
+## 陷阱
+
+### `page.tsx` 与 `route.ts` 不能共存在同一目录
+
+```text
+app/api/example/
+├── page.tsx    ✗ ← 不能与 route.ts 共存
+└── route.ts   ✗
+```
+
+取其一。将 page 放到另一个目录或用不同的路径。
+
+### Route Handler 的 `GET` 在 `next build` 时被静态化
+
+如果 `GET` handler 没有使用 `cookies()` / `headers()` / `request.url` query，Next.js 会默认将其参数固定。如果 API 返回的是动态数据，忘记标记 `dynamic = 'force-dynamic'` 会导致生产环境返回构建时的旧数据。
+
+### 在生产中打印 `request.body` 的内容 ≠ 在 dev 中相同
+
+dev 模式中的请求与生产模式中的 Serverless / Lambda 环境可能有不同的流式 body 处理。大文件上传时尤其可能在 Node.js 中工作，但在 Vercel 的 Serverless（有超时限制）中失败。
+
+### 不要用过度的 `try {} catch {}` 隐藏错误
+
+```ts
+try {
+  const data = await db.query()
+  return NextResponse.json(data)
+} catch {
+  // 隐藏了具体错误 
+  return NextResponse.json({ error: 'Something went wrong' }, { status: 500 })
+}
+```
+
+隐藏错误信息会让调试极其困难。使用更细粒度的错误处理（validation error → 400, auth error → 401, not found → 404）。
+
+## 小结
+
+- Route Handlers 通过 `route.ts` 定义 REST 端点，与 `page.tsx` 共享路由体系；
+- `GET`/`POST`/`PUT`/`DELETE` 等导出对应 HTTP 方法；
+- `NextRequest` 提供 query、headers、cookies、body 等请求上下文；
+- `runtime: 'edge'` 与 `runtime: 'nodejs'` 各自有延迟与功能限制；
+- 静态数据的 GET 端点默认有 `force-static` 行为，动态数据需显式 `force-dynamic`。

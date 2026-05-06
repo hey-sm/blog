@@ -1,0 +1,317 @@
+---
+title: 模式与最佳实践
+description: Next.js 16 项目的数据访问层、组件分层、URL 状态管理、安全清单与组织模式
+---
+
+# 模式与最佳实践
+
+本节汇总在 Next.js 16 项目中反复出现的模式与实践。大部分来自 Vercel 的官方指南和大型 Next.js 项目的经验。
+
+## 数据访问层 (DAL)
+
+将数据逻辑放在单独的文件中，不在组件内散布 ORM 查询：
+
+```text
+src/
+├── lib/
+│   └── db/
+│       ├── index.ts          # 客户端导出
+│       ├── schema.ts         # Drizzle / Prisma schema
+│       └── dal/
+│           ├── posts.ts      # Post 相关数据函数
+│           ├── users.ts      # User 相关数据函数
+│           └── comments.ts   # Comment 相关数据函数
+```
+
+```ts filename="src/lib/db/dal/posts.ts"
+import 'server-only'
+import { db } from '@/lib/db'
+import { cache } from 'react'
+import { cacheTag, cacheLife } from 'next/cache'
+
+export const getPosts = cache(async () => {
+  'use cache'
+  cacheTag('posts')
+  cacheLife('hours')
+
+  return db.post.findMany({
+    where: { published: true },
+    include: { author: true },
+    orderBy: { createdAt: 'desc' },
+  })
+})
+
+export const getPostBySlug = cache(async (slug: string) => {
+  'use cache'
+  cacheTag(`post-${slug}`)
+
+  return db.post.findUnique({
+    where: { slug },
+    include: { author: true, comments: true },
+  })
+})
+```
+
+好处：
+- 可复用（page 和 `generateMetadata` 都能调用）
+- `'use cache'` 集中配置
+- 修改 Schema 时只需改一处
+
+## 组件分层
+
+```text
+src/
+├── components/
+│   ├── ui/                  # 基础 UI（Button、Input、Card）
+│   │   ├── Button.tsx
+│   │   └── Input.tsx
+│   ├── features/            # 功能组件（PostCard、CommentForm）
+│   │   ├── PostCard.tsx
+│   │   └── CommentForm.tsx
+│   └── layouts/             # 布局组件
+│       ├── Shell.tsx
+│       └── Sidebar.tsx
+└── app/
+    └── (app)/
+        └── posts/
+            ├── _components/  # 页面专属组件（私有）
+            │   └── PostActions.tsx
+            └── page.tsx
+```
+
+规则：
+- `ui/` 不访问数据、不感知路由、可跨项目复用
+- `features/` 接收数据 props、有业务逻辑、不直接查 DB
+- `app/.../page.tsx` 获取数据并传给 `features/`
+- `_components/` 是页面专属的私有组件（不参与路由）
+
+## URL 状态管理 (URL as State)
+
+```tsx filename="app/search/page.tsx"
+export default async function SearchPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string; sort?: string }>
+}) {
+  const { q = '', page = '1', sort = 'newest' } = await searchParams
+
+  const results = await getSearchResults({
+    query: q,
+    page: Number(page),
+    sort,
+  })
+
+  return <SearchResults results={results} currentQuery={q} />
+}
+```
+
+```tsx filename="components/SearchFilters.tsx"
+'use client'
+
+import { useSearchParams, usePathname, useRouter } from 'next/navigation'
+
+export function SearchFilters() {
+  const searchParams = useSearchParams()
+  const pathname = usePathname()
+  const router = useRouter()
+
+  const update = (key: string, value: string) => {
+    const params = new URLSearchParams(searchParams)
+    params.set(key, value)
+    router.push(`${pathname}?${params.toString()}`)
+  }
+
+  return (
+    <div className="flex gap-4">
+      <select
+        value={searchParams.get('sort') ?? 'newest'}
+        onChange={e => update('sort', e.target.value)}
+      >
+        <option value="newest">Newest</option>
+        <option value="popular">Popular</option>
+      </select>
+    </div>
+  )
+}
+```
+
+将状态放在 URL 上（而不是 `useState` + localStorage）的好处：
+- 可分享链接（无需恢复状态）
+- 浏览器前进/后退自然工作
+- SSR 正确（服务端直接被传入 `searchParams`）
+
+## Error Handling 模式
+
+### Server Action 错误处理
+
+```tsx filename="app/actions.ts"
+'use server'
+
+export async function deletePost(postId: string) {
+  try {
+    await db.post.delete({ where: { id: postId } })
+    revalidatePath('/posts')
+    return { success: true }
+  } catch (error) {
+    if (error instanceof PrismaClientKnownRequestError && error.code === 'P2025') {
+      return { error: 'Post not found' }
+    }
+    return { error: 'Failed to delete post' }
+  }
+}
+```
+
+```tsx filename="components/DeleteButton.tsx"
+'use client'
+
+import { useActionState } from 'react'
+import { deletePost } from '@/app/actions'
+
+export function DeleteButton({ postId }: { postId: string }) {
+  const [_state, dispatch, isPending] = useActionState(deletePost, null)
+
+  return (
+    <button
+      onClick={() => dispatch(postId)}
+      disabled={isPending}
+      className="text-red-500"
+    >
+      {isPending ? 'Deleting...' : 'Delete'}
+    </button>
+  )
+}
+```
+
+### 异步边界 (error.tsx + Suspense)
+
+```
+app/posts/
+├── error.tsx           ← 捕获 page.tsx 错误
+├── loading.tsx         ← 加载状态
+└── page.tsx            ← 获取数据 + 渲染
+```
+
+用 `error.tsx` 捕获已知异常，用 `loading.tsx` 覆盖加载窗口，避免在 page body 中嵌套 `try/catch`。
+
+## 安全清单
+
+| 检查项 | 实施 |
+| ------ | ---- |
+| Server Actions 参数到数据库前先验证 | `zod` parse + return 错误 |
+| 不要信任 `formData.get()` 的类型 | 始终用 `.toString()` 或 zod 验证 |
+| `'server-only'` 引用敏感模块 | 每个含有 DB/secrets 的模块 |
+| 私有环境变量无 `NEXT_PUBLIC_` 前缀 | 默认安全（不暴露到浏览器） |
+| Middleware 保护已登录路由 | `auth()` + matcher |
+| CSP 头 | `next.config.ts` 中的 `headers` |
+| 不直接调用内部 API (Route Handler) 通过 HTTP | Server Components 中调用函数而非 fetch |
+| Webhook 签名验证 | 如 Stripe 示例中的 `constructEvent` |
+
+### 常见注入防范
+
+```tsx
+// ✗ XSS 风险
+<div>{userInput}</div>            // React 自动转义，安全
+
+// ✗ 危险的 escape
+<div dangerouslySetInnerHTML={{ __html: userInput }} />
+```
+
+仅在**完全信任的内容**（你自己的 Markdown 渲染、服务端控制的 HTML）使用 `dangerouslySetInnerHTML`。
+
+### CSRF 在 Next.js 中
+
+Next.js 16 为 Server Actions 自动加入 CSRF 保护（通过 `Next-Action` header 验证）。表单之外调用 Server Action 需要引用 `useActionState` 或正确处理 CSRF token。
+
+## 性能模式
+
+### 组合而非上下文
+
+```tsx
+// ✗ 用 Context 传递大量数据（Client Component 子树都变成客户端）
+<DataContext.Provider value={hugeData}>
+  <DeepTree />
+</DataContext.Provider>
+
+// ✓ 在 Server Component 中获取，通过 props 传递
+<DeepTree data={hugeData} />
+```
+
+### 尽早 Suspense
+
+```tsx
+// ✗ Suspense 太深 — 用户看到空白太久
+function Page() {
+  return <GiantComponent />  // 3s 后才出现任何内容
+}
+
+// ✓ 尽早设置 Suspense 边界 — 用户立即看到 skeleton
+function Page() {
+  return (
+    <Suspense fallback={<Skeleton />}>
+      <GiantComponent />
+    </Suspense>
+  )
+}
+```
+
+## 文件组织决策
+
+```text
+何时 app/ 目录里创建私有 _components/
+  → 组件仅在一页使用，且代码 > 30 行
+
+何时 src/components/features/
+  → 组件在 2+ 页面使用
+
+何时 src/components/ui/
+  → 组件完全业务无关（Button、Input 等）
+
+何时 lib/db/dal/
+  → 数据获取函数在 2+ 地方被调用
+```
+
+## 陷阱
+
+### 过度抽象数据访问层
+
+不是每个查询都需要封装成函数。单个 `page.tsx` 中只有一处使用的查询可以内联：
+
+```tsx
+// 仅用一次的查询——不需要移到 DAL
+const recentPosts = await db.post.findMany({ take: 5 })
+```
+
+### 在 `'use cache'` 函数中混用副作用
+
+```tsx
+async function getAnalytics() {
+  'use cache'
+  await logAccess()   // ✗ 副作用不应被缓存
+  return fetchData()
+}
+```
+
+`'use cache'` 函数只应包含数据获取与转换。日志、写入、消息队列等副作用不在其中执行。
+
+### `searchParams` 与 `page.tsx` 的缓存
+
+`searchParams` 自动将页面变为动态渲染。如果 search 页面纯静态（不依赖 query），需要显式标记 `export const dynamic = 'force-static'`——但此时 `searchParams` 始终为空对象。
+
+### 客户端组件不接受 `searchParams`
+
+```tsx
+// ✗ 无效
+'use client'
+export function Page({ searchParams }) { ... }
+```
+
+`searchParams` 只在 Server Components 的 props 中可用。客户端组件需使用 `useSearchParams()` hook。
+
+## 小结
+
+- 数据访问层 (DAL) 集中管理 ORM 查询，与 `'use cache'` 配合；
+- 组件分层：UI 基础 → Features 业务 → Pages 数据获取与传递；
+- URL 状态管理取代 props drilling 与浏览器存储——可分发的链接是核心价值；
+- 错误处理逐级回退：`error.tsx` → `global-error.tsx`，Server Actions 返回值处理；
+- 安全第一：Zod 校验、`server-only` 守卫、CSRF 自动保护、CSP headers；
+- `'use cache'` 中的函数保持无副作用，`searchParams` 与动态渲染的边界清晰。

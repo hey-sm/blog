@@ -1,0 +1,428 @@
+---
+title: 模板语法与插值
+description: 文本插值、HTML 插值、属性绑定、JavaScript 表达式与指令基础
+---
+
+# 模板语法与插值
+
+Vue 使用基于 HTML 的模板语法，允许声明式地将 DOM 绑定到组件实例的数据。所有模板都会被编译为高效的渲染函数。
+
+## 文本插值
+
+使用 **双大括号（Mustache 语法）** 插入文本：
+
+```vue filename="components/Greeting.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const message = ref('Hello Vue!')
+const count = ref(0)
+</script>
+
+<template>
+  <p>{{ message }}</p>
+  <p>Count: {{ count }}</p>
+</template>
+```
+
+双大括号会被替换为对应数据的值，且会**自动更新**。
+
+## v-text：文本指令
+
+`v-text` 等价于 `{{ }}`，但会替换元素的全部内容：
+
+```vue
+<template>
+  <!-- 等价 -->
+  <p>{{ message }}</p>
+  <p v-text="message"></p>
+  
+  <!-- 区别：v-text 会覆盖子内容 -->
+  <p v-text="message">This will be replaced</p>
+  <p>{{ message }} - This will remain</p>
+</template>
+```
+
+**推荐使用 `{{ }}`**，更灵活且语义清晰。
+
+## v-html：原始 HTML
+
+`v-html` 插入 HTML 字符串：
+
+```vue filename="components/Article.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const htmlContent = ref('<strong>Bold Text</strong>')
+</script>
+
+<template>
+  <!-- ❌ 会显示为纯文本 -->
+  <div>{{ htmlContent }}</div>
+  
+  <!-- ✅ 渲染为 HTML -->
+  <div v-html="htmlContent"></div>
+</template>
+```
+
+### ⚠️ XSS 风险
+
+**永远不要对用户提供的内容使用 `v-html`**：
+
+```vue
+<!-- ❌ 危险：用户可注入脚本 -->
+<div v-html="userInput"></div>
+
+<!-- ✅ 安全：自动转义 -->
+<div>{{ userInput }}</div>
+```
+
+如需渲染用户 HTML，使用 [DOMPurify](https://github.com/cure53/DOMPurify) 清理：
+
+```vue
+<script setup lang="ts">
+import DOMPurify from 'dompurify'
+import { computed, ref } from 'vue'
+
+const userInput = ref('<img src=x onerror=alert(1)>')
+const safeHtml = computed(() => DOMPurify.sanitize(userInput.value))
+</script>
+
+<template>
+  <div v-html="safeHtml"></div>
+</template>
+```
+
+## v-bind：属性绑定
+
+使用 `v-bind` 或简写 `:` 绑定属性：
+
+```vue filename="components/Image.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const imageUrl = ref('/logo.png')
+const imageAlt = ref('Vue Logo')
+const isDisabled = ref(false)
+</script>
+
+<template>
+  <!-- 完整语法 -->
+  <img v-bind:src="imageUrl" v-bind:alt="imageAlt">
+  
+  <!-- 简写（推荐） -->
+  <img :src="imageUrl" :alt="imageAlt">
+  
+  <!-- 布尔属性 -->
+  <button :disabled="isDisabled">Click</button>
+</template>
+```
+
+### 动态属性名
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const attrName = ref('placeholder')
+const attrValue = ref('Enter text')
+</script>
+
+<template>
+  <input :[attrName]="attrValue">
+  <!-- 渲染为 <input placeholder="Enter text"> -->
+</template>
+```
+
+### 绑定多个属性
+
+```vue
+<script setup lang="ts">
+const attrs = {
+  id: 'input-1',
+  type: 'text',
+  placeholder: 'Enter name'
+}
+</script>
+
+<template>
+  <input v-bind="attrs">
+  <!-- 等价于 -->
+  <input id="input-1" type="text" placeholder="Enter name">
+</template>
+```
+
+### 布尔属性
+
+当值为 `falsy` 时，属性会被移除：
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const isDisabled = ref(false)
+</script>
+
+<template>
+  <!-- isDisabled 为 false 时，disabled 属性不会渲染 -->
+  <button :disabled="isDisabled">Click</button>
+</template>
+```
+
+## JavaScript 表达式
+
+模板中可以使用 **单个 JavaScript 表达式**：
+
+```vue filename="components/Calculator.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(10)
+const message = ref('hello')
+const items = ref([1, 2, 3])
+</script>
+
+<template>
+  <!-- ✅ 表达式 -->
+  <p>{{ count + 1 }}</p>
+  <p>{{ message.toUpperCase() }}</p>
+  <p>{{ count > 5 ? 'Large' : 'Small' }}</p>
+  <p>{{ items.map(x => x * 2).join(', ') }}</p>
+  
+  <!-- ❌ 语句（不支持） -->
+  <p>{{ const x = 1 }}</p>
+  <p>{{ if (count > 5) { return 'Large' } }}</p>
+</template>
+```
+
+### 表达式限制
+
+- 只能访问[全局白名单](https://github.com/vuejs/core/blob/main/packages/shared/src/globalsAllowList.ts)（Math、Date 等）
+- 不能访问用户定义的全局变量
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const count = ref(10)
+
+// ❌ 全局变量在模板中不可用
+window.myGlobal = 'test'
+</script>
+
+<template>
+  <!-- ✅ 白名单全局对象 -->
+  <p>{{ Math.max(count, 20) }}</p>
+  <p>{{ Date.now() }}</p>
+  
+  <!-- ❌ 自定义全局变量不可用 -->
+  <p>{{ myGlobal }}</p>
+</template>
+```
+
+## v-once：一次性插值
+
+`v-once` 只渲染一次，后续更新会被跳过：
+
+```vue filename="components/StaticContent.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const message = ref('Initial')
+
+setTimeout(() => {
+  message.value = 'Updated'  // v-once 的内容不会更新
+}, 1000)
+</script>
+
+<template>
+  <p v-once>{{ message }}</p>  <!-- 始终显示 "Initial" -->
+  <p>{{ message }}</p>          <!-- 1秒后显示 "Updated" -->
+</template>
+```
+
+**使用场景**：静态内容优化，减少不必要的更新。
+
+## v-pre：跳过编译
+
+`v-pre` 跳过元素及其子元素的编译，显示原始 Mustache 标签：
+
+```vue
+<template>
+  <p v-pre>{{ this will not be compiled }}</p>
+  <!-- 渲染为：{{ this will not be compiled }} -->
+</template>
+```
+
+**使用场景**：
+- 显示 Vue 语法示例
+- 优化大量静态内容的编译性能
+
+## v-cloak：隐藏未编译模板
+
+`v-cloak` 在 Vue 实例挂载前保持在元素上，挂载后移除：
+
+```vue
+<template>
+  <div v-cloak>
+    {{ message }}
+  </div>
+</template>
+
+<style>
+[v-cloak] {
+  display: none;
+}
+</style>
+```
+
+**使用场景**：避免页面加载时短暂显示未编译的 `{{ }}` 标签（主要用于非构建工具场景）。
+
+## 指令语法
+
+指令是带有 `v-` 前缀的特殊属性：
+
+```text
+v-指令名:参数.修饰符="值"
+```
+
+示例：
+
+```vue
+<template>
+  <!-- v-bind:href="url" -->
+  <!--   ↑    ↑     ↑      -->
+  <!-- 指令  参数   值     -->
+  
+  <a v-bind:href="url">Link</a>
+  
+  <!-- v-on:click.prevent="handler" -->
+  <!--  ↑   ↑      ↑        ↑       -->
+  <!-- 指令 参数  修饰符    值      -->
+  
+  <button v-on:click.prevent="handler">Submit</button>
+</template>
+```
+
+### 动态参数
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const eventName = ref('click')
+const attrName = ref('href')
+</script>
+
+<template>
+  <button v-on:[eventName]="handler">Dynamic Event</button>
+  <a v-bind:[attrName]="url">Dynamic Attr</a>
+</template>
+```
+
+**限制**：
+- 动态参数值应为字符串或 `null`
+- 参数名不能包含空格和引号
+- HTML 属性名会被转为小写
+
+```vue
+<!-- ❌ 无效 -->
+<a :[attr-name]="value">  <!-- 包含短横线 -->
+<a :['foo' + bar]="value"> <!-- 包含空格和引号 -->
+
+<!-- ✅ 有效 -->
+<a :[attrName]="value">
+```
+
+## 模板表达式最佳实践
+
+### ✅ 保持表达式简单
+
+```vue
+<!-- ❌ 复杂逻辑 -->
+<template>
+  <p>{{ items.filter(x => x.active).map(x => x.name).join(', ') }}</p>
+</template>
+
+<!-- ✅ 提取为计算属性 -->
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+
+const items = ref([...])
+const activeNames = computed(() => 
+  items.value.filter(x => x.active).map(x => x.name).join(', ')
+)
+</script>
+
+<template>
+  <p>{{ activeNames }}</p>
+</template>
+```
+
+### ✅ 避免副作用
+
+```vue
+<!-- ❌ 表达式中修改数据 -->
+<template>
+  <p>{{ count++ }}</p>
+</template>
+
+<!-- ✅ 使用方法 -->
+<script setup lang="ts">
+function increment() {
+  count.value++
+}
+</script>
+
+<template>
+  <button @click="increment">{{ count }}</button>
+</template>
+```
+
+### ✅ 使用可选链
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const user = ref<{ profile?: { name: string } }>()
+</script>
+
+<template>
+  <!-- ✅ 安全访问 -->
+  <p>{{ user?.profile?.name ?? 'Guest' }}</p>
+</template>
+```
+
+## 陷阱
+
+### ❌ 模板中不能使用分号分隔多个表达式
+
+```vue
+<!-- ❌ 错误 -->
+<template>
+  <p>{{ const x = 1; x + 1 }}</p>
+</template>
+
+<!-- ✅ 正确：使用逗号运算符 -->
+<template>
+  <p>{{ (x = 1, x + 1) }}</p>
+</template>
+```
+
+### ❌ v-html 不会编译 Vue 模板
+
+```vue
+<script setup lang="ts">
+const html = ref('<p>{{ message }}</p>')  // 不会被编译
+</script>
+
+<template>
+  <div v-html="html"></div>
+  <!-- 渲染为：<p>{{ message }}</p> -->
+</template>
+```
+
+如需动态模板，使用动态组件或渲染函数。
+
+下一章 [指令系统](/vue/directives) 详解 `v-if`、`v-for`、`v-on`、`v-model` 等核心指令。

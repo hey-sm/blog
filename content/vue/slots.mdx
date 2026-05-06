@@ -1,0 +1,145 @@
+---
+title: 插槽系统
+description: 默认插槽、具名插槽、作用域插槽、v-slot 语法
+---
+
+# 插槽系统
+
+插槽（Slots）是 Vue 的内容分发机制，允许父组件向子组件传递模板内容。
+
+## 默认插槽
+
+```vue filename="components/Card.vue"
+<template>
+  <div class="card">
+    <slot></slot>
+  </div>
+</template>
+```
+
+```vue filename="App.vue"
+<template>
+  <Card>
+    <p>This is card content</p>
+  </Card>
+</template>
+```
+
+### 默认内容
+
+```vue filename="components/Button.vue"
+<template>
+  <button>
+    <slot>Default Text</slot>
+  </button>
+</template>
+```
+
+## 具名插槽
+
+```vue filename="components/Layout.vue"
+<template>
+  <div class="layout">
+    <header>
+      <slot name="header"></slot>
+    </header>
+    <main>
+      <slot></slot>
+    </main>
+    <footer>
+      <slot name="footer"></slot>
+    </footer>
+  </div>
+</template>
+```
+
+```vue filename="App.vue"
+<template>
+  <Layout>
+    <template #header>
+      <h1>Page Title</h1>
+    </template>
+    
+    <p>Main content</p>
+    
+    <template #footer>
+      <p>Footer</p>
+    </template>
+  </Layout>
+</template>
+```
+
+## 作用域插槽
+
+```vue filename="components/List.vue"
+<script setup lang="ts">
+interface Item {
+  id: number
+  name: string
+}
+
+defineProps<{
+  items: Item[]
+}>()
+</script>
+
+<template>
+  <ul>
+    <li v-for="item in items" :key="item.id">
+      <slot :item="item"></slot>
+    </li>
+  </ul>
+</template>
+```
+
+```vue filename="App.vue"
+<script setup lang="ts">
+import { ref } from 'vue'
+import List from './components/List.vue'
+
+const items = ref([
+  { id: 1, name: 'Alice' },
+  { id: 2, name: 'Bob' }
+])
+</script>
+
+<template>
+  <List :items="items">
+    <template #default="{ item }">
+      <strong>{{ item.name }}</strong>
+    </template>
+  </List>
+</template>
+```
+
+### 解构插槽 Props
+
+```vue
+<template>
+  <List :items="items">
+    <template #default="{ item: { id, name } }">
+      <span>{{ id }}: {{ name }}</span>
+    </template>
+  </List>
+</template>
+```
+
+## 动态插槽名
+
+```vue
+<script setup lang="ts">
+import { ref } from 'vue'
+
+const slotName = ref('header')
+</script>
+
+<template>
+  <Layout>
+    <template #[slotName]>
+      <h1>Dynamic Slot</h1>
+    </template>
+  </Layout>
+</template>
+```
+
+下一章 [动画与过渡](/vue/animation) 介绍过渡效果。

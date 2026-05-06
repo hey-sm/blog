@@ -1,0 +1,128 @@
+---
+title: 表单库与校验
+description: FormKit、Vee Validate、Vuelidate、Zod 集成
+---
+
+# 表单库与校验
+
+Vue 生态中的表单处理和验证方案。
+
+## Vee Validate
+
+### 安装
+
+```bash
+npm install vee-validate yup
+```
+
+### 基础用法
+
+```vue
+<script setup lang="ts">
+import { useForm } from 'vee-validate'
+import * as yup from 'yup'
+
+const schema = yup.object({
+  email: yup.string().email().required(),
+  password: yup.string().min(8).required()
+})
+
+const { defineField, handleSubmit, errors } = useForm({
+  validationSchema: schema
+})
+
+const [email] = defineField('email')
+const [password] = defineField('password')
+
+const onSubmit = handleSubmit((values) => {
+  console.log('Form submitted:', values)
+})
+</script>
+
+<template>
+  <form @submit="onSubmit">
+    <div>
+      <input v-model="email" type="email" placeholder="Email">
+      <span v-if="errors.email">{{ errors.email }}</span>
+    </div>
+    
+    <div>
+      <input v-model="password" type="password" placeholder="Password">
+      <span v-if="errors.password">{{ errors.password }}</span>
+    </div>
+    
+    <button type="submit">Submit</button>
+  </form>
+</template>
+```
+
+## Zod 集成
+
+```bash
+npm install zod @vee-validate/zod
+```
+
+```vue
+<script setup lang="ts">
+import { useForm } from 'vee-validate'
+import { toTypedSchema } from '@vee-validate/zod'
+import { z } from 'zod'
+
+const schema = toTypedSchema(
+  z.object({
+    email: z.string().email(),
+    password: z.string().min(8)
+  })
+)
+
+const { defineField, handleSubmit, errors } = useForm({
+  validationSchema: schema
+})
+
+const [email] = defineField('email')
+const [password] = defineField('password')
+
+const onSubmit = handleSubmit((values) => {
+  console.log(values)
+})
+</script>
+```
+
+## FormKit
+
+```bash
+npm install @formkit/vue
+```
+
+```ts filename="main.ts"
+import { createApp } from 'vue'
+import { plugin, defaultConfig } from '@formkit/vue'
+import App from './App.vue'
+
+createApp(App).use(plugin, defaultConfig).mount('#app')
+```
+
+```vue
+<template>
+  <FormKit
+    type="form"
+    @submit="handleSubmit"
+  >
+    <FormKit
+      type="email"
+      name="email"
+      label="Email"
+      validation="required|email"
+    />
+    
+    <FormKit
+      type="password"
+      name="password"
+      label="Password"
+      validation="required|length:8"
+    />
+  </FormKit>
+</template>
+```
+
+下一章 [测试](/vue/testing) 介绍测试方案。

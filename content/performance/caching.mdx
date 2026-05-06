@@ -1,0 +1,499 @@
+---
+title: 缓存策略
+description: HTTP 缓存层级、Cache-Control、ETag、Service Worker 与缓存失效
+---
+
+# 缓存策略
+
+> "There are only two hard things in Computer Science: cache invalidation and naming things." — Phil Karlton
+
+缓存是性能优化中收益最大、复杂度最高的话题。命中缓存意味着 0 网络往返，但缓存策略错一点点，就可能让用户拿到陈旧内容。本章梳理浏览器缓存层级、`Cache-Control` 协议细节、Service Worker 编程模型，以及如何安全地让缓存失效。
+
+## 浏览器缓存层级
+
+请求资源时浏览器按以下顺序查找：
+
+```text
+┌─ 请求发起 ─────────────────────────────┐
+│                                       │
+│  1. Memory Cache（内存，本 tab 生命周期）│
+│         ↓ miss                         │
+│  2. Service Worker（可编程拦截器）       │
+│         ↓ no SW or pass-through        │
+│  3. HTTP Cache（磁盘，跨 tab 持久）       │
+│         ↓ miss / 协商                  │
+│  4. Push Cache（HTTP/2 Server Push）    │
+│         ↓ miss                         │
+│  5. 网络                               │
+│                                       │
+└────────────────────────────────────────┘
+```
+
+| 层 | 持久性 | 大小 | 控制权 |
+| - | ------ | ---- | ------ |
+| Memory | tab 内 | 几十 MB | 浏览器自动 |
+| Service Worker | 持久（用户清理前） | 几十 MB ~ GB | 你的代码 |
+| HTTP Cache | 持久 | 几百 MB ~ GB | HTTP 头 |
+| Push Cache | 连接生命周期 | 小 | HTTP/2 服务端 |
+
+本章重点是 **HTTP Cache** 与 **Service Worker**——它们是开发者能直接控制的两层。
+
+## HTTP 缓存：强缓存 vs 协商缓存
+
+### 强缓存（Fresh）
+
+资源在有效期内，浏览器**不发请求**直接用本地副本。
+
+```http
+HTTP/1.1 200 OK
+Cache-Control: public, max-age=86400
+```
+
+DevTools Network 中显示 `(memory cache)` 或 `(disk cache)`，状态 200。
+
+### 协商缓存（Stale Validation）
+
+资源已过期，浏览器**发请求**但带上"上次的标识"，服务器决定是返回新内容还是 304。
+
+```http
+# 浏览器请求
+GET /main.css HTTP/1.1
+If-None-Match: "abc123"
+If-Modified-Since: Wed, 01 May 2025 10:00:00 GMT
+
+# 服务器响应（资源未变）
+HTTP/1.1 304 Not Modified
+
+# 或（资源已变）
+HTTP/1.1 200 OK
+ETag: "def456"
+Last-Modified: Thu, 02 May 2025 10:00:00 GMT
+```
+
+304 仍要 RTT，但只传一个空响应体——比传整个文件快得多。
+
+### 状态机
+
+```text
+        ┌────── max-age 内 ──────► 强缓存命中（无请求）
+        │
+请求 ───┤                         ┌─ 304 Not Modified ──► 用本地
+        │                         │
+        └─ 过期 ──► 协商验证 ──────┤
+                                  │
+                                  └─ 200 OK ──► 用新内容
+```
+
+## Cache-Control 字段详解
+
+### 缓存范围
+
+| 指令 | 含义 |
+| ---- | ---- |
+| `public` | 浏览器与共享缓存（CDN）都可缓存 |
+| `private` | 仅浏览器可缓存（含个人信息时使用） |
+| `no-store` | 任何缓存都不存（敏感数据） |
+| `no-cache` | 可以存，但每次必须协商验证 |
+
+⚠️ **`no-cache` 不是"不要缓存"**——是"每次用前先验证"。真正的"不缓存"是 `no-store`。
+
+### 时效
+
+| 指令 | 含义 |
+| ---- | ---- |
+| `max-age=N` | N 秒内强缓存（浏览器） |
+| `s-maxage=N` | N 秒内强缓存（共享缓存 / CDN，覆盖 max-age） |
+| `min-fresh=N` | 客户端期望资源至少 N 秒后才过期 |
+
+### 验证行为
+
+| 指令 | 含义 |
+| ---- | ---- |
+| `must-revalidate` | 过期后必须协商，不能用过期内容 |
+| `immutable` | 在 max-age 内告诉浏览器"绝不会变"，禁用刷新键的强制重验证 |
+| `stale-while-revalidate=N` | 过期后允许用旧内容 N 秒，同时后台异步刷新 |
+| `stale-if-error=N` | 源站错误时允许用旧内容 N 秒 |
+
+### `immutable` 的价值
+
+带 hash 的资源用 `immutable` 是黄金搭配：
+
+```http
+Cache-Control: public, max-age=31536000, immutable
+```
+
+效果：即使用户**手动按刷新键**（F5），浏览器也不会重新验证这个资源——因为 hash 已经保证了"内容变了 URL 必然变"。
+
+### `stale-while-revalidate` 的魔力
+
+```http
+Cache-Control: public, max-age=60, stale-while-revalidate=600
+```
+
+| 时间窗口 | 行为 |
+| -------- | ---- |
+| 0–60 s | 强缓存，0 网络 |
+| 60–660 s | 立即返回旧内容 + 后台异步刷新 |
+| > 660 s | 协商验证 |
+
+适合"内容可以略微陈旧，但不希望用户等"的场景：博客详情页、新闻列表、商品详情。
+
+## ETag 与 Last-Modified
+
+### ETag
+
+服务器为资源生成的指纹，通常是内容 hash 或版本号：
+
+```http
+ETag: "abc123def456"
+ETag: W/"abc123def456"   # 弱 ETag，允许语义等价但字节不同
+```
+
+```js
+// Express 默认开启 ETag
+app.use(express.static('public', {
+  etag: true,             // 默认
+  lastModified: true      // 默认
+}))
+```
+
+### Last-Modified
+
+文件修改时间，秒级精度（不适合频繁变动的小文件）。
+
+```http
+Last-Modified: Wed, 01 May 2025 10:00:00 GMT
+```
+
+### 二者的关系
+
+| 维度 | ETag | Last-Modified |
+| ---- | ---- | ------------- |
+| 精度 | 任意 | 秒级 |
+| 计算成本 | 高（需读内容 hash） | 极低（读 mtime） |
+| 内容相同但 mtime 变 | ✅ 仍命中 | ❌ 误判 miss |
+| 跨节点一致性 | 需统一 hash 算法 | 文件系统时间可能不一致 |
+
+**最佳实践**：同时启用，浏览器会优先用 ETag。
+
+## 不同资源的缓存策略
+
+### 入口 HTML
+
+```http
+Cache-Control: no-cache
+# 或：max-age=0, must-revalidate
+```
+
+每次都协商验证——确保用户能拿到最新版本，但 304 仍能避免传输。
+
+### 带 hash 的静态资源
+
+```http
+Cache-Control: public, max-age=31536000, immutable
+```
+
+一年强缓存。新版本通过新文件名生效。
+
+### 不带 hash 的静态资源（如 logo）
+
+```http
+Cache-Control: public, max-age=86400, must-revalidate
+```
+
+1 天强缓存，过期后协商验证。
+
+### API 响应（GET，可缓存）
+
+```http
+Cache-Control: private, max-age=60, stale-while-revalidate=300
+```
+
+短缓存，过期后异步刷新。
+
+### 用户数据 / 鉴权后接口
+
+```http
+Cache-Control: private, no-store
+```
+
+不缓存，每次都拿新数据。
+
+### 静态产物（构建输出）
+
+| 文件类型 | 推荐 Cache-Control |
+| -------- | ------------------ |
+| `index.html` | `no-cache` |
+| `*.[hash].js` / `*.[hash].css` | `public, max-age=31536000, immutable` |
+| `*.[hash].woff2` | `public, max-age=31536000, immutable` |
+| `*.svg` (icon) | `public, max-age=86400` |
+| `manifest.webmanifest` | `public, max-age=3600` |
+| `service-worker.js` | `no-cache` ⚠️ |
+
+⚠️ Service Worker 文件**绝对不能**长缓存，否则用户永远更新不到新版 SW。
+
+## 缓存失效
+
+### 基于 hash 的"自然失效"
+
+构建工具自动生成 `main.abc123.js`。代码改 → hash 变 → URL 变 → 浏览器自然 miss。
+
+### 主动 purge
+
+不带 hash 的资源（HTML、`/robots.txt`）需要在发版后主动失效。CDN 提供 API：
+
+```bash
+# Cloudflare
+curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE/purge_cache" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"files":["https://example.com/index.html"]}'
+```
+
+```yaml
+# CI/CD 集成示例
+deploy:
+  steps:
+    - run: npm run build && npm run upload
+    - run: curl -X POST $CDN_PURGE_API ...
+```
+
+### 版本号 query
+
+旧方法（HTTP/1.1 时代）：
+
+```html
+<link rel="stylesheet" href="/main.css?v=1.2.3" />
+```
+
+不推荐——CDN 默认会忽略某些 query 参数，且不如 hash 化清晰。
+
+## Service Worker
+
+Service Worker 是**注册在域名上的可编程网络代理**，能拦截所有 fetch 请求并自定义响应。它是离线优先架构的核心。
+
+### 生命周期
+
+```text
+register → install → activate → idle → fetch / message → terminated
+                ↑                              │
+                └──── 新版本：installing ◄────┘
+                          ↓
+                      waiting (等所有 tab 关闭)
+                          ↓
+                       activated
+```
+
+### 注册
+
+```js
+// 应用代码
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+  })
+}
+```
+
+`/sw.js` 的 scope 是其所在路径——放根目录可拦截整站请求。
+
+### 缓存策略模式
+
+#### Cache First（缓存优先）
+
+```js
+// sw.js
+self.addEventListener('fetch', (e) => {
+  e.respondWith(
+    caches.match(e.request).then((cached) => {
+      return cached || fetch(e.request).then((res) => {
+        const clone = res.clone()
+        caches.open('v1').then((c) => c.put(e.request, clone))
+        return res
+      })
+    })
+  )
+})
+```
+
+适合：CSS / JS / 字体等不常变的静态资源。
+
+#### Network First（网络优先）
+
+```js
+self.addEventListener('fetch', (e) => {
+  e.respondWith(
+    fetch(e.request)
+      .then((res) => {
+        const clone = res.clone()
+        caches.open('api').then((c) => c.put(e.request, clone))
+        return res
+      })
+      .catch(() => caches.match(e.request))
+  )
+})
+```
+
+适合：HTML 入口、API 数据——希望最新但可降级到缓存。
+
+#### Stale While Revalidate
+
+```js
+self.addEventListener('fetch', (e) => {
+  e.respondWith(
+    caches.match(e.request).then((cached) => {
+      const fetchPromise = fetch(e.request).then((res) => {
+        caches.open('swr').then((c) => c.put(e.request, res.clone()))
+        return res
+      })
+      return cached || fetchPromise
+    })
+  )
+})
+```
+
+最实用的模式：立即返回缓存，同时后台刷新。
+
+### Workbox
+
+手写 SW 容易出错，推荐 [Workbox](https://developer.chrome.com/docs/workbox)：
+
+```js
+// sw.js
+import { registerRoute } from 'workbox-routing'
+import { CacheFirst, NetworkFirst, StaleWhileRevalidate } from 'workbox-strategies'
+import { ExpirationPlugin } from 'workbox-expiration'
+
+// 静态资源：缓存优先 + 30 天过期
+registerRoute(
+  ({ request }) => ['style', 'script', 'font'].includes(request.destination),
+  new CacheFirst({
+    cacheName: 'static',
+    plugins: [new ExpirationPlugin({ maxAgeSeconds: 30 * 86400 })]
+  })
+)
+
+// 图片：SWR
+registerRoute(
+  ({ request }) => request.destination === 'image',
+  new StaleWhileRevalidate({ cacheName: 'images' })
+)
+
+// API：网络优先
+registerRoute(
+  ({ url }) => url.pathname.startsWith('/api/'),
+  new NetworkFirst({ cacheName: 'api', networkTimeoutSeconds: 3 })
+)
+```
+
+### Service Worker 的更新陷阱
+
+**默认行为**：新 SW 会处于 `waiting` 状态，直到**所有 tab 关闭**才激活。这导致用户长时间使用旧版本。
+
+#### skipWaiting 立即激活
+
+```js
+// sw.js
+self.addEventListener('install', () => self.skipWaiting())
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()))
+```
+
+⚠️ 副作用：旧 tab 中页面继续运行旧代码，但拿到新 SW 处理过的资源——可能不兼容。建议配合**全页面刷新**：
+
+```js
+// 应用代码
+navigator.serviceWorker.addEventListener('controllerchange', () => {
+  window.location.reload()
+})
+```
+
+或在新版本就绪时弹提示让用户主动刷新。
+
+### 不要缓存 SW 自身
+
+```http
+# /sw.js
+Cache-Control: no-cache
+# 或：max-age=0, must-revalidate
+```
+
+否则用户的浏览器拿到旧 SW 后会按旧 SW 的逻辑工作，永远更新不到新版。
+
+## 缓存与个性化的矛盾
+
+登录后的页面常包含用户名、购物车数量等个性化内容——它们让 HTML 不可被 CDN 共享缓存。两种解法：
+
+### 1. 个性化部分前后分离
+
+```html
+<!-- HTML 是公共的，可缓存 -->
+<header>
+  <span data-user-name>...</span>
+  <span data-cart-count>...</span>
+</header>
+<script>
+  // 客户端 JS 拉取个性化数据再渲染
+  fetch('/api/me').then(r => r.json()).then(fillUserInfo)
+</script>
+```
+
+### 2. Edge Side Includes / 边缘组装
+
+```html
+<!-- 源站返回模板 -->
+<header>
+  <esi:include src="/api/me" />
+</header>
+```
+
+CDN 边缘函数把模板与个性化片段拼装。复杂但缓存效率最高。
+
+## 调试缓存
+
+### DevTools Network
+
+| 列 | 说明 |
+| - | ---- |
+| Status | 200（强缓存）/ 304（协商命中）/ 200（新资源） |
+| Size | `(memory cache)` / `(disk cache)` / 实际字节 |
+| Time | 0 ms（缓存）/ N ms（网络） |
+
+勾选 **Disable cache** 可临时绕过缓存。
+
+### 验证响应头
+
+```bash
+curl -I https://example.com/main.css
+# 关注：Cache-Control / ETag / Last-Modified / Age
+```
+
+`Age` 是 CDN 边缘节点缓存的剩余年龄。
+
+### `Clear-Site-Data`
+
+下线某个域时一键清除用户所有数据：
+
+```http
+Clear-Site-Data: "cache", "cookies", "storage"
+```
+
+适合：用户登出、应用退役、出现严重缓存污染。
+
+## 反模式清单
+
+| 反模式 | 问题 | 修复 |
+| ------ | ---- | ---- |
+| HTML 长缓存 | 用户永远拿不到新版本 | `no-cache` |
+| 静态资源不 hash + 长缓存 | 发版后用户拿到旧资源 | hash 化 + immutable |
+| 用 `no-cache` 期待"不缓存" | 实际是协商缓存 | 真正不缓存用 `no-store` |
+| Service Worker 长缓存 | SW 永远更新不了 | `Cache-Control: no-cache` |
+| 同 URL 不同内容 | 缓存污染 | URL 一变内容变 |
+| 不监控命中率 | 缓存策略形同虚设 | 在 RUM 中上报 X-Cache 头 |
+
+## 小结
+
+- 浏览器缓存有四层（Memory / SW / HTTP / Push），开发者主要控制 HTTP 与 SW；
+- `Cache-Control` 字段细粒度区分浏览器与 CDN，hash 化资源用 `immutable`，HTML 入口用 `no-cache`；
+- ETag + Last-Modified 是协商缓存的双保险，命中后 304 几乎无传输成本；
+- `stale-while-revalidate` 是延迟与新鲜度平衡的杀手锏，能让"过期"对用户无感；
+- Service Worker 让缓存逻辑可编程，配合 Workbox 可几行配置实现离线优先；
+- 缓存失效的根本解法是 hash 化 URL，主动 purge 仅用于不带 hash 的少量资源。

@@ -1,0 +1,434 @@
+---
+title: 映射类型
+description: TypeScript 映射类型 Mapped Types：in keyof 语法、键重映射 as、修饰符操作 + -、递归映射与高级实战
+---
+
+# 映射类型
+
+映射类型（Mapped Types）可以将一个类型的属性逐个转换为另一种形态。它是构建工具类型的核心机制。
+
+## 基本语法
+
+```ts
+// 基础形式：[P in K]: T
+type Mapped<K extends string | number | symbol, T> = {
+  [P in K]: T
+}
+
+// 从已有类型转换：[P in keyof T]: U
+type Readonly<T> = {
+  readonly [P in keyof T]: T[P]
+}
+
+type Partial<T> = {
+  [P in keyof T]?: T[P]
+}
+```
+
+### 直观理解
+
+```ts
+interface User {
+  name: string
+  age: number
+}
+
+// 映射类型 = 对每个属性执行"转换"
+type NullableUser = {
+  [K in keyof User]: User[K] | null
+}
+// 等价于
+// {
+//   name: string | null
+//   age: number | null
+// }
+```
+
+## 修饰符操作
+
+### 添加与移除修饰符
+
+```ts
+// 移除 readonly
+type Mutable<T> = {
+  -readonly [P in keyof T]: T[P]
+}
+
+// 移除可选
+type Required<T> = {
+  [P in keyof T]-?: T[P]
+}
+
+// 添加 readonly
+type Readonly<T> = {
+  +readonly [P in keyof T]: T[P]  // + 可省略
+}
+
+// 组合使用
+type ReadonlyPartial<T> = {
+  +readonly [P in keyof T]+?: T[P]
+}
+```
+
+## 键重映射（as 子句）
+
+TS 4.1+ 支持通过 `as` 重新映射属性键：
+
+```ts
+type Getters<T> = {
+  [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K]
+}
+
+interface Person {
+  name: string
+  age: number
+}
+
+type PersonGetters = Getters<Person>
+// {
+//   getName: () => string
+//   getAge: () => number
+// }
+```
+
+### 使用 as 过滤属性
+
+```ts
+// ✅ 只需要特定类型的属性
+type PickByType<T, V> = {
+  [K in keyof T as T[K] extends V ? K : never]: T[K]
+}
+
+interface Mixed {
+  name: string
+  age: number
+  email: string
+  isActive: boolean
+  tags: string[]
+}
+
+type StringFields = PickByType<Mixed, string>
+// { name: string; email: string }
+
+// ✅ 排除以 _ 开头的属性
+type RemovePrivate<T> = {
+  [K in keyof T as K extends `_${string}` ? never : K]: T[K]
+}
+
+interface Api {
+  _internal: string
+  _cache: Map<string, unknown>
+  fetch: () => void
+  getData: () => unknown
+}
+
+type PublicApi = RemovePrivate<Api>
+// { fetch: () => void; getData: () => unknown }
+```
+
+### 使用 as 重命名属性
+
+```ts
+// ✅ 给所有属性添加前缀
+type Prefixed<T, P extends string> = {
+  [K in keyof T as `${P}${Capitalize<string & K>}`]: T[K]
+}
+
+interface State {
+  count: number
+  loading: boolean
+}
+
+type StoreState = Prefixed<State, 'store'>
+// {
+//   storeCount: number
+//   storeLoading: boolean
+// }
+```
+
+## 实用映射类型模式
+
+### 1. DeepReadonly——递归只读
+
+```ts
+type DeepReadonly<T> = {
+  readonly [K in keyof T]: T[K] extends object
+    ? T[K] extends Function
+      ? T[K]
+      : DeepReadonly<T[K]>
+    : T[K]
+}
+
+interface Config {
+  server: {
+    host: string
+    port: number
+    ssl: { enabled: boolean; cert: string }
+  }
+  features: string[]
+}
+
+type ReadonlyConfig = DeepReadonly<Config>
+// config.server.host = 'new'  ❌
+// config.features.push('x')   ❌ readonly 数组
+```
+
+### 2. DeepPartial——递归可选
+
+```ts
+type DeepPartial<T> = {
+  [K in keyof T]?: T[K] extends object
+    ? T[K] extends Function
+      ? T[K]
+      : DeepPartial<T[K]>
+    : T[K]
+}
+
+// 使用
+interface FormData {
+  user: {
+    name: string
+    profile: {
+      avatar: string
+      bio: string
+    }
+  }
+  settings: {
+    theme: 'light' | 'dark'
+    notifications: boolean
+  }
+}
+
+function updateForm(partial: DeepPartial<FormData>) {}
+updateForm({
+  user: {
+    profile: {
+      avatar: 'new-avatar.jpg'
+      // 只需要改一个深层字段
+    }
+  }
+})
+```
+
+### 3. Nullable Fields
+
+```ts
+type Nullable<T> = {
+  [K in keyof T]: T[K] | null
+}
+
+type NullableProps<T> = {
+  [K in keyof T]: null extends T[K] ? T[K] : T[K] | null
+}
+// 原本就已经 null 的字段不变，其他字段增加 null
+```
+
+### 4. 根据值类型分类
+
+```ts
+type FunctionFields<T> = {
+  [K in keyof T as T[K] extends Function ? K : never]: T[K]
+}
+
+interface Component {
+  render: () => string
+  onClick: () => void
+  name: string
+  disabled: boolean
+}
+
+type Callbacks = FunctionFields<Component>
+// { render: () => string; onClick: () => void }
+```
+
+## 映射类型与枚举
+
+```ts
+// ✅ 从枚举生成类型
+enum Color {
+  Red = 'red',
+  Green = 'green',
+  Blue = 'blue'
+}
+
+type ColorConfig = {
+  [K in Color]: { hex: string; rgb: string }
+}
+// {
+//   red: { hex: string; rgb: string }
+//   green: { hex: string; rgb: string }
+//   blue: { hex: string; rgb: string }
+// }
+```
+
+## 映射类型与模板字面量
+
+```ts
+// ✅ 动态生成属性名
+type Actions = 'fetch' | 'create' | 'update' | 'delete'
+
+type ActionCreators = {
+  [K in Actions as `${K}Action`]: (payload?: unknown) => { type: string; payload?: unknown }
+}
+// {
+//   fetchAction: (payload?: unknown) => { type: string; payload?: unknown }
+//   createAction: (payload?: unknown) => { type: string; payload?: unknown }
+//   ...
+// }
+```
+
+**React 示例——表单状态**：
+
+```tsx
+interface LoginForm {
+  email: string
+  password: string
+  rememberMe: boolean
+}
+
+// ✅ 自动为每个字段生成 touched、error 状态
+type FormFieldState<T> = {
+  [K in keyof T]: {
+    value: T[K]
+    touched: boolean
+    error?: string
+  }
+}
+
+type LoginFormState = FormFieldState<LoginForm>
+// {
+//   email: { value: string; touched: boolean; error?: string }
+//   password: { value: string; touched: boolean; error?: string }
+//   rememberMe: { value: boolean; touched: boolean; error?: string }
+// }
+
+function useFormState<T extends Record<string, unknown>>(initial: T) {
+  const [fields, setFields] = useState<FormFieldState<T>>(() => {
+    const result = {} as FormFieldState<T>
+    for (const key in initial) {
+      result[key] = { value: initial[key], touched: false }
+    }
+    return result
+  })
+
+  const setField = <K extends keyof T>(name: K, value: T[K]) => {
+    setFields(prev => ({
+      ...prev,
+      [name]: { value, touched: true }
+    }))
+  }
+
+  return { fields, setField }
+}
+```
+
+## 两种语法对比
+
+```ts
+// ✅ 语法 1：索引签名
+type Dict1 = {
+  [key: string]: number      // 所有字符串键 → number
+}
+
+// ✅ 语法 2：映射类型
+type Dict2 = {
+  [K in string]: number      // 等价但少见
+}
+
+// 关键区别：
+// 索引签名 = 一个笼统的规则
+// 映射类型 = 对已知键集合逐个应用转换
+
+// 索引签名不能结合已知属性使用不同类型
+type Bad = {
+  [key: string]: string       // 规则：所有属性都是 string
+  length: number              // ❌ 违反规则
+}
+
+// 映射类型可以——因为是对已知键的转换
+type Good = {
+  [K in 'name' | 'age']: K extends 'name' ? string : number
+}
+// { name: string; age: number }
+```
+
+## 陷阱
+
+### 1. 映射类型只复制"自有"属性类型
+
+```ts
+class Base {
+  baseMethod() {}
+}
+
+class Derived extends Base {
+  ownMethod() {}
+}
+
+type DerivedMapped = {
+  [K in keyof Derived]: Derived[K]
+}
+// { ownMethod: () => void; baseMethod: () => void }
+// ✅ 继承的方法会包含（因为 keyof Derived 包含继承的键）
+```
+
+### 2. 原始类型在映射中会被拆箱
+
+```ts
+type MapPrimitive<T> = { [K in keyof T]: T[K] }
+
+type MappedString = MapPrimitive<string>
+// string——因为 keyof string 返回 string 的所有方法/属性键
+// 通常这不是你想要的结果
+
+// ✅ 对原始类型先判断
+type SafeMap<T> = T extends object
+  ? { [K in keyof T]: T[K] }
+  : T
+```
+
+### 3. 映射类型的同态特性
+
+```ts
+// 同态映射类型（如 Partial、Readonly）会保留原始类型的修饰符
+// 非同态映射类型（如 Record）不会
+
+// 判断：使用了 keyof T 的是同态
+type HomoMorphic<T> = { [K in keyof T]: T[K] }     // ✅ 同态
+type NonHomoMorphic = { [K in 'a' | 'b']: string }  // ❌ 非同态
+```
+
+## 最佳实践
+
+### ✅ 优先使用映射类型实现工具类型
+
+```ts
+// ✅ 自己实现而非重复手写
+type WithAudit<T> = {
+  [K in keyof T]: T[K]
+} & {
+  createdAt: Date
+  updatedAt: Date
+  deletedAt: Date | null
+}
+```
+
+### ✅ 键重映射处理属性名转换
+
+```ts
+// ✅ 集中处理命名约定转换
+type SnakeToCamel<T> = {
+  [K in keyof T as CamelCase<string & K>]: T[K]
+}
+```
+
+### ✅ 善用 as never 过滤不需要的属性
+
+```ts
+// ✅ 干净地排除
+type WithoutFunctions<T> = {
+  [K in keyof T as T[K] extends Function ? never : K]: T[K]
+}
+```
+
+下一章 [条件类型](/ts/conditional-types) 深入 TypeScript 的条件类型系统。

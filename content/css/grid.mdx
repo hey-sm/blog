@@ -1,0 +1,538 @@
+---
+title: Grid
+description: 二维布局完整指南：网格线、显式 / 隐式、模板区域、Subgrid
+---
+
+# Grid
+
+CSS Grid 是为**二维布局**设计的最强大的 CSS 模型。如果说 Flexbox 解决"一行如何排"，Grid 解决"行 × 列的整体规划"。
+
+> **心智模型**：Grid 把容器划分为水平的"行"与垂直的"列"，子元素按行列编号或区域名占据某一格 / 跨多格。
+
+## 启用 Grid
+
+```css
+.container {
+  display: grid;                              /* 块 grid */
+}
+
+.inline-container {
+  display: inline-grid;                       /* 行内 grid */
+}
+```
+
+## 定义网格
+
+### `grid-template-columns` / `grid-template-rows`
+
+```css
+.container {
+  display: grid;
+  grid-template-columns: 200px 1fr 200px;     /* 三列：固定 + 弹性 + 固定 */
+  grid-template-rows: 60px 1fr 80px;          /* 三行 */
+  gap: 16px;
+}
+```
+
+#### `fr` 单位
+
+`fr`（fraction）= 剩余空间的份数：
+
+```css
+grid-template-columns: 1fr 1fr;               /* 两列等宽 */
+grid-template-columns: 1fr 2fr;               /* 1:2 */
+grid-template-columns: 200px 1fr;             /* 左固定，右占剩余 */
+```
+
+`fr` 只分配**剩余**空间——固定值与 gap 先扣掉，剩下的才按比例分。
+
+#### `repeat()`
+
+```css
+grid-template-columns: repeat(12, 1fr);       /* 12 列等宽（典型栅格） */
+grid-template-columns: repeat(3, 200px 1fr);  /* 200 1fr 200 1fr 200 1fr */
+```
+
+#### `minmax()`
+
+```css
+grid-template-columns: repeat(3, minmax(200px, 1fr));
+```
+
+每列至少 200px，最多撑满 1fr——视口窄时优先保证最小宽度，宽时平分。
+
+#### `auto-fill` / `auto-fit`
+
+```css
+grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+```
+
+让浏览器**自动决定列数**：视口能放下几个 200px 就放几列，剩余空间通过 1fr 平分。
+
+| 值 | 行为 |
+| -- | ---- |
+| `auto-fill` | 总是填满列空间，不够时留空 |
+| `auto-fit` | 不够时折叠空列，剩余项均分 |
+
+视觉差异：
+
+```text
+auto-fill, 10 items, 屏幕能放 12 列：
+[1][2][3][4][5][6][7][8][9][10][_][_]    ← 留 2 个空列
+
+auto-fit, 同上：
+[ 1 ][ 2 ][ 3 ][ 4 ][ 5 ][ 6 ][ 7 ][ 8 ][ 9 ][10]    ← 项被拉宽
+```
+
+### Tailwind 网格
+
+```html
+<div class="grid grid-cols-3 gap-4">3 列等宽</div>
+<div class="grid grid-cols-12 gap-4">12 列栅格</div>
+<div class="grid grid-cols-[200px_1fr_200px]">三列：固定/弹性/固定</div>
+<div class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))]">自适应</div>
+```
+
+## 子元素定位
+
+### 网格线编号
+
+每条网格线都有编号（从 1 开始）：
+
+```text
+        1     2     3     4
+       │     │     │     │
+   1 ──┼─────┼─────┼─────┼──
+       │  A  │  B  │  C  │
+   2 ──┼─────┼─────┼─────┼──
+       │  D  │  E  │  F  │
+   3 ──┼─────┼─────┼─────┼──
+```
+
+```css
+.item {
+  grid-column: 1 / 3;                         /* 列 1 到 3（占 2 列） */
+  grid-row: 2 / 3;
+}
+
+/* 简写 */
+.item { grid-area: 2 / 1 / 3 / 3; }            /* row-start / col-start / row-end / col-end */
+```
+
+### 跨格
+
+```css
+.item {
+  grid-column: span 2;                         /* 跨 2 列 */
+  grid-column: 1 / span 3;                     /* 从第 1 列开始跨 3 列 */
+  grid-column: 1 / -1;                         /* 占满所有列（-1 是最后一条线） */
+}
+```
+
+#### Tailwind
+
+```html
+<div class="grid grid-cols-12 gap-4">
+  <div class="col-span-3">3 列宽</div>
+  <div class="col-span-9">9 列宽</div>
+
+  <div class="col-start-2 col-end-12">从第 2 到第 12</div>
+  <div class="col-span-full">占满</div>
+</div>
+```
+
+### 命名网格线
+
+```css
+.container {
+  grid-template-columns: [start] 200px [content-start] 1fr [content-end] 200px [end];
+}
+
+.item {
+  grid-column: content-start / content-end;
+}
+```
+
+适合大型布局——用语义名替代魔法数字。
+
+## 模板区域（grid-template-areas）
+
+最直观的二维布局描述方式：
+
+```css
+.layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  grid-template-rows: 64px 1fr 80px;
+  grid-template-areas:
+    'header header'
+    'sidebar main'
+    'footer footer';
+  gap: 16px;
+  min-height: 100vh;
+}
+
+.header  { grid-area: header; }
+.sidebar { grid-area: sidebar; }
+.main    { grid-area: main; }
+.footer  { grid-area: footer; }
+```
+
+```html
+<div class="layout">
+  <header class="header">Header</header>
+  <aside class="sidebar">Sidebar</aside>
+  <main class="main">Main</main>
+  <footer class="footer">Footer</footer>
+</div>
+```
+
+ASCII 描述就是最终布局——**模板区域是 CSS 中最接近视觉草图的写法**。
+
+#### Tailwind 任意值
+
+```html
+<div class="grid gap-4 [grid-template-columns:240px_1fr] [grid-template-areas:'header_header''sidebar_main''footer_footer']">
+  <header class="[grid-area:header]">...</header>
+</div>
+```
+
+复杂模板区域用 `@layer components` 抽出更易读：
+
+```css
+@layer components {
+  .app-layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    grid-template-areas:
+      'header header'
+      'sidebar main';
+  }
+}
+```
+
+## 隐式 vs 显式
+
+```css
+.container {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);      /* 显式定义 3 列 */
+  /* 没有 grid-template-rows */
+}
+```
+
+如果有 7 个子元素：
+
+```text
+[A][B][C]    ← 显式行
+[D][E][F]    ← 隐式行（按 grid-auto-rows）
+[G][_][_]    ← 隐式行
+```
+
+控制隐式行 / 列的尺寸：
+
+```css
+.container {
+  grid-auto-rows: 100px;                      /* 隐式行高度 */
+  grid-auto-columns: 1fr;
+  grid-auto-flow: row;                        /* 默认：先填行；column 是先填列 */
+  grid-auto-flow: row dense;                  /* 紧凑模式：填补先前留下的空 */
+}
+```
+
+`dense` 适合 Pinterest 式瀑布流——但会破坏视觉顺序，慎用。
+
+## 对齐
+
+### 容器内对齐
+
+```css
+.container {
+  /* 主轴（行内方向）对齐 */
+  justify-items: start | center | end | stretch;     /* 项目在格子内的水平对齐（默认 stretch）*/
+  justify-content: start | center | space-between;   /* 整个网格在容器内的水平对齐 */
+
+  /* 交叉轴（块方向）对齐 */
+  align-items: start | center | end | stretch;        /* 项目在格子内的垂直对齐 */
+  align-content: start | center | space-between;      /* 整个网格在容器内的垂直对齐 */
+
+  /* 简写 */
+  place-items: center;                                /* = justify-items + align-items */
+  place-content: center;                              /* = justify-content + align-content */
+}
+```
+
+```css
+/* 一行搞定：垂直水平居中 */
+.center { display: grid; place-items: center; }
+```
+
+### 项目自身对齐
+
+```css
+.item {
+  justify-self: center;                       /* 仅这一项水平居中 */
+  align-self: end;                            /* 仅这一项垂直贴底 */
+  place-self: center;                         /* 简写 */
+}
+```
+
+#### Tailwind
+
+```html
+<div class="grid place-items-center">居中</div>
+<div class="grid place-content-between">两端</div>
+<div class="grid">
+  <div class="place-self-end">单项贴右下</div>
+</div>
+```
+
+## 间距
+
+```css
+.container {
+  gap: 16px;                                   /* 行列同 */
+  gap: 16px 24px;                              /* row column */
+  row-gap: 16px;
+  column-gap: 24px;
+}
+```
+
+```html
+<div class="grid grid-cols-3 gap-4">行列 1rem</div>
+<div class="grid grid-cols-3 gap-x-4 gap-y-2">x/y 不同</div>
+```
+
+## Subgrid
+
+子元素继承父级的网格线——让嵌套结构对齐到外层网格：
+
+```css
+.parent {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+}
+
+.child {
+  grid-column: 2 / 12;
+  display: grid;
+  grid-template-columns: subgrid;             /* 不重新定义，复用父级 */
+}
+```
+
+```html
+<div class="parent">
+  <article class="child">
+    <h2>Title</h2>            <!-- 自动对齐到父级第 2 条网格线 -->
+    <p>Body</p>
+  </article>
+</div>
+```
+
+Subgrid 在 2023 后所有现代浏览器全支持，是嵌套对齐的杀手锏。
+
+## 常见布局模式
+
+### 1. 12 列栅格
+
+```css
+.grid-12 {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 16px;
+}
+```
+
+```html
+<div class="grid grid-cols-12 gap-4">
+  <div class="col-span-12 md:col-span-8">主</div>
+  <div class="col-span-12 md:col-span-4">侧</div>
+</div>
+```
+
+### 2. 自适应卡片网格
+
+```css
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+}
+```
+
+```html
+<div class="grid gap-6 grid-cols-[repeat(auto-fit,minmax(280px,1fr))]">
+  <div class="card">...</div>
+</div>
+```
+
+视口窄时是 1 列，宽时根据 280px 阈值自动加列。**无需媒体查询**。
+
+### 3. Holy Grail Layout（圣杯布局）
+
+```css
+.layout {
+  display: grid;
+  grid-template:
+    'header header header' 64px
+    'left main right'      1fr
+    'footer footer footer' 80px / 200px 1fr 240px;
+  min-height: 100vh;
+}
+```
+
+```html
+<div class="layout">
+  <header style="grid-area: header">...</header>
+  <aside style="grid-area: left">...</aside>
+  <main style="grid-area: main">...</main>
+  <aside style="grid-area: right">...</aside>
+  <footer style="grid-area: footer">...</footer>
+</div>
+```
+
+### 4. 等高卡片
+
+Grid 的"项目默认 stretch"让等高列免费：
+
+```css
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+```
+
+每个 card 的高度自动等于该行最高的——比 Flex + 计算 height 简单得多。
+
+### 5. 标题与图标对齐
+
+```css
+.feature {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 16px;
+}
+```
+
+固定图标列 + 弹性内容列。
+
+### 6. 仪表板：复杂多块布局
+
+```css
+.dashboard {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: 200px;
+  gap: 16px;
+}
+
+.tile-large { grid-column: span 2; grid-row: span 2; }
+.tile-wide  { grid-column: span 2; }
+```
+
+```html
+<div class="grid grid-cols-4 auto-rows-[200px] gap-4">
+  <div class="col-span-2 row-span-2 bg-blue-500">Big</div>
+  <div class="col-span-2 bg-green-500">Wide</div>
+  <div class="bg-red-500">Small</div>
+  <div class="bg-yellow-500">Small</div>
+</div>
+```
+
+### 7. 完美居中（最简）
+
+```css
+body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+}
+```
+
+```html
+<body class="grid place-items-center min-h-screen">
+  <button>Click</button>
+</body>
+```
+
+### 8. 表单网格（label + input 对齐）
+
+```css
+.form {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px 16px;
+  align-items: center;
+}
+```
+
+所有 label 自动右对齐到列 1，input 在列 2 撑满。
+
+## Grid 与 Subgrid 的视觉对齐
+
+```css
+/* 父：12 栅格 */
+.page {
+  display: grid;
+  grid-template-columns: 1fr repeat(12, minmax(0, 80px)) 1fr;
+  gap: 16px;
+}
+
+/* 卡片：占用列 2-12 */
+.card {
+  grid-column: 2 / 12;
+  display: grid;
+  grid-template-columns: subgrid;             /* 内部对齐到外层 */
+}
+
+/* 卡片标题占 1-6，正文占 7-11 */
+.card-title { grid-column: 1 / 7; }
+.card-body  { grid-column: 7 / 11; }
+```
+
+无需再算"卡片实际宽度的多少分之多少"——subgrid 让嵌套对齐自动化。
+
+## 与 Flexbox 的对照
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 水平 / 垂直一维 | Flex |
+| 二维（行 × 列） | Grid |
+| 不知道行数 / 列数 | Grid（auto-fill / auto-fit） |
+| 项目跨格 | Grid |
+| 内容驱动尺寸 | Flex |
+| 设计稿规划好的整体布局 | Grid |
+| 媒体对象（图标 + 内容） | Flex |
+| 卡片网格 | Grid |
+| 表单字段对齐 | Grid |
+| 工具栏 / 导航 | Flex |
+
+实战中**经常嵌套使用**：外层 Grid 划分区域，内部 Flex 处理细节排列。
+
+## Tailwind Grid 速查
+
+| Tailwind | CSS |
+| -------- | --- |
+| `grid` / `inline-grid` | `display` |
+| `grid-cols-{n}` | `grid-template-columns: repeat(n, minmax(0, 1fr))` |
+| `grid-cols-[200px_1fr]` | 任意值 |
+| `grid-rows-{n}` | rows |
+| `col-span-{n}` / `col-span-full` | `grid-column: span n / -1` |
+| `col-start-{n}` / `col-end-{n}` | `grid-column-start/end` |
+| `row-span-{n}` | rows |
+| `auto-cols-min/max/fr` / `auto-rows-*` | implicit tracks |
+| `grid-flow-row` / `grid-flow-col` / `grid-flow-row-dense` | `grid-auto-flow` |
+| `gap-*` / `gap-x-*` / `gap-y-*` | `gap` |
+| `place-items-*` / `place-content-*` / `place-self-*` | shorthand |
+| `justify-items-*` / `justify-self-*` | column-axis |
+| `items-*` / `self-*` | row-axis（同 Flex） |
+
+## 小结
+
+- Grid 是二维布局的最强工具：行列规划、跨格、模板区域、Subgrid；
+- `repeat(auto-fit, minmax(min, 1fr))` 是响应式卡片网格的最简公式，无需媒体查询；
+- `grid-template-areas` 是最接近视觉草图的布局描述，适合复杂页面；
+- Subgrid 让嵌套元素对齐到外层网格，是嵌套对齐的终极方案；
+- `place-items: center` + `display: grid` 是垂直水平居中的最简写法；
+- Grid 与 Flex 互补：外层用 Grid 划区域，内层用 Flex 排细节。
