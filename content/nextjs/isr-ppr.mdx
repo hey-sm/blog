@@ -227,7 +227,7 @@ cacheLife({ revalidate: 3600, expire: 86400 })
 
 ## 陷阱
 
-### ISR 中的 `generateStaticParams` {fallback}
+### ISR 中的 `generateStaticParams` `{fallback}`
 
 `dynamicParams = true`（默认）时，未在 `generateStaticParams` 中返回的动态段在首次请求时 SSR → 结果被缓存 → 行为类似 ISR（但有 revalidate 延迟）。首次请求慢，后续快。
 
