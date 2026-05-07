@@ -1,0 +1,659 @@
+---
+title: 测试
+description: unit/widget/integration/golden 测试、WidgetTester pump 时序、mocktail、Riverpod ProviderContainer 测试、TDD 流程、覆盖率与 CI
+---
+
+# 测试
+
+测试不是"做完功能后补的事"——它直接决定**改动一个功能的成本**。Flutter 提供了从纯 Dart 函数到完整 app 的全套测试工具,本章按"快 → 慢 / 窄 → 宽"组织,主线工具是 `flutter_test` + **mocktail** + **Riverpod ProviderContainer**。
+
+## 测试金字塔
+
+```text
+                ┌──────────────────────────┐
+                │  integration test  慢/全 │   <  10 个,真机 / 模拟器
+                ├──────────────────────────┤
+                │  widget test       中    │   < 100 个,headless,< 1ms/个
+                ├──────────────────────────┤
+                │  unit test         快/窄 │   1000+ 个,纯 Dart,毫秒级
+                └──────────────────────────┘
+```
+
+经验比例:**unit ≫ widget ≫ integration**。底层稳了,上层才不需要重复测。
+
+## 目录约定
+
+```text
+my_app/
+├── lib/
+├── test/                       ← unit + widget,纯 Dart 跑
+│   ├── helpers/
+│   ├── features/
+│   │   └── articles/
+│   │       ├── article_repo_test.dart
+│   │       └── article_screen_test.dart
+│   └── ...
+└── integration_test/           ← 需要真实 binding 的测试
+    └── app_smoke_test.dart
+```
+
+跑命令:
+
+```bash
+flutter test                         # test/ 下全部
+flutter test test/features/articles  # 局部
+flutter test --coverage              # 输出 coverage/lcov.info
+flutter test integration_test/       # 集成测试(需要设备)
+```
+
+## Unit Test:`package:test`
+
+```dart filename="test/utils/email_validator_test.dart"
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/utils/email_validator.dart';
+
+void main() {
+  group('EmailValidator', () {
+    test('rejects empty', () {
+      expect(EmailValidator.isValid(''), false);
+    });
+
+    test('rejects no @ sign', () {
+      expect(EmailValidator.isValid('alice'), false);
+    });
+
+    test('accepts standard email', () {
+      expect(EmailValidator.isValid('alice@example.com'), true);
+    });
+  });
+}
+```
+
+> Flutter 项目优先 import `package:flutter_test`(包含 `package:test` 全套 + Flutter 专用 matcher)。纯 Dart 库才用 `package:test`。
+
+### 常用 matcher
+
+| matcher | 含义 |
+| ---- | ---- |
+| `equals(x)` / `==` | 相等(可省) |
+| `isA<Foo>()` | 类型为 Foo |
+| `same(x)` | identical |
+| `isEmpty` / `isNotEmpty` | 集合判空 |
+| `isNull` / `isNotNull` | null 判定 |
+| `predicate<T>((x) => ...)` | 自定义 |
+| `containsAll([...])` / `orderedEquals([...])` | 集合包含 |
+| `throwsA(isA<MyError>())` | 抛指定类型异常 |
+| `completes` / `completion(x)` | Future 成功 / 成功且值为 x |
+| `closeTo(3.14, 0.01)` | 浮点近似 |
+
+### 异步测试
+
+```dart
+test('fetch returns user', () async {
+  final user = await api.fetch('1');
+  expect(user.name, 'Alice');
+});
+
+test('fetch fails on 404', () {
+  expect(() => api.fetch('missing'), throwsA(isA<NotFoundError>()));
+});
+
+test('returns within 100ms', () {
+  expect(api.cached('1'), completion(isNotNull));
+}, timeout: const Timeout(Duration(milliseconds: 100)));
+```
+
+### `setUp` / `tearDown`
+
+每个 `test` 前后都跑:
+
+```dart
+group('UserCache', () {
+  late UserCache cache;
+  setUp(() => cache = UserCache());        // 每个 test 前跑
+  tearDown(() => cache.clear());           // 每个 test 后跑
+
+  setUpAll(() async => /* 整个 group 一次性准备 */);
+  tearDownAll(() async => /* 整个 group 一次性清理 */);
+
+  test('starts empty', () => expect(cache.size, 0));
+  test('add increases size', () { cache.add(...); expect(cache.size, 1); });
+});
+```
+
+> **一定用 `setUp` 而不是直接 `final cache = UserCache();`**——后者所有 test 共享同一个实例,前一个 test 的脏状态会污染下一个。
+
+### `expectLater` + Stream / Future
+
+```dart
+test('counter emits values', () async {
+  final stream = counter.stream;
+  expectLater(stream, emitsInOrder([0, 1, 2, emitsDone]));
+
+  counter.start();
+  await Future.delayed(const Duration(seconds: 1));
+  counter.dispose();
+});
+```
+
+`emits` / `emitsInOrder` / `emitsAnyOf` / `neverEmits` / `emitsThrough` / `emitsDone` 一整套 stream matcher。
+
+## Widget Test:`flutter_test`
+
+跑得超快(无需启动模拟器),但能完整渲染 widget 树、模拟手势、推进帧。
+
+```dart filename="test/widgets/counter_widget_test.dart"
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/widgets/counter.dart';
+
+void main() {
+  testWidgets('Counter increments on tap', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: CounterWidget()));
+
+    expect(find.text('0'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pump();                          // 推进一帧
+
+    expect(find.text('1'), findsOneWidget);
+  });
+}
+```
+
+### `WidgetTester` 三件套
+
+```dart
+await tester.pumpWidget(widget);                  // 挂载根 widget
+await tester.pump();                              // 推进一帧
+await tester.pump(Duration(milliseconds: 500));   // 推进指定时长(动画用)
+await tester.pumpAndSettle();                     // 反复 pump 直到无新帧
+```
+
+#### `pump` vs `pumpAndSettle`
+
+- `pump()`:推 1 帧,适合"`setState` 后立刻看新状态"。
+- `pump(duration)`:推到指定时间点,适合**动画进行到一半**的断言。
+- `pumpAndSettle()`:循环 pump 直到没有新帧调度——**适合等动画 / 路由转场结束**。
+
+> ⚠️ `pumpAndSettle` 不能用于无限循环动画(`repeat()`)——会**死循环**。这种场景必须用 `pump(duration)`。
+
+### `find` 全家桶
+
+| matcher | 含义 |
+| ---- | ---- |
+| `find.text('Hello')` | 找 Text widget 匹配文本 |
+| `find.byType(ElevatedButton)` | 找特定类型 |
+| `find.byKey(const ValueKey('submit'))` | 按 key 找 |
+| `find.byIcon(Icons.add)` | Icon widget |
+| `find.byTooltip('Add')` | tooltip |
+| `find.widgetWithText(ElevatedButton, 'OK')` | 含特定文本的特定 widget |
+| `find.descendant(of: find.byType(...), matching: ...)` | 嵌套查找 |
+| `find.ancestor(...)` | 反向查找 |
+
+```dart
+expect(find.text('Login'), findsOneWidget);     // 必须 1 个
+expect(find.byType(Card), findsNWidgets(3));    // 必须 3 个
+expect(find.text('Error'), findsNothing);       // 不存在
+expect(find.text('Item'), findsWidgets);        // ≥ 1 个
+```
+
+### 模拟交互
+
+```dart
+await tester.tap(find.byKey(const ValueKey('submit')));
+await tester.longPress(find.byKey(...));
+await tester.drag(find.byType(ListView), const Offset(0, -300));
+await tester.fling(find.byType(ListView), const Offset(0, -500), 1000);
+await tester.enterText(find.byType(TextField), 'alice@example.com');
+
+// 取焦点
+await tester.showKeyboard(find.byType(TextField));
+```
+
+每个交互后通常需要 `pump()`(让 setState 生效)或 `pumpAndSettle()`(等动画结束)。
+
+### 测试列表条目
+
+```dart
+testWidgets('shows 10 items', (tester) async {
+  await tester.pumpWidget(MaterialApp(
+    home: ArticleList(items: List.generate(10, (i) => Article(title: 'A$i'))),
+  ));
+
+  expect(find.byType(ListTile), findsNWidgets(10));    // 屏外的会被报"找不到"
+});
+```
+
+> 默认 widget test 屏幕大小约 800×600。屏外的 widget 在懒加载列表里**不会构建**——`find` 自然找不到。要测下方条目,需要先滚动:
+
+```dart
+await tester.drag(find.byType(ListView), const Offset(0, -1000));
+await tester.pumpAndSettle();
+expect(find.text('Item 50'), findsOneWidget);
+```
+
+或者用 `find.text('Item 50', skipOffstage: false)`(只在 widget 已构建但被 offstage 隐藏时有用)。
+
+## Mocktail:替身的标准做法
+
+[mocktail](https://pub.dev/packages/mocktail) 是 null-safety 时代社区主流——**不用 code-gen,继承 `Mock` 即可**。
+
+```yaml filename="pubspec.yaml"
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  mocktail: ^1.0.0
+```
+
+```dart filename="test/data/article_repo_test.dart"
+import 'package:mocktail/mocktail.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/data/article_repo_impl.dart';
+
+class _MockApi extends Mock implements ApiClient {}
+class _MockDao extends Mock implements ArticleDao {}
+
+void main() {
+  late _MockApi api;
+  late _MockDao dao;
+  late ArticleRepoImpl repo;
+
+  setUp(() {
+    api = _MockApi();
+    dao = _MockDao();
+    repo = ArticleRepoImpl(api, dao);
+  });
+
+  group('fetchById', () {
+    test('returns ok on success', () async {
+      // 录制行为
+      when(() => api.get<Map<String, dynamic>>(any()))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(),
+                statusCode: 200,
+                data: {'id': '1', 'title': 'Hello'},
+              ));
+      when(() => dao.upsert(any())).thenAnswer((_) async {});
+
+      final r = await repo.fetchById('1');
+      expect(r, isA<Ok<Article, Failure>>());
+
+      // 验证调用
+      verify(() => api.get<Map<String, dynamic>>('/articles/1')).called(1);
+      verify(() => dao.upsert(any())).called(1);
+    });
+
+    test('falls back to cache on network error', () async {
+      when(() => api.get<Map<String, dynamic>>(any()))
+          .thenThrow(DioException(requestOptions: RequestOptions(), type: DioExceptionType.connectionError));
+      when(() => dao.get('1')).thenAnswer((_) async => Article(id: '1', title: 'cached'));
+
+      final r = await repo.fetchById('1');
+      expect(r, isA<Ok<Article, Failure>>());
+      expect((r as Ok).value.title, 'cached');
+    });
+  });
+}
+```
+
+### `when` 全套
+
+| 形式 | 用途 |
+| ---- | ---- |
+| `when(() => mock.foo())` | 录制 |
+| `.thenReturn(x)` | 同步返回 |
+| `.thenAnswer((inv) async => x)` | 异步返回 / 用入参算 |
+| `.thenThrow(err)` | 抛异常 |
+
+`any()` 匹配任意参数;具体值匹配相等。
+
+### `registerFallbackValue`:custom 类型 `any` 需要兜底
+
+mocktail 用 `any()` 匹配复杂类型时会报错(因为它需要构造一个 fallback 值用作默认参数)。`setUpAll` 里注册一次:
+
+```dart
+setUpAll(() {
+  registerFallbackValue(Article(id: '_', title: '_'));
+});
+```
+
+之后 `when(() => dao.upsert(any()))` 才能用。
+
+### `verify` / `verifyNever` / `verifyInOrder`
+
+```dart
+verify(() => api.get(any())).called(1);          // 调了 1 次
+verify(() => api.get(any())).called(greaterThan(0));
+verifyNever(() => api.delete(any()));
+verifyInOrder([                                  // 必须按这个顺序调
+  () => api.get('/a'),
+  () => api.get('/b'),
+]);
+```
+
+### Fake / Stub / Mock 的区别
+
+- **Fake**:可工作的简化实现(内存 map 替代 DB)。
+- **Stub**:返回预设值,不验证调用。
+- **Mock**:返回预设值 + 验证调用次数 / 顺序。
+
+```dart filename="test/helpers/fake_api.dart"
+class FakeApi implements ApiClient {       // ← 这是 Fake,不是 Mock
+  final Map<String, Map<String, dynamic>> _store = {};
+
+  @override
+  Future<Response<T>> get<T>(String path, {...}) async {
+    final data = _store[path];
+    if (data == null) throw DioException(...);
+    return Response(data: data as T, requestOptions: RequestOptions());
+  }
+}
+```
+
+**经验**:
+
+- 数据访问层(Repo)用 Fake 通常更稳——对调用细节的过度断言会让测试僵化。
+- 验证"是否调用了某接口"才用 Mock(发埋点 / 发推送)。
+
+## Riverpod 测试
+
+### 用 `ProviderContainer` 测纯逻辑(不渲染)
+
+```dart filename="test/features/auth/login_controller_test.dart"
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('login success transitions through loading→data', () async {
+    final container = ProviderContainer(overrides: [
+      authRepoProvider.overrideWithValue(_FakeAuthRepo()),
+    ]);
+    addTearDown(container.dispose);
+
+    final states = <AsyncValue<void>>[];
+    container.listen(
+      loginControllerProvider,
+      (_, next) => states.add(next),
+      fireImmediately: true,
+    );
+
+    await container.read(loginControllerProvider.notifier).signIn('a@b.com', 'pw12345678');
+
+    expect(states.length, 3);
+    expect(states[0], isA<AsyncData<void>>());
+    expect(states[1], isA<AsyncLoading<void>>());
+    expect(states[2], isA<AsyncData<void>>());
+  });
+}
+```
+
+### 在 widget test 里 override
+
+```dart
+testWidgets('shows error on auth failure', (tester) async {
+  await tester.pumpWidget(ProviderScope(
+    overrides: [
+      authRepoProvider.overrideWithValue(_FailingAuthRepo()),
+    ],
+    child: const MaterialApp(home: LoginScreen()),
+  ));
+
+  await tester.enterText(find.byKey(const ValueKey('email')), 'a@b.com');
+  await tester.enterText(find.byKey(const ValueKey('password')), 'pw12345678');
+  await tester.tap(find.text('Sign in'));
+  await tester.pumpAndSettle();
+
+  expect(find.text('Invalid credentials'), findsOneWidget);
+});
+```
+
+### `overrideWith` vs `overrideWithValue`
+
+- `overrideWithValue(x)`:把 provider 替换成固定值(适合 `Provider`)。
+- `overrideWith((ref) => ...)`:替换构造函数(适合需要在 ref 里读其他 provider 的场景)。
+- 对 `Notifier` / `AsyncNotifier`,用 `notifierProvider.overrideWith(() => FakeNotifier())`。
+
+## Integration Test
+
+```yaml filename="pubspec.yaml"
+dev_dependencies:
+  integration_test:
+    sdk: flutter
+  flutter_test:
+    sdk: flutter
+```
+
+```dart filename="integration_test/app_smoke_test.dart"
+import 'package:integration_test/integration_test.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/main.dart' as app;
+
+void main() {
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('login → home → settings → logout', (tester) async {
+    app.main();
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const ValueKey('email')), 'a@b.com');
+    await tester.enterText(find.byKey(const ValueKey('password')), 'pw12345678');
+    await tester.tap(find.text('Sign in'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Welcome back'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Sign out'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sign in'), findsOneWidget);
+  });
+}
+```
+
+跑(需设备 / 模拟器):
+
+```bash
+flutter test integration_test/
+```
+
+> integration test 跑得慢(需要真实 binding),适合**关键流程的"冒烟测试"**——别想测每个分支。每个 PR 跑 1–3 个核心路径足够。
+
+## Golden Test:视觉差异
+
+Flutter 内置的"截图对比"——把 widget 当前外观与基准 PNG 比对,差异超过阈值即失败。
+
+```dart filename="test/golden/article_card_golden_test.dart"
+testWidgets('ArticleCard golden', (tester) async {
+  await tester.pumpWidget(MaterialApp(
+    home: Center(child: ArticleCard(title: 'Hello', author: 'Alice')),
+  ));
+  await expectLater(
+    find.byType(ArticleCard),
+    matchesGoldenFile('goldens/article_card.png'),
+  );
+});
+```
+
+第一次运行:
+
+```bash
+flutter test --update-goldens
+```
+
+会生成 `test/golden/goldens/article_card.png`。后续 `flutter test` 会比对,有像素差异(默认很小阈值)就失败。
+
+### 跨平台 / 字体陷阱
+
+不同 OS / 字体渲染 / Skia/Impeller 引擎都会让 PNG 不完全一致——**golden 在 CI 必须固定 Linux 容器跑**,本地 macOS 跑结果可能不同。
+
+策略:
+
+- 所有 golden 都用同一个固定字体(`golden_toolkit` 包提供 Roboto 加载器)。
+- CI 跑 Linux,本地用 `--update-goldens` 时也最好在 Linux 上做(用 docker)。
+- 大型项目用 [alchemist](https://pub.dev/packages/alchemist) 包,自动管理字体 / 平台过滤。
+
+## TDD 流程示例
+
+需求:**购物车实现 `add(item)` / `remove(id)` / `total` —— 总价 = 各项单价 × 数量之和**。
+
+### Step 1: 写失败的测试
+
+```dart filename="test/cart_test.dart"
+import 'package:flutter_test/flutter_test.dart';
+import 'package:my_app/cart.dart';
+
+void main() {
+  group('Cart', () {
+    test('starts empty with total 0', () {
+      expect(Cart().total, 0);
+    });
+
+    test('add increments total', () {
+      final c = Cart()..add(Item(id: '1', price: 10, qty: 2));
+      expect(c.total, 20);
+    });
+
+    test('remove removes the item', () {
+      final c = Cart()
+        ..add(Item(id: '1', price: 10, qty: 2))
+        ..remove('1');
+      expect(c.total, 0);
+    });
+  });
+}
+```
+
+跑:`flutter test`——**红**(因为 `Cart` 不存在)。
+
+### Step 2: 最小实现让测试通过
+
+```dart filename="lib/cart.dart"
+class Item { Item({required this.id, required this.price, required this.qty}); ... }
+
+class Cart {
+  final _items = <Item>[];
+  void add(Item i) => _items.add(i);
+  void remove(String id) => _items.removeWhere((i) => i.id == id);
+  int get total => _items.fold(0, (s, i) => s + i.price * i.qty);
+}
+```
+
+跑:**绿**。
+
+### Step 3: 重构
+
+```dart
+class Cart {
+  Cart([List<Item>? items]) : _items = [...?items];
+  final List<Item> _items;
+  List<Item> get items => List.unmodifiable(_items);
+
+  void add(Item i) => _items.add(i);
+  bool remove(String id) => _items.removeWhere((i) => i.id == id) > 0;
+  int get total => _items.fold(0, (s, i) => s + i.price * i.qty);
+}
+```
+
+跑:仍然**绿**。
+
+### Step 4: 加新需求,先加测试
+
+```dart
+test('remove returns true if removed, false if not present', () {
+  final c = Cart()..add(Item(id: '1', price: 10, qty: 2));
+  expect(c.remove('1'), true);
+  expect(c.remove('99'), false);
+});
+```
+
+跑 → 绿(因为我们 step 3 已经把 `remove` 改成返回 bool)。
+
+> TDD 不是"写一堆测试再写代码",而是**红 → 绿 → 重构**循环,每个循环只覆盖一个小行为。它的价值在于**强制你把"我想要什么"在写代码前讲清楚**。
+
+## 覆盖率与 CI
+
+### 本地
+
+```bash
+flutter test --coverage
+# 生成 coverage/lcov.info
+
+# Linux/macOS 转 HTML(需 lcov 工具)
+genhtml coverage/lcov.info -o coverage/html
+open coverage/html/index.html
+```
+
+### GitHub Actions
+
+```yaml filename=".github/workflows/test.yml"
+name: test
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.x'
+          channel: stable
+      - run: flutter pub get
+      - run: dart run build_runner build --delete-conflicting-outputs
+      - run: flutter analyze
+      - run: flutter test --coverage
+      - uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+```
+
+### 覆盖率不是目标
+
+覆盖率 100% 不代表 0 bug——它只是说"每行代码至少被运行过一次"。**关注覆盖率不如关注"关键路径是否有断言"**。
+
+> 经验阈值:domain / utils 层 ≥ 90%,data 层 ≥ 70%,presentation 层 ≥ 40%(widget 测试代价大,golden 抵消一部分)。
+
+### 排除自动生成代码
+
+`coverage/lcov.info` 默认包含 `*.g.dart` / `*.freezed.dart`——拉低有效覆盖率。`test_coverage_exclude` 脚本或 `coverage/lcov_clean.info` 处理:
+
+```bash
+# 用 lcov 工具排除
+lcov --remove coverage/lcov.info \
+  '**/*.g.dart' '**/*.freezed.dart' \
+  -o coverage/lcov_clean.info
+```
+
+## 心智模型清单
+
+1. **金字塔**:unit ≫ widget ≫ integration;底层稳了上层不重复测。
+2. **`pump()` 推 1 帧;`pump(duration)` 推到时间;`pumpAndSettle()` 等动画结束**——无限动画用前两者,别用 `pumpAndSettle`。
+3. **`find` 找的是"屏内构建过的 widget"**;列表外的需先滚动。
+4. **mocktail 是 null-safety 主线 mock**;不用 code-gen,继承 `Mock` 即可。
+5. **`registerFallbackValue` 给 `any()` 兜底**;复杂类型必须先注册。
+6. **Fake / Stub / Mock 三选一**:数据层偏 Fake,验证调用次数才用 Mock。
+7. **Riverpod 测试用 `ProviderContainer.listen` + `overrides`**;widget test 用 `ProviderScope.overrides`。
+8. **integration test 只测核心冒烟流程**;不要复制 widget test 能做的事。
+9. **golden 必须固定环境跑**(CI Linux);跨平台像素差是常见坑。
+10. **TDD 红 → 绿 → 重构**;每轮只验证一个小行为。
+11. **覆盖率不是目标,关键路径有断言才是**;排除生成产物后再看数字。
+12. **CI 必须跑 build_runner、analyze、test、覆盖率上传**——少一项就有"在我机器上能跑"的故事。
+
+## 自查问题
+
+- 写一个 `test()` 验证 `2 + 2 == 4`,再写一个验证 `() => throw ArgumentError('x')` 抛 `ArgumentError`。
+- `pump()` vs `pumpAndSettle()` 的区别;给一个 `pumpAndSettle` 会死循环的具体场景。
+- 在 widget test 里测一个 `ListView.builder(itemCount: 100)`,如何断言第 80 项的存在?
+- mocktail 的 `any()` 匹配自定义类时为什么报错?给出修法。
+- 你想验证 "登录成功后调用了 Analytics.track('login_success')",这是 Fake / Stub / Mock 中哪种?用 mocktail 写完整代码。
+- 用 `ProviderContainer` 测一个 `AsyncNotifier`:覆盖一个网络失败的依赖,断言状态从 `loading → error`。
+- integration test 与 widget test 的本质区别是什么?给出"用前者更合适"的具体场景。
+- golden test 在 CI 失败但本地通过,可能的原因有哪些?如何排查?
+- 用 TDD 写一个简单的 `Stack<T>`(`push` / `pop` / `peek` / `isEmpty`),按"红→绿→重构"循环。
+- `flutter test --coverage` 生成的 `lcov.info` 包含 `*.g.dart`,如何把生成产物排除?
+- 你的 CI 流程必须跑哪几条命令?各自防止什么类型的 bug?
+
+下一章 [调试与性能](/flutter/devtools-perf):测试通过 ≠ 性能没事;DevTools 全套教你看 60fps。

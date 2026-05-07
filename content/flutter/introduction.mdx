@@ -1,0 +1,460 @@
+---
+title: 简介与心智模型
+description: Flutter 是什么、声明式 UI、一切皆 Widget、三棵树与运行时模型
+---
+
+# 简介与心智模型
+
+本章不写一行 Flutter 业务代码，目的是把后续所有章节都依赖的"心智地基"讲透。读完之后，再面对密密麻麻的 Widget 嵌套、`setState`、`build` 方法、报错堆栈，你应该能立刻定位它在整个体系的哪个位置。
+
+## Flutter 到底是什么
+
+Flutter 由三件东西组成：
+
+1. **一门语言**：Dart——Google 设计的面向对象语言，强类型、null-safety、AOT 与 JIT 双模式编译。
+2. **一套 UI 工具包**：以 Dart 写成的 widget 库（`flutter` 包），定义"界面是什么样、怎么响应输入、怎么动画"。
+3. **一套渲染引擎**：用 C++ 写成（Skia / Impeller），负责把 widget 树最终翻译成 GPU 指令画到屏幕上。
+
+> **关键事实**：Flutter 应用界面上每一个像素都是 Flutter 自己画的，**不调用宿主平台（iOS / Android / 浏览器）的原生 UI 控件**。
+
+这条事实决定了 Flutter 与"原生开发"和"WebView 套壳"的根本差异：
+
+| 方案 | UI 由谁绘制 | 跨平台一致性 | 性能特性 |
+| ---- | ----------- | ------------ | -------- |
+| 原生 iOS / Android | 系统原生控件 | 各平台外观天然差异 | 平台原生水准 |
+| Cordova / Ionic（WebView） | 浏览器引擎 | 一致，但受限于 WebView | 受 JS 与 WebView 限制 |
+| React Native | 桥接到原生控件 | 大体一致，细节有差 | 桥调用是性能瓶颈 |
+| **Flutter** | **自带引擎，逐像素绘制** | **像素级一致** | **直接对接 GPU，无桥** |
+
+**代价**：Flutter 应用包体积更大（要带引擎），首次启动略慢；外观要实现"原生即视感"需要主动选择 Material（拟 Android）或 Cupertino（拟 iOS）组件库。
+
+**收益**：你写一份代码，行为与外观在 iOS / Android / Web / Windows / macOS / Linux / 嵌入式上几乎完全一致，且不存在"桥"的运行时开销。
+
+## 三大设计支柱
+
+Flutter 的全部 API 都从三条公理推出：
+
+> 1. **`UI = f(state)`** — 界面是状态的纯函数；
+> 2. **Everything is a Widget** — 不只是按钮和文本框，连"内边距"、"居中"、"透明度"、"手势识别"都是 widget；
+> 3. **Composition over inheritance** — 组合优于继承，复杂 UI 由许多极小、单一职责的 widget 嵌套出来。
+
+下面分别解释。
+
+### 公理一：UI = f(state)
+
+"界面是状态的纯函数"听起来抽象，落到代码就一句话：
+
+> **你不直接修改界面，你修改"状态"，框架来重新计算界面。**
+
+举个反例。下面是命令式风格——典型的传统 GUI 开发，你"亲手"去找到那个文本控件然后改它的属性：
+
+```text
+// 伪代码（命令式）
+label = findById('greeting')
+label.text = 'Hello, ' + name
+if (selected) label.background = YELLOW
+```
+
+Flutter 不允许这种写法。Flutter 的写法是：
+
+```dart
+// 当 name 变化时，框架会自动重新调用 build()，得到新的 UI 描述
+Widget build(BuildContext context) {
+  return Text('Hello, $name');
+}
+```
+
+你**只描述"在当前 name 下，界面长什么样"**。至于"屏幕上当前那个文字控件该怎么改"，是框架的事，你不应当也没办法插手。
+
+这条公理带来三个直接推论，先记下来，后面会反复用到：
+
+- **状态唯一可信源（single source of truth）**：界面上看到的 `Hello, Alice`，唯一来源是某个 `name = 'Alice'` 变量。永远不会出现"变量是 Bob，但界面是 Alice"的不一致。
+- **UI 不可"潜入修改"**：你拿不到"那个 Text widget 的引用"去改它的文字。Widget 是不可变的（见下文）。
+- **状态变化才是输入**：用户点击、网络回包、定时器触发——它们最终都通过"修改某个状态"间接驱动界面更新。
+
+### 公理二：Everything is a Widget
+
+在很多 GUI 框架里，"按钮"是一个对象，它的"内边距"是这个对象的一个属性（比如 `button.padding = 16`）。Flutter 把这个常识翻了过来：**内边距本身是一个 widget**。
+
+```dart
+Padding(
+  padding: const EdgeInsets.all(16),  // 内边距 widget
+  child: Center(                       // 居中 widget
+    child: Opacity(                    // 透明度 widget
+      opacity: 0.5,
+      child: GestureDetector(          // 手势识别 widget
+        onTap: () {},
+        child: const Text('Hello'),    // 文本 widget
+      ),
+    ),
+  ),
+)
+```
+
+第一次看到这种写法的人，几乎都会说一句"这嵌套得太深了吧"，俗称**嵌套地狱**。这不是设计缺陷，而是有意为之的代价：
+
+- **每个 widget 极小、职责单一** → 任何一个都可以被读懂、替换、复用、单独测试；
+- **组合几乎无穷灵活** → 没有任何一个"按钮组件"会被迫塞 50 个布尔属性来覆盖所有用法；
+- **看代码即看 UI** → widget 树的层次几乎就是视觉上的嵌套层次，所见即所读。
+
+后面 [Widgets 基础](/flutter/widgets-basics) 会教你如何把嵌套抽出成方法或子类来缓解视觉负担。但**心智上要接受嵌套深是常态**，而不是把它当 bug 去躲。
+
+### 公理三：Composition over Inheritance
+
+传统 OOP 鼓励"用继承表达差异"——`RoundedButton extends Button`，`PrimaryButton extends RoundedButton`。Flutter 反其道：**几乎没人通过继承去定制 widget**，所有差异都是用"包一层 widget"实现的：
+
+```dart
+// ✗ Flutter 不鼓励这样
+class RoundedButton extends ElevatedButton { ... }
+
+// ✓ Flutter 推荐这样：用组合包出来
+ClipRRect(
+  borderRadius: BorderRadius.circular(8),
+  child: ElevatedButton(onPressed: () {}, child: const Text('OK')),
+)
+```
+
+这个原则的实际后果是：
+
+- **你将很少 `extends` 一个 widget**——StatefulWidget 与 StatelessWidget 几乎是你唯一会继承的两个基类；
+- **要"自定义按钮"，你写一个 widget，它内部组合 `Container` / `InkWell` / `Text`**——而不是去继承 `ElevatedButton`；
+- **复杂 UI = 多个简单 widget 嵌套** → 每一层都可单独理解。
+
+## Widget：最小心智单元
+
+Widget 是 Flutter 中**最重要的一个名词**。它有四个不可妥协的特征：
+
+1. **Widget 是 Dart 类**：写一个 widget 就是写一个继承 `StatelessWidget` 或 `StatefulWidget` 的类。
+2. **Widget 是不可变（immutable）的**：Widget 实例一旦创建，所有字段都是 `final`，不能再改。
+3. **Widget 廉价**：构造一个 widget 等同于执行一次 `new SomeClass(...)`，没有 IO、没有平台调用，仅仅是分配几个对象。
+4. **Widget 是 UI 的"声明"，不是 UI 本身**：它只描述"应该长什么样"，真正在屏幕上像素级落地的是另一套对象（见后文"三棵树"）。
+
+### 第一种 widget：StatelessWidget
+
+无内部状态的 widget，输入完全由父级通过构造参数提供，输出完全由 `build` 返回的 widget 树决定。
+
+```dart filename="lib/widgets/greeting.dart"
+import 'package:flutter/material.dart';
+
+class Greeting extends StatelessWidget {
+  const Greeting({super.key, required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text('Hello, $name');
+  }
+}
+
+// 使用：
+const Greeting(name: 'Alice');
+```
+
+要点解读（这些语法在 [Dart 基础](/flutter/dart-basics) 与 [Dart 类系统](/flutter/dart-oop) 章会展开，这里先建立印象）：
+
+- `extends StatelessWidget` —— 继承基类。
+- `const ... ({super.key, required this.name})` —— **常量构造函数**：当所有字段都已知且不变时用 `const` 标记，Flutter 会**复用同一实例**，是一项关键性能优化。
+- `super.key` —— 父类参数转发（Dart 3 语法）。`Key` 用于在 widget 树重建时帮助框架识别"这是不是同一个 widget"，详见 [渲染机制](/flutter/rendering)。
+- `final String name` —— 字段必须 `final`，因为 widget 不可变。
+- `@override Widget build(BuildContext context) { ... }` —— 框架在每次需要这个 widget 出现在屏幕上时调用它；返回值是"它的 UI 描述"。
+
+### 第二种 widget：StatefulWidget
+
+带可变状态的 widget。它**本身仍是不可变的**——可变的部分被分到了一个叫 `State` 的伴生对象里。
+
+```dart filename="lib/widgets/counter.dart"
+import 'package:flutter/material.dart';
+
+class Counter extends StatefulWidget {
+  const Counter({super.key});
+
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  int count = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: () {
+        setState(() {        // 告知框架：state 变了，请重建
+          count++;
+        });
+      },
+      child: Text('Count: $count'),
+    );
+  }
+}
+```
+
+第一次接触会有几个困惑，全部正面回答：
+
+**Q1：为什么把 widget 拆成两个类？**
+因为框架要在多次重建之间**保留 state**。Widget 实例每帧都会被丢弃重建（廉价），但 `_CounterState` 实例会被框架持有、跨帧复用——`count` 才得以累加。
+
+**Q2：`setState` 到底做了什么？**
+它做两件事：（a）执行你传入的回调，让你修改字段；（b）**告知框架：这个 State 变脏了，下一帧请调用我的 `build`**。它**不直接重绘**，重绘是框架统一调度的。
+
+**Q3：为什么不能直接 `count++`，必须套 `setState`？**
+直接改字段也"能改"，但框架不知道你改了，下一帧不会重建，界面与状态会脱节。`setState` 的本质就是"通知框架"。
+
+**Q4：`_CounterState` 前面的下划线是什么？**
+Dart 用下划线开头表示**库级私有**——只有同一个文件能访问。State 类按惯例是私有的。
+
+### Widget 的三种心智角色
+
+实际写 Flutter 时，widget 在你头脑中应该有三种"职业"：
+
+1. **布局型 widget**：决定子节点摆在哪、多大。例如 `Row` / `Column` / `Stack` / `Padding` / `Center` / `SizedBox`。
+2. **绘制型 widget**：直接产生像素。例如 `Text` / `Image` / `Icon` / `ColoredBox` / `CustomPaint`。
+3. **行为型 widget**：不产生像素，但加行为。例如 `GestureDetector`（手势）/ `FocusNode`（焦点）/ `Listener`（原始指针事件）/ `Hero`（页面间动画）。
+
+读 widget 树时，习惯性地给每个节点贴一种角色标签，会让你立刻看懂这棵树的意图。
+
+## 三棵树：Widget / Element / RenderObject
+
+这是 Flutter 性能与生命周期模型的核心，**没有理解三棵树，就读不懂任何性能优化建议**。先建立直觉，后续 [渲染机制](/flutter/rendering) 章再深入细节。
+
+```text
+┌────────────────────┐  ┌────────────────────┐  ┌─────────────────────┐
+│   Widget Tree      │  │   Element Tree     │  │   RenderObject Tree │
+│  （配置/不可变）    │  │ （生命周期/可变）  │  │  （布局 + 绘制）    │
+│                    │  │                    │  │                     │
+│  Text('Hi')        │─►│  StatelessElement  │─►│  RenderParagraph    │
+│  Padding(...)      │─►│  SingleChildElement│─►│  RenderPadding      │
+│  ColoredBox(...)   │─►│  SingleChildElement│─►│  RenderColoredBox   │
+└────────────────────┘  └────────────────────┘  └─────────────────────┘
+   每帧重建（廉价）       尽量复用（关键）       仅必要节点更新（昂贵）
+```
+
+| 树 | 角色 | 生命周期 | 类比 |
+| ---- | ---- | -------- | ---- |
+| **Widget** | UI 的"配置说明书" | 短暂，每帧丢弃重建 | 装修图纸 |
+| **Element** | "说明书在这棵树里的位置" + 生命周期 | 长存，跨帧复用 | 工程负责人 |
+| **RenderObject** | 真正负责量、布、绘 | 长存，跨帧复用 | 实际施工的工人 |
+
+举一个最简单的工作流：你点了一下按钮，`count` 从 0 变成 1。
+
+1. 你调用 `setState`，把对应的 Element 标记为"脏"；
+2. 框架在下一帧调用脏 Element 上挂的 widget 的 `build` 方法 → 得到一棵**新 widget 树**；
+3. 框架把新 widget 树与旧 widget 树同位置一一比对：
+   - 类型相同（都是 `Text`）→ **复用 Element**，让它把"新文字"写进现有的 `RenderParagraph` 里；
+   - 类型不同 → 把旧 Element 卸载，挂新的，重新创建 RenderObject。
+4. 框架触发布局（layout）→ 绘制（paint）→ 光栅化 → 上屏。
+
+这就是为什么本章前面强调"**Widget 廉价**"——它每帧都在被构造和丢弃。真正贵的是 RenderObject，而 RenderObject 的复用率在多数情况下接近 100%。
+
+> **新手最容易踩的坑**：以为"build 重新跑一次 = 整个界面重新绘制一次"。错。Widget 重建只是产生新的"配置说明书"；多数情况下 Element 与 RenderObject 都被复用，最终只是"修改了几个属性 + 局部重绘几个像素"。
+
+## 数据流：自上而下，一动一静
+
+Flutter 严格遵循**自上而下**的数据流：
+
+```text
+state ─┐
+       ├─► constructor 参数 ──► child widget
+       ├─► constructor 参数 ──► child widget
+       └─► constructor 参数 ──► child widget
+```
+
+子节点想反过来影响父节点的状态，**不能直接改父节点的字段**——必须通过父节点显式传下来的回调函数。
+
+```dart
+class Parent extends StatefulWidget {
+  const Parent({super.key});
+  @override
+  State<Parent> createState() => _ParentState();
+}
+
+class _ParentState extends State<Parent> {
+  int count = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Child(
+      count: count,
+      onInc: () => setState(() => count++),  // 回调下发
+    );
+  }
+}
+
+class Child extends StatelessWidget {
+  const Child({super.key, required this.count, required this.onInc});
+
+  final int count;
+  final VoidCallback onInc;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(onPressed: onInc, child: Text('$count'));
+  }
+}
+```
+
+这种约束的代价是少量样板代码，收益是**任何状态变化都有明确的发起源**。当回调链穿透太多层（俗称 prop drilling），框架提供 `InheritedWidget` 作为反向定位机制——子节点显式向上查找祖先的状态。Provider / Riverpod / Bloc 等状态管理库都构建在这个机制之上。详见 [状态管理](/flutter/state-management)。
+
+## 运行时模型：单线程 + 事件循环 + Isolate
+
+理解 Flutter 性能问题的另一半钥匙，是 Dart 的运行时模型。
+
+### 一切跑在一个线程上
+
+```text
+┌──────────────────── Main Isolate（你写的所有 Dart 代码）────────────────────┐
+│                                                                              │
+│   ┌──────────┐   microtask   ┌──────────┐   event   ┌──────┐                │
+│   │ run sync │ ────────────► │  queue   │ ────────► │ pump │ ──── 下一帧 ── │
+│   └──────────┘               └──────────┘           └──────┘                │
+│                                                                              │
+│   每帧（≈16.6ms 下 60Hz / ≈8.3ms 下 120Hz）：                                │
+│     1. 处理输入事件      4. layout                                           │
+│     2. 处理动画 tick     5. paint                                            │
+│     3. build（重建脏节点） 6. 提交 GPU 命令 → 引擎线程光栅化                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Isolate** 是 Dart 的"线程"概念——但与传统线程有本质区别：
+
+- 每个 Isolate 有**独立堆内存**，互相不共享对象，不存在数据竞争；
+- Isolate 之间通过 `SendPort` 收发**消息**通信（消息会被复制或转移）；
+- 你写的所有 UI 代码默认跑在一个叫 **Main Isolate** 的 Isolate 上。
+
+每帧 16.6ms（在 60Hz 屏上）是硬预算。你的 `build` / 业务逻辑 / 网络回包处理，全部要在这 16.6ms 里完成；超时 = 掉帧 = 卡顿。
+
+### CPU 重活必须扔到别的 Isolate
+
+如果你需要在主线程做一件耗时的纯计算（解析 1MB JSON、压图、加密），你**必须**把它搬到另一个 Isolate：
+
+```dart
+import 'package:flutter/foundation.dart';   // 提供 compute()
+
+// expensiveParse 是一个 top-level 函数（必须！Isolate 间不能传闭包）
+List<Item> expensiveParse(String json) {
+  // ... 几十毫秒的 CPU 工作
+  return items;
+}
+
+// 在主线程里这样调用：
+final items = await compute(expensiveParse, jsonStr);
+```
+
+`compute` 是 Flutter 提供的最简包装，背后会启动一个 Isolate、把参数复制过去、执行函数、把结果复制回来。复杂场景用 `Isolate.spawn` + `SendPort` 自己手动管理。详见 [Dart 异步与并发](/flutter/dart-async)。
+
+> **常见误区**：以为 `async` / `await` 就是"开了线程"。**不是。** `async` / `await` 只是把代码切片放到事件队列里**仍然在主线程跑**——它解决的是"不阻塞同步代码"，不解决"CPU 重活吃满主线程"。后者只有 Isolate 能解决。
+
+## Flutter 不做什么
+
+理解 Flutter 的**边界**与理解它本身同样重要。Flutter 内置的，只有三件事：
+
+1. Widget 体系；
+2. 渲染管线（layout / paint / 合成）；
+3. 与平台对接的最小接口（手势、文本输入、剪贴板、平台通道等）。
+
+**Flutter 不内置**的东西，全靠生态包（pub.dev）解决：
+
+| 你以为 Flutter 自带，其实没有 | 推荐方案 |
+| ----------------------------- | -------- |
+| 全局状态管理 | Provider、**Riverpod**、**Bloc** |
+| 路由命名约定 / 守卫 / 深链 | go_router、auto_route（基于 Navigator 2.0） |
+| 网络请求高级特性（拦截器/重试/缓存） | dio、http |
+| JSON ↔ Dart 对象自动序列化 | json_serializable + freezed、dart_mappable |
+| 依赖注入容器 | get_it、injectable、Riverpod 自身 |
+| 本地数据库 | sqflite、Drift、Hive、Isar |
+| 国际化字符串 | flutter_localizations + intl、slang |
+| 表单字段聚合校验 | formz、reactive_forms |
+| 后端服务（认证、云数据库、推送） | Firebase、Supabase、Appwrite |
+
+每一项都会在后续章节单独展开。**这种"小核心 + 大生态"是 Flutter 演进迅速的关键**——核心团队只迭代渲染与基础 widget，业务能力交给社区。
+
+## 一段最小可运行示例
+
+下面是一个真正能跑起来的 Flutter 应用，整体读一遍，每行你大概都能猜个意思——这正是 Flutter 易上手的体现。
+
+```dart filename="lib/main.dart"
+import 'package:flutter/material.dart';
+
+void main() => runApp(const MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Hello Flutter',
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+      home: const HelloPage(),
+    );
+  }
+}
+
+class HelloPage extends StatefulWidget {
+  const HelloPage({super.key});
+  @override
+  State<HelloPage> createState() => _HelloPageState();
+}
+
+class _HelloPageState extends State<HelloPage> {
+  String name = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Hello')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              decoration: const InputDecoration(labelText: 'Your name'),
+              onChanged: (v) => setState(() => name = v),
+            ),
+            const SizedBox(height: 16),
+            Text(name.isEmpty ? 'Type something…' : 'Hello, $name!'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+把它跑起来后发生了什么，逐步追一遍：
+
+1. `main()` 是入口函数。`runApp(const MyApp())` 把根 widget 交给 Flutter，框架内部创建对应的 Element 与 RenderObject，并把根 RenderObject 挂到引擎窗口上。
+2. **首次帧**：`MyApp.build` 返回 `MaterialApp` → `MaterialApp` 内部 build 出 `HelloPage` → `HelloPage` 创建 `_HelloPageState` → 调用它的 `build` 返回 `Scaffold(...)`。整棵 widget 树在内存里搭建好。
+3. 框架逐一为这棵 widget 树创建对应的 Element 与 RenderObject，触发 layout（决定每个节点位置和尺寸）→ paint（产生绘制指令）→ raster（光栅化为像素）→ 上屏。
+4. 用户在 `TextField` 里键入字母 → Flutter 的手势/文本输入系统把事件派发到 `TextField` 的 State → 回调 `onChanged` → 我们调用 `setState` 把 `name` 更新。
+5. **下一帧**：仅 `_HelloPageState` 的 Element 被标记为脏 → 框架调用它的 `build` → 得到新 widget 树 → 与旧 widget 树同位置比对：`Scaffold`、`AppBar`、`Padding`、`Column`、`TextField` 类型不变，**Element 与 RenderObject 全部复用**；唯一变化的是 `Text` 的 `data` 字段从 `'Type something…'` 变成 `'Hello, X!'`，框架把这个新字符串写进现有的 `RenderParagraph`，触发它**仅自身**的局部重绘。
+6. 整个过程没有"修改 widget"的命令式语句，开发者只描述"在当前 state 下 UI 长什么样"。
+
+如果你能把这一段流程在脑子里复述清楚，本章的目标就达到了。
+
+## Flutter 心智模型清单
+
+读完本章后，请确认以下命题已成为你的肌肉记忆：
+
+1. **`UI = f(state)`**：UI 永远是状态的派生，不是相反；要变界面就改状态，绝不直接改界面。
+2. **一切皆 Widget**：布局、样式、手势、动画都是 widget；深嵌套是常态而不是坏味道。
+3. **Widget 不可变**：所有字段都是 `final`，要变就构造新实例。
+4. **Widget 廉价、Element/RenderObject 昂贵**：性能优化的核心是控制重建范围 + 让 Element/RenderObject 命中复用。
+5. **`build` 必须是纯函数**：不要在 `build` 里发请求、订阅 stream、修改 state；它会被高频调用甚至重做。
+6. **`setState` 不重绘**：它只是标脏，让框架在下一帧调用 `build`；重绘由框架统一调度。
+7. **数据流单向**：父 → 子；逆向必须通过回调 / `InheritedWidget` / 状态管理库。
+8. **三棵树各司其职**：Widget 是配置，Element 是位置与生命周期，RenderObject 才负责像素。
+9. **主 Isolate 不能阻塞**：CPU 重活扔给 Isolate，否则丢帧；`async`/`await` 不能解决 CPU 重活，只能解决"等 IO"。
+10. **Flutter 是小核心 + 大生态**：你以为它该自带的东西（路由、状态管理、网络、数据库、序列化、DI）几乎都来自第三方包。
+
+## 自查问题
+
+1. Widget、Element、RenderObject 三者各自的生命周期是怎样的？哪个最长哪个最短？
+2. 为什么 `StatefulWidget` 要拆成两个类？State 挂在哪棵树上？
+3. `setState` 之后，界面是同步还是异步更新的？
+4. 直接修改字段不调用 `setState`，会发生什么？
+5. `async` / `await` 与 Isolate 的根本区别是什么？哪种用于"网络请求"，哪种用于"解析大 JSON"？
+6. 为什么 widget 的字段都必须 `final`？
+7. `const` 构造函数为什么对性能重要？
+8. Flutter 不内置全局状态管理，你打算用什么解决？

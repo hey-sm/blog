@@ -1,0 +1,474 @@
+---
+title: CI/CD 与发布
+description: apk/aab/ipa 构建、签名(Android keystore + iOS provisioning)、flavors(productFlavor + xcconfig + dart-define)、Fastlane/Codemagic/Bitrise/GitHub Actions、Play Console + TestFlight 通道、版本号策略、热更新边界
+---
+
+# CI/CD 与发布
+
+代码写完、测试通过、性能调好——离用户还差最后一公里:**打出可分发的安装包,上传到对应商店,管好版本号**。本章按照"本地构建 → 签名 → 多环境 → CI 自动化 → 上架"的顺序展开。
+
+## 输出物对照
+
+| 平台 | 文件 | 用途 |
+| ---- | ---- | ---- |
+| Android(开发 / 旁加载) | **`.apk`** | 直装,QQ 分享,内部测试 |
+| Android(Play Store) | **`.aab`**(App Bundle) | 上传 Play Console,Google 按设备生成不同 apk |
+| iOS | **`.ipa`** | 上传 App Store Connect,TestFlight 分发 |
+| macOS | `.app` / `.pkg` / `.dmg` | Mac App Store / 直分发 |
+| Windows | `.exe` / `.msix` | Microsoft Store / 直分发 |
+| Linux | `.deb` / `.rpm` / `.snap` / `.AppImage` | 各发行版 |
+| Web | `build/web/` | 静态部署到 CDN |
+
+## 本地构建命令
+
+```bash
+# Android
+flutter build apk --release                     # 单一 apk
+flutter build apk --release --split-per-abi     # 按 ABI 拆 → 包小很多
+flutter build appbundle --release               # ★ Play Store 上传用
+
+# iOS
+flutter build ios --release                     # 在 Xcode 中 archive 后导出 ipa
+flutter build ipa  --release                    # CLI 直接出 ipa(配好签名)
+
+# Web
+flutter build web --release --wasm              # Flutter 3.22+ 支持 WebAssembly
+
+# Desktop
+flutter build macos --release
+flutter build windows --release
+flutter build linux --release
+```
+
+`--release` 默认就是 release 模式;也可以 `--profile` 出 profile 包(分发给 QA 用 DevTools 调性能)。
+
+### 包大小调优
+
+```bash
+# 把 Dart 调试符号抽出去,Crashlytics 上传 mapping 后还能反编译堆栈
+flutter build appbundle --release \
+  --obfuscate \
+  --split-debug-info=build/symbols
+```
+
+`build/symbols/` 里的 `*.symbols` 文件**必须存档**——线上崩溃栈对应的是混淆后的代码,只有这些 symbol 能还原。
+
+## Android 签名
+
+### 生成 keystore
+
+只做一次,**这把 key 是你 app 在 Play Store 的"身份证"——一旦丢了,你将永远无法更新这个 app**(没有恢复机制)。备份到密码管理器、隔离离线存储、加密云盘三处。
+
+```bash
+keytool -genkey -v -keystore ~/keys/my-app.jks \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias my-app
+# 会要求填密码 / 姓名 / 公司 / 国家 → 都记下来
+```
+
+### 配置 Gradle
+
+```properties filename="android/key.properties"
+storePassword=your-store-password
+keyPassword=your-key-password
+keyAlias=my-app
+storeFile=/Users/you/keys/my-app.jks
+```
+
+> ⚠️ **`key.properties` 不能进 git**——`.gitignore` 加上。CI 用 secret 注入。
+
+```kotlin filename="android/app/build.gradle.kts"
+import java.util.Properties
+
+val keystoreProperties = Properties().apply {
+    val f = rootProject.file("key.properties")
+    if (f.exists()) load(f.inputStream())
+}
+
+android {
+    signingConfigs {
+        create("release") {
+            storeFile = file(keystoreProperties["storeFile"] as String)
+            storePassword = keystoreProperties["storePassword"] as String
+            keyAlias = keystoreProperties["keyAlias"] as String
+            keyPassword = keystoreProperties["keyPassword"] as String
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+        }
+    }
+}
+```
+
+### Play App Signing(强烈推荐)
+
+把签名密钥**托管给 Google**,你只保留一把"上传密钥"。即使你的上传密钥丢了,Google 那边的真签名密钥还在,可以重置上传密钥继续发新版。
+
+操作:Play Console → 应用完整性 → 启用 Play App Signing。
+
+## iOS 签名
+
+iOS 签名比 Android 复杂,涉及 4 个概念:
+
+| 概念 | 含义 |
+| ---- | ---- |
+| **Bundle ID** | 应用唯一标识(`com.example.myapp`) |
+| **App ID** | 在 Apple Developer 注册的 Bundle ID(支持通配 `*` 或精确) |
+| **Certificate** | 你的开发者身份(`.p12`),区分 Development / Distribution |
+| **Provisioning Profile** | 把 App ID + Certificate + 设备列表绑在一起,描述"这个证书可以为这个 app 签名,可以装到这些设备上" |
+
+### Automatic vs Manual Signing
+
+打开 `ios/Runner.xcworkspace`,Signing & Capabilities 标签:
+
+- **Automatic**:Xcode 自动管理 profile —— 个人项目 / 小团队推荐。
+- **Manual**:每个 profile 手动选 —— CI / 需要严格控制的企业用。
+
+### Match(Fastlane):团队共享签名
+
+[fastlane match](https://docs.fastlane.tools/actions/match/) 把所有 cert + profile 加密存到一个 git 私有仓库,团队成员一条命令同步:
+
+```bash
+fastlane match init                # 初始化(只做一次)
+fastlane match development         # 拉 dev cert + profile
+fastlane match appstore            # 拉 distribution cert + profile
+```
+
+CI 上跑 `match readonly`(只读模式,不会重新签发)。
+
+> 没有 match 之前,iOS 团队签名管理是地狱:多人共用一个 cert 容易过期,profile 里设备列表谁加的没人知道。**多人 iOS 项目几乎必上 match**。
+
+## Flavors:多环境(dev / staging / prod)
+
+真实项目至少需要三个环境:
+
+| 环境 | API 域名 | Firebase 项目 | 包名 / Bundle ID | app 图标 |
+| ---- | ---- | ---- | ---- | ---- |
+| dev | `api-dev.example.com` | my-app-dev | `com.example.myapp.dev` | 带 "DEV" 标 |
+| staging | `api-stg.example.com` | my-app-stg | `com.example.myapp.stg` | 带 "STG" |
+| prod | `api.example.com` | my-app | `com.example.myapp` | 标准 |
+
+三个环境**不能共用 Bundle ID**(否则不能同时装在同一台设备上)。Flutter 用 **flavors** 实现。
+
+### Android: productFlavors
+
+```kotlin filename="android/app/build.gradle.kts"
+android {
+    flavorDimensions += "env"
+    productFlavors {
+        create("dev")     { dimension = "env"; applicationIdSuffix = ".dev"; resValue("string", "app_name", "MyApp DEV") }
+        create("staging") { dimension = "env"; applicationIdSuffix = ".stg"; resValue("string", "app_name", "MyApp STG") }
+        create("prod")    { dimension = "env"; resValue("string", "app_name", "MyApp") }
+    }
+}
+```
+
+```bash
+flutter build apk --flavor dev --target lib/main_dev.dart
+flutter build appbundle --flavor prod --target lib/main_prod.dart
+```
+
+### iOS: scheme + xcconfig
+
+iOS 端 Xcode 用 **Configuration**(Debug / Release)+ **Scheme** 表达 flavor。配置步骤(简版):
+
+1. Xcode 中 `Product → Scheme → Manage Schemes` → 复制 Runner 三份:`dev` / `staging` / `prod`。
+2. `Project → Info → Configurations` 里复制 Debug/Release 各三份(共 6 个 Configuration)。
+3. 给每个 Configuration 关联一个 `.xcconfig` 文件,里面定义 `BUNDLE_ID_SUFFIX` / `APP_NAME` / `FLUTTER_TARGET`:
+
+```xcconfig filename="ios/Flutter/Dev.xcconfig"
+#include "Generated.xcconfig"
+
+BUNDLE_ID_SUFFIX = .dev
+APP_DISPLAY_NAME = MyApp DEV
+FLUTTER_TARGET = lib/main_dev.dart
+```
+
+4. `Info.plist` 引用这些变量:
+
+```xml filename="ios/Runner/Info.plist"
+<key>CFBundleDisplayName</key>
+<string>$(APP_DISPLAY_NAME)</string>
+```
+
+5. `project.pbxproj` 中 `PRODUCT_BUNDLE_IDENTIFIER` 加 suffix。
+
+```bash
+flutter build ipa --flavor dev --target lib/main_dev.dart
+```
+
+> iOS flavor 配置极易出错。社区有 [`flutter_flavorizr`](https://pub.dev/packages/flutter_flavorizr) 一键生成所有 6 个 Configuration / scheme / xcconfig + 三套 Bundle ID + 三套图标。新项目优先用它。
+
+### Dart 端入口分流
+
+```dart filename="lib/main_dev.dart"
+import 'main.dart' as app;
+import 'config/env.dart';
+
+void main() {
+  Env.current = Env.dev;
+  app.run();
+}
+```
+
+```dart filename="lib/main_prod.dart"
+import 'main.dart' as app;
+import 'config/env.dart';
+
+void main() {
+  Env.current = Env.prod;
+  app.run();
+}
+```
+
+```dart filename="lib/config/env.dart"
+enum Env {
+  dev(apiBaseUrl: 'https://api-dev.example.com', enableLogs: true),
+  staging(apiBaseUrl: 'https://api-stg.example.com', enableLogs: true),
+  prod(apiBaseUrl: 'https://api.example.com', enableLogs: false);
+
+  const Env({required this.apiBaseUrl, required this.enableLogs});
+  final String apiBaseUrl;
+  final bool enableLogs;
+
+  static late Env current;
+}
+```
+
+### 替代方案:`--dart-define`
+
+不想配 flavor 时,用编译期常量:
+
+```bash
+flutter build apk --release \
+  --dart-define=API_BASE_URL=https://api.example.com \
+  --dart-define=ENV=prod
+```
+
+```dart
+const apiBase = String.fromEnvironment('API_BASE_URL');
+const env     = String.fromEnvironment('ENV', defaultValue: 'dev');
+```
+
+参数多了用 `--dart-define-from-file=env.json`(Flutter 3.7+)。
+
+> `--dart-define` 适合"环境差异主要在 URL / 开关",**改不了 Bundle ID 和图标**。需要"同时装多个环境到一台手机"还是要 flavors。
+
+## CI 主线:GitHub Actions
+
+```yaml filename=".github/workflows/release.yml"
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '17' }
+      - uses: subosito/flutter-action@v2
+        with: { flutter-version: '3.27.x', channel: stable }
+      - run: flutter pub get
+      - run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Decode keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.jks
+      - name: Write key.properties
+        run: |
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storeFile=release.jks
+          EOF
+
+      - run: flutter test
+      - run: flutter build appbundle --flavor prod --target lib/main_prod.dart --release \
+              --obfuscate --split-debug-info=build/symbols
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-prod-release.aab
+          path: build/app/outputs/bundle/prodRelease/app-prod-release.aab
+
+      # 自动上传 Play Console
+      - uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GPLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.example.myapp
+          releaseFiles: build/app/outputs/bundle/prodRelease/app-prod-release.aab
+          track: internal              # internal / alpha / beta / production
+          mappingFile: build/app/outputs/mapping/prodRelease/mapping.txt
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: { flutter-version: '3.27.x', channel: stable }
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '3.3', bundler-cache: true }
+
+      - name: Install pods
+        working-directory: ios
+        run: pod install
+
+      - name: Setup signing via fastlane match
+        env:
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_JSON: ${{ secrets.APP_STORE_CONNECT_API_KEY_JSON }}
+        run: |
+          cd ios
+          bundle exec fastlane match appstore --readonly
+
+      - run: flutter build ipa --flavor prod --target lib/main_prod.dart --release \
+              --obfuscate --split-debug-info=build/symbols
+
+      - name: Upload to TestFlight via fastlane pilot
+        working-directory: ios
+        env:
+          APP_STORE_CONNECT_API_KEY_JSON: ${{ secrets.APP_STORE_CONNECT_API_KEY_JSON }}
+        run: bundle exec fastlane pilot upload --ipa ../build/ios/ipa/*.ipa
+```
+
+要点:
+
+- **Trigger 用 git tag `v*`** —— 推 `v1.2.3` 触发 release;主分支日常合并不浪费 CI。
+- **secret 走 GitHub Secrets**,绝不入仓。
+- **build_runner 必跑** —— 否则 freezed / Riverpod 生成代码缺失。
+- **Android 用 ubuntu / iOS 必须 macos** —— iOS 无法在 Linux 上构建。
+- **存档 `.symbols` 与 `mapping.txt`** —— 给 Crashlytics 上传(本章下面接)。
+
+## CI 替代方案
+
+| 方案 | 长处 | 短板 |
+| ---- | ---- | ---- |
+| **GitHub Actions** | 与 GitHub 原生集成,免费额度大,生态广 | macOS runner 比 Linux 贵 10×;iOS 签名手动配置 |
+| **Codemagic** | Flutter 官方推荐,iOS 签名 / Bundle ID / TestFlight 几乎一键 | 免费额度紧,扩展性弱 |
+| **Bitrise** | iOS 工作流模板多,Step 市场大 | 免费有限,UI 学习曲线 |
+| **Fastlane** | 不是 CI 而是"脚本工具"(可在以上任一 CI 跑);iOS 上传 / 签名 / 截图自动化必备 | 仅工具不调度 |
+
+**实战推荐**:GitHub Actions 触发 + Fastlane 做 iOS 部分(签名 + TestFlight)。
+
+## Play Console 通道
+
+四个通道(track):
+
+```text
+internal     上传后几分钟可装,最多 100 个测试者          ← QA / 自家
+closed       邮件名单或 Google Group,几小时审核          ← 早期用户
+open         任何人 opt-in,审核同 closed                ← 公测
+production   面向所有用户,需要完整审核(几天到几周)    ← 上架
+```
+
+通道之间可"提升"——同一个 build 从 internal 提升到 production 不需要重新上传。
+
+### 渐进式发布
+
+production 阶段可设 5% / 20% / 50% / 100% 渐进——上 5% 监控 Crashlytics 24h,无问题再扩。**线上事故的最大风险缓解**。
+
+## TestFlight + App Store
+
+```text
+TestFlight 内部测试   100 人,无需审核                ← Apple 账号绑定的成员
+TestFlight 外部测试   10000 人,首次需 24h Apple 审核  ← 邀请链接 / 公测
+App Store 审核       几小时到几天,通过则上架        ← 真正上架
+```
+
+提交流程:
+
+1. CI / Xcode → archive → 上传到 App Store Connect。
+2. App Store Connect 选要发布的 build,填**版本说明** / **截图** / **App Privacy** / **价格**。
+3. 提交审核,等待 Apple。
+4. 通过 → 自动 / 手动发布。
+
+### 审核常见拒绝原因
+
+- **登录可访问性**:必须给审核员一个测试账号(or guest mode),否则 Reject。
+- **隐私清单缺失**:iOS 17 起 `PrivacyInfo.xcprivacy` 必填(详见第 24 章)。
+- **不当使用 IDFA**:申请 ATT 但实际用途与说明不符。
+- **第三方登录漏 Apple Sign-In**(App Store Review Guideline 4.8)。
+- **付费内容必须走 IAP**(实物商品才能用第三方支付)。
+- **应用功能不完整 / "占位"页面**:任何"敬请期待"按钮都可能被拒。
+
+## 版本号策略
+
+```text
+   pubspec.yaml
+   version: 1.4.2+27
+              │  │  │  │
+              │  │  │  └── build number(整数,Android = versionCode / iOS = CFBundleVersion)
+              │  │  └───── patch
+              │  └──────── minor
+              └─────────── major
+```
+
+- **`major.minor.patch`**:用户看到的版本(语义化版本)。
+- **`+build`**:每次提交商店必须严格递增。如果你重新上传一个 build,number 必须比上一个大。
+
+实战做法:
+
+- **手写 major / minor / patch**(在 git tag 里管控);
+- **build number 自动生成**(CI 用 `${{ github.run_number }}` 或 `git rev-list --count HEAD`)。
+
+```bash
+# CI 里动态写入 pubspec
+sed -i "s/version: .*/version: $TAG_NAME+$GITHUB_RUN_NUMBER/" pubspec.yaml
+```
+
+## 热更新?
+
+**Apple App Store**:**不允许下载并执行可执行代码**(Guideline 3.3.1)——意味着:
+
+- ✅ 拉远端 JSON / Markdown 渲染 UI(Server-driven UI):允许。
+- ✅ Remote Config 切开关 / 文案 / 价格:允许。
+- ❌ 下载 dart_dynamic 之类的 dart 字节码并执行:**禁止,会被下架**。
+- ❌ 国内一些"热更新框架"(替换 Dart AOT):iOS 上违规。
+
+> 实战中"热更新"的合法做法 = **Remote Config + 服务端渲染 + Web 容器**。Server-driven UI(后端下发布局描述,前端渲染)是不踩红线的最大灵活度。
+
+Android 政策较松,但 Play Store 规则与 Apple 类似,谨慎为妙。
+
+## 心智模型清单
+
+1. **Android:`appbundle` 上 Play,`apk` 旁加载**;`--split-per-abi` 减包大小。
+2. **Android keystore 丢了 = app 永远不能更新**;启用 Play App Signing 防身。
+3. **`--obfuscate` + `--split-debug-info` 两件套必上**,symbols 文件必存档。
+4. **iOS 签名 4 概念**:Bundle ID / App ID / Certificate / Provisioning Profile。
+5. **多人 iOS 项目几乎必上 fastlane match**;CI 用 `match readonly`。
+6. **Flavors = 多 Bundle ID + 多入口 + 多配置**;iOS 端用 `flutter_flavorizr` 一键生成。
+7. **简单环境差异用 `--dart-define`,复杂用 flavors**。
+8. **CI 触发用 git tag `v*`**;secret 走 Secrets,绝不入仓。
+9. **iOS build 必须在 macOS runner**;GitHub Actions / Codemagic / Bitrise 都行。
+10. **Play 四通道**:internal → closed → open → production,可提升不需重传。
+11. **production 渐进发布**(5% → 100%),Crashlytics 监控可以救你一命。
+12. **iOS 审核 5 大坑**:测试账号 / 隐私清单 / IDFA / Apple Sign-In / IAP。
+13. **build number 必须严格递增**;CI 自动生成最稳。
+14. **Apple 不允许下载执行代码**;"热更新"走 Remote Config + Server-driven UI。
+
+## 自查问题
+
+- `apk` 与 `appbundle` 的差别?为什么 Play Store 推 aab?
+- `keytool -genkey` 生成的 `.jks` 文件你打算放在哪?如何让 CI 拿到但不入仓?
+- 启用 Play App Signing 解决了什么具体问题?如果不启用,你的上传密钥丢了会怎样?
+- iOS Signing 的 4 个概念分别是什么?Provisioning Profile 与 Certificate 的关系?
+- 多人 iOS 团队不上 match,会遇到哪 3 个具体痛点?
+- 你想让一台手机同时装 dev / staging / prod 三个环境的 app,需要怎么做?为什么 `--dart-define` 不够?
+- 用 `flutter build apk --flavor dev --target lib/main_dev.dart`,完整执行链路上各文件起什么作用?
+- GitHub Actions 跑 iOS build 必须用什么 runner?为什么 Linux 不行?
+- Play Console 的四个 track 通道,你的灰度发布顺序应该怎么走?
+- 用 `r0adkll/upload-google-play` 上传后没找到 build,可能的原因有哪些?(提示:track / packageName / 版本号)
+- TestFlight 外部测试与内部测试在审核 / 名额 / 邀请方式上有什么差别?
+- iOS 审核常见 5 大拒绝原因里,你最容易疏忽的是哪一个?
+- pubspec.yaml 的 `version: 1.0.0+1` 中 `+1` 是什么?为什么不能两次提交相同的它?
+- 客户希望"线上一键改图标 / 改文案不发版"——你哪些能做,哪些不能?红线在哪?
+
+下一章 [埋点与监控](/flutter/analytics):上线了,该看用户怎么用、哪里崩了。

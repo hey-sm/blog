@@ -1,0 +1,798 @@
+---
+title: 数据请求
+description: dio 拦截器/CancelToken/重试、freezed + json_serializable code-gen、错误模型分层、GraphQL/WebSocket/SSE、证书钉、Riverpod Repository 模式
+---
+
+# 数据请求
+
+到这里我们已经掌握了 Widget、状态、响应式三套基础。这一章把数据"从远端取回来",并以**类型安全 + 错误清晰 + 与 Riverpod 集成**为目标,搭出可以投产的网络层。
+
+主线选型:**dio**(HTTP)+ **freezed + json_serializable**(数据建模)+ **Riverpod Repository**(架构)。GraphQL / WebSocket / SSE / 证书钉作为延伸。
+
+## 内置 `package:http`(简介)
+
+Flutter 团队官方的 `http` 包,API 简单:
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  http: ^1.2.0
+```
+
+```dart filename="lib/api/simple_http.dart"
+import 'package:http/http.dart' as http;
+
+Future<String> fetchTodo() async {
+  final res = await http.get(Uri.parse('https://api.example.com/todos/1'));
+  if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+  return res.body;
+}
+```
+
+它够用于一次性的小工具或 demo。但实战中你立刻需要:
+
+- 全局拦截:鉴权 token 注入、统一日志、错误转换。
+- 取消请求:页面切走时把还没回来的请求扔掉。
+- 自动重试:网络抖动时指数退避。
+- 上传 / 下载进度:大文件场景。
+- HTTP/2 / HTTPS pinning:基础安全。
+
+`http` 这些都得自己写。社区对此的标准回答是 dio。
+
+## dio 主线
+
+[dio](https://pub.dev/packages/dio) 把 HTTP 客户端做成了"框架级":拦截器 / 取消 / 重试 / 进度 / FormData / HTTP/2 / 证书钉一应俱全,生态最完整。
+
+### 装包
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  dio: ^5.4.0
+```
+
+### 创建 Dio 实例
+
+不要每次请求 `Dio()`——用单例,统一配置 baseUrl / 超时 / 拦截器。
+
+```dart filename="lib/api/api_client.dart"
+import 'package:dio/dio.dart';
+
+class ApiClient {
+  ApiClient._() : _dio = Dio(BaseOptions(
+    baseUrl: 'https://api.example.com',
+    connectTimeout: const Duration(seconds: 8),
+    receiveTimeout: const Duration(seconds: 15),
+    sendTimeout:    const Duration(seconds: 15),
+    headers: {'Accept': 'application/json'},
+    responseType: ResponseType.json,
+  ));
+
+  static final ApiClient instance = ApiClient._();
+  final Dio _dio;
+
+  Future<Response<T>> get<T>(String path, {Map<String, dynamic>? query, CancelToken? cancel}) =>
+      _dio.get<T>(path, queryParameters: query, cancelToken: cancel);
+
+  Future<Response<T>> post<T>(String path, {Object? body, CancelToken? cancel}) =>
+      _dio.post<T>(path, data: body, cancelToken: cancel);
+
+  Dio get raw => _dio;       // 给拦截器注入用
+}
+```
+
+### 基础调用
+
+```dart
+final res = await ApiClient.instance.get<Map<String, dynamic>>('/todos/1');
+print(res.data?['title']);       // res.data 已经是反序列化后的 Map
+```
+
+dio 默认根据 `Content-Type: application/json` 自动 `jsonDecode`,无需手写 `json.decode(res.body)`。
+
+### 拦截器:统一切面
+
+拦截器是 dio 的核心特性。形状:
+
+```dart filename="lib/api/auth_interceptor.dart"
+class AuthInterceptor extends Interceptor {
+  AuthInterceptor(this._tokenStore);
+  final TokenStore _tokenStore;
+
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    final token = _tokenStore.access;
+    if (token != null) options.headers['Authorization'] = 'Bearer $token';
+    handler.next(options);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) async {
+    if (err.response?.statusCode == 401) {
+      final refreshed = await _tokenStore.refresh();
+      if (refreshed) {
+        // 用新 token 重发原请求
+        final clone = err.requestOptions
+          ..headers['Authorization'] = 'Bearer ${_tokenStore.access}';
+        try {
+          final res = await Dio().fetch(clone);    // 用新 dio 实例避免循环
+          return handler.resolve(res);
+        } catch (e) {
+          return handler.next(err);
+        }
+      }
+    }
+    handler.next(err);
+  }
+}
+```
+
+注入到 dio 实例:
+
+```dart filename="lib/main.dart"
+ApiClient.instance.raw.interceptors.add(AuthInterceptor(tokenStore));
+ApiClient.instance.raw.interceptors.add(LogInterceptor(responseBody: true));
+```
+
+#### 拦截器执行顺序
+
+```text
+        请求方向
+   add 顺序:1 → 2 → 3 → 服务器
+   响应方向:服务器 → 3 → 2 → 1
+```
+
+错误方向同响应方向。`handler.next` 继续传递,`handler.resolve` 直接当作成功响应返回(中断后续),`handler.reject` 直接当作错误返回。
+
+### 内置常用拦截器
+
+| 拦截器 | 用途 |
+| ---- | ---- |
+| `LogInterceptor` | 标准日志,开发期使用 |
+| `RetryInterceptor` (`dio_smart_retry` 包) | 失败自动重试 + 退避 |
+| `DioCacheInterceptor` (`dio_cache_interceptor` 包) | HTTP cache 控制 |
+| `CookieManager` (`dio_cookie_manager`) | 自动管理 Cookie |
+
+### `CancelToken`:取消请求
+
+页面切走但请求还没回来 → 取消。
+
+```dart filename="lib/screens/article_screen.dart"
+class _ArticleScreenState extends State<ArticleScreen> {
+  final _cancel = CancelToken();
+
+  @override
+  void dispose() {
+    _cancel.cancel('page disposed');
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final res = await ApiClient.instance.get<Map<String, dynamic>>(
+        '/articles/${widget.id}',
+        cancel: _cancel,
+      );
+      // ...
+    } on DioException catch (e) {
+      if (CancelToken.isCancel(e)) return;          // 静默忽略取消
+      rethrow;
+    }
+  }
+}
+```
+
+> **判断取消用 `CancelToken.isCancel(error)`**——`error.type == DioExceptionType.cancel` 也行,前者是惯用法。
+
+### 上传文件 + 进度
+
+```dart filename="lib/api/upload.dart"
+Future<String> uploadAvatar(File file) async {
+  final form = FormData.fromMap({
+    'avatar': await MultipartFile.fromFile(file.path, filename: 'avatar.png'),
+    'userId': '42',
+  });
+
+  final res = await ApiClient.instance.raw.post<Map<String, dynamic>>(
+    '/avatars',
+    data: form,
+    onSendProgress: (sent, total) {
+      final pct = total <= 0 ? 0 : (sent / total * 100).toStringAsFixed(1);
+      debugPrint('uploaded $pct%');
+    },
+  );
+
+  return res.data!['url'] as String;
+}
+```
+
+下载用 `download(url, savePath, onReceiveProgress: ...)`。
+
+### HTTP/2 与连接复用
+
+dio 默认走 HTTP/1.1。需要 HTTP/2(高频请求、移动网络多路复用收益):
+
+```yaml
+dependencies:
+  dio: ^5.4.0
+  dio_http2_adapter: ^2.5.0
+```
+
+```dart
+ApiClient.instance.raw.httpClientAdapter = Http2Adapter(ConnectionManager());
+```
+
+业务侧无感,dio API 完全一样。
+
+## 数据建模:freezed + json_serializable
+
+### 手写 fromJson 的痛
+
+```dart
+class Article {
+  Article({required this.id, required this.title, this.author});
+  final String id;
+  final String title;
+  final String? author;
+
+  factory Article.fromJson(Map<String, dynamic> json) => Article(
+    id:     json['id']     as String,
+    title:  json['title']  as String,
+    author: json['author'] as String?,
+  );
+
+  Map<String, dynamic> toJson() => { 'id': id, 'title': title, 'author': author };
+
+  Article copyWith({String? title, String? author}) => Article(
+    id: id, title: title ?? this.title, author: author ?? this.author,
+  );
+
+  @override bool operator ==(Object other) =>
+      other is Article && other.id == id && other.title == title && other.author == author;
+  @override int get hashCode => Object.hash(id, title, author);
+}
+```
+
+20+ 行,字段一加全得改。错一个 nullable / typo 都要等运行时崩。这是 freezed 要消除的。
+
+### 装包
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  freezed_annotation: ^2.4.0
+  json_annotation: ^4.9.0
+
+dev_dependencies:
+  freezed: ^2.5.0
+  json_serializable: ^6.8.0
+  build_runner: ^2.4.0
+```
+
+### 数据类(`@freezed`)
+
+```dart filename="lib/models/article.dart"
+import 'package:freezed_annotation/freezed_annotation.dart';
+part 'article.freezed.dart';
+part 'article.g.dart';
+
+@freezed
+class Article with _$Article {
+  const factory Article({
+    required String id,
+    required String title,
+    String? author,
+    @Default([]) List<String> tags,
+    @JsonKey(name: 'published_at') DateTime? publishedAt,
+  }) = _Article;
+
+  factory Article.fromJson(Map<String, dynamic> json) => _$ArticleFromJson(json);
+}
+```
+
+跑 `dart run build_runner build --delete-conflicting-outputs`,自动生成:
+
+- `_$Article` 实现:不可变、`==` / `hashCode` / `copyWith` / `toString`
+- `_$ArticleFromJson` / `toJson`
+
+用法:
+
+```dart
+final a = Article(id: '1', title: 'Hello');
+final b = a.copyWith(title: 'World');
+final json = b.toJson();
+final c = Article.fromJson(json);
+```
+
+### `@JsonKey`:字段重命名 / 默认值 / 枚举
+
+```dart
+@JsonKey(name: 'created_at') DateTime createdAt,           // 服务端命名转换
+@JsonKey(defaultValue: 0)    int views,                    // 缺字段时回退
+@JsonKey(unknownEnumValue: Status.unknown) Status status,  // 未知枚举值容错
+@JsonKey(includeIfNull: false) String? bio,                // toJson 时为 null 不输出
+```
+
+> 在整个 model 上加 `@Freezed(toJson: true, fromJson: true)` 可改默认行为。或在 `build.yaml` 里把 `field_rename: snake` 设为全局,免去每个字段都标 JsonKey。
+
+### Sealed union types(成功 / 失败 / 加载)
+
+freezed 的"杀手特性":同一个类有多个工厂构造,Dart 3 把它们当 `sealed` class:
+
+```dart filename="lib/models/api_result.dart"
+import 'package:freezed_annotation/freezed_annotation.dart';
+part 'api_result.freezed.dart';
+
+@freezed
+sealed class ApiResult<T> with _$ApiResult<T> {
+  const factory ApiResult.success(T value) = ApiSuccess<T>;
+  const factory ApiResult.failure(Failure error) = ApiFailure<T>;
+}
+```
+
+消费(Dart 3 `switch` 表达式):
+
+```dart
+final result = await fetchArticle();
+final widget = switch (result) {
+  ApiSuccess(:final value)  => ArticleView(value),
+  ApiFailure(:final error)  => ErrorView(error),
+};
+```
+
+漏一个分支 → 编译报错。这是后续"错误建模"和 Riverpod `AsyncValue.when` 思路相同的"用类型替代 if-else"。
+
+### `JsonConverter`:自定义类型映射
+
+服务端用 epoch ms 表示时间,本地想拿 `DateTime`:
+
+```dart filename="lib/utils/converters.dart"
+class EpochMsConverter implements JsonConverter<DateTime, int> {
+  const EpochMsConverter();
+  @override
+  DateTime fromJson(int ms) => DateTime.fromMillisecondsSinceEpoch(ms);
+  @override
+  int toJson(DateTime t) => t.millisecondsSinceEpoch;
+}
+
+@freezed
+class Article with _$Article {
+  const factory Article({
+    required String id,
+    @EpochMsConverter() required DateTime publishedAt,
+  }) = _Article;
+
+  factory Article.fromJson(Map<String, dynamic> json) => _$ArticleFromJson(json);
+}
+```
+
+### code-gen 流程实务
+
+每次改 `@freezed` 类后:
+
+```bash
+# 一次性生成
+dart run build_runner build --delete-conflicting-outputs
+
+# 持续监听
+dart run build_runner watch --delete-conflicting-outputs
+```
+
+`--delete-conflicting-outputs` 用于 fresh start;watch 模式下文件改动自动增量生成。
+
+> CI 里通常先 `dart run build_runner build` 再跑测试,确保 `*.g.dart` / `*.freezed.dart` 是最新的。生成产物**应该**进 git(避免 CI 编译时间增长),也**可以**不进(避免 PR diff 嘈杂)——团队定一致即可。
+
+## 错误模型:三层
+
+把网络错误分清楚是后续 UI 决定"显示什么文案"的基础。
+
+```text
+┌────────────────────────────────────────────────────────┐
+│  1. 传输层错误     无网 / 超时 / DNS 失败 / 证书错误   │ → "网络异常,请检查连接"
+├────────────────────────────────────────────────────────┤
+│  2. HTTP 错误      4xx / 5xx                           │ → 401 跳登录,5xx 提示"服务异常"
+├────────────────────────────────────────────────────────┤
+│  3. 业务错误       HTTP 200,但 body 含 error code     │ → 按业务码定文案
+└────────────────────────────────────────────────────────┘
+```
+
+### `DioException` 类型
+
+```dart
+enum DioExceptionType {
+  connectionTimeout,           // 连接超时
+  sendTimeout, receiveTimeout, // 发送 / 接收超时
+  badCertificate,              // 证书错误
+  badResponse,                 // 4xx/5xx → 在 response 字段
+  cancel,                      // CancelToken 触发
+  connectionError,             // DNS / 无网
+  unknown,                     // 其他
+}
+```
+
+### 统一 Failure 类型
+
+```dart filename="lib/models/failure.dart"
+import 'package:freezed_annotation/freezed_annotation.dart';
+part 'failure.freezed.dart';
+
+@freezed
+sealed class Failure with _$Failure {
+  const factory Failure.network() = NetworkFailure;
+  const factory Failure.timeout() = TimeoutFailure;
+  const factory Failure.unauthorized() = UnauthorizedFailure;
+  const factory Failure.server(int status) = ServerFailure;
+  const factory Failure.business(String code, String message) = BusinessFailure;
+  const factory Failure.unknown(Object error) = UnknownFailure;
+}
+```
+
+### 把 dio 异常映射成 Failure
+
+```dart filename="lib/api/error_mapper.dart"
+Failure mapDioError(DioException e) {
+  switch (e.type) {
+    case DioExceptionType.connectionTimeout:
+    case DioExceptionType.sendTimeout:
+    case DioExceptionType.receiveTimeout:
+      return const Failure.timeout();
+    case DioExceptionType.connectionError:
+      return const Failure.network();
+    case DioExceptionType.badResponse:
+      final status = e.response?.statusCode ?? 0;
+      if (status == 401) return const Failure.unauthorized();
+      // 业务码:服务端约定 body 形如 { "code": "EMAIL_EXISTS", "message": "..." }
+      final body = e.response?.data;
+      if (body is Map && body['code'] is String) {
+        return Failure.business(body['code'] as String, (body['message'] ?? '') as String);
+      }
+      return Failure.server(status);
+    case DioExceptionType.cancel:
+      throw e;                          // 取消是预期行为,继续抛
+    default:
+      return Failure.unknown(e);
+  }
+}
+```
+
+### Repository:把 dio 包成 typed API
+
+```dart filename="lib/data/article_repo.dart"
+class ArticleRepo {
+  ArticleRepo(this._api);
+  final ApiClient _api;
+
+  Future<ApiResult<Article>> fetchById(String id, {CancelToken? cancel}) async {
+    try {
+      final res = await _api.get<Map<String, dynamic>>('/articles/$id', cancel: cancel);
+      return ApiResult.success(Article.fromJson(res.data!));
+    } on DioException catch (e) {
+      if (CancelToken.isCancel(e)) rethrow;
+      return ApiResult.failure(mapDioError(e));
+    } catch (e) {
+      return ApiResult.failure(Failure.unknown(e));
+    }
+  }
+}
+```
+
+### Riverpod 集成
+
+```dart filename="lib/providers/article.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'article.g.dart';
+
+@riverpod
+ApiClient apiClient(ApiClientRef ref) => ApiClient.instance;
+
+@riverpod
+ArticleRepo articleRepo(ArticleRepoRef ref) => ArticleRepo(ref.read(apiClientProvider));
+
+@riverpod
+Future<Article> article(ArticleRef ref, String id) async {
+  final cancel = CancelToken();
+  ref.onDispose(cancel.cancel);                       // ★ provider 销毁时取消 in-flight 请求
+
+  final result = await ref.read(articleRepoProvider).fetchById(id, cancel: cancel);
+  return switch (result) {
+    ApiSuccess(:final value) => value,
+    ApiFailure(:final error) => throw error,          // 抛 Failure,Riverpod 包进 AsyncError
+  };
+}
+```
+
+UI 端:
+
+```dart filename="lib/screens/article_screen.dart"
+class ArticleScreen extends ConsumerWidget {
+  const ArticleScreen({super.key, required this.id});
+  final String id;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncArticle = ref.watch(articleProvider(id));
+
+    return Scaffold(
+      body: asyncArticle.when(
+        data: (a) => Padding(padding: const EdgeInsets.all(16), child: Text(a.title)),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (err, _) {
+          final f = err is Failure ? err : Failure.unknown(err);
+          return Center(
+            child: Text(switch (f) {
+              NetworkFailure() => '网络异常,请检查连接',
+              TimeoutFailure() => '请求超时,请稍后再试',
+              UnauthorizedFailure() => '请重新登录',
+              ServerFailure(:final status) => '服务异常 ($status)',
+              BusinessFailure(:final message) => message,
+              UnknownFailure() => '未知错误',
+            }),
+          );
+        },
+      ),
+    );
+  }
+}
+```
+
+> `ref.onDispose(cancel.cancel)` 这行小代码是关键:页面销毁、provider invalidate、family 参数变化都会触发,**自动取消还没回来的请求**——比手写 `dispose` cancel 更稳。
+
+## 重试与指数退避
+
+简单需求自己写拦截器:
+
+```dart filename="lib/api/retry_interceptor.dart"
+class RetryInterceptor extends Interceptor {
+  final int maxRetries;
+  RetryInterceptor({this.maxRetries = 3});
+
+  @override
+  Future<void> onError(DioException err, ErrorInterceptorHandler handler) async {
+    final retried = (err.requestOptions.extra['retried'] as int?) ?? 0;
+    final retriable = err.type == DioExceptionType.connectionError
+                   || err.type == DioExceptionType.connectionTimeout
+                   || err.type == DioExceptionType.receiveTimeout
+                   || (err.response?.statusCode ?? 0) >= 500;
+
+    if (retriable && retried < maxRetries) {
+      await Future.delayed(Duration(milliseconds: 300 * (1 << retried)));   // 300ms / 600 / 1200
+      err.requestOptions.extra['retried'] = retried + 1;
+      try {
+        final res = await Dio().fetch(err.requestOptions);
+        return handler.resolve(res);
+      } catch (e) {
+        return handler.next(e is DioException ? e : err);
+      }
+    }
+    handler.next(err);
+  }
+}
+```
+
+复杂场景直接用 [dio_smart_retry](https://pub.dev/packages/dio_smart_retry)。
+
+## 并发限流
+
+API 没有限流时,简单的 1000 条数据并发 1000 个请求会被服务端 429。`Future` 自身不带 limit,常见两种做法:
+
+### 手写 Pool(轻量)
+
+```dart filename="lib/utils/pool.dart"
+Future<List<R>> mapWithPool<T, R>(Iterable<T> items, int concurrency, Future<R> Function(T) fn) async {
+  final iter = items.iterator;
+  Future<void> worker(List<R> out) async {
+    while (true) {
+      T item;
+      if (!iter.moveNext()) return;
+      item = iter.current;
+      out.add(await fn(item));
+    }
+  }
+  final out = <R>[];
+  await Future.wait(List.generate(concurrency, (_) => worker(out)));
+  return out;
+}
+```
+
+### `pool` 包(更通用)
+
+```yaml
+dependencies:
+  pool: ^1.5.0
+```
+
+```dart
+final pool = Pool(8);                       // 最多 8 个并发
+final results = await Future.wait(items.map((i) => pool.withResource(() => api.fetch(i))));
+```
+
+## GraphQL
+
+REST 适合简单数据;GraphQL 适合"页面需要的字段不固定,且结构嵌套深"的场景。
+
+### graphql_flutter
+
+```yaml
+dependencies:
+  graphql_flutter: ^5.1.2
+```
+
+```dart filename="lib/api/gql_client.dart"
+final _httpLink = HttpLink('https://api.example.com/graphql');
+final _authLink = AuthLink(getToken: () async => 'Bearer ${tokenStore.access}');
+
+final client = GraphQLClient(
+  link: _authLink.concat(_httpLink),
+  cache: GraphQLCache(store: HiveStore()),
+);
+```
+
+```dart
+final res = await client.query(QueryOptions(
+  document: gql(r'''
+    query Article($id: ID!) {
+      article(id: $id) { id title author { name } }
+    }
+  '''),
+  variables: {'id': '42'},
+));
+```
+
+### ferry(类型安全 + code-gen)
+
+如果想要"GraphQL Schema 转 Dart 类",用 [ferry](https://pub.dev/packages/ferry) + `gql_build`,跟 freezed 一样跑 build_runner。优点:**编译期就知道返回字段类型**,而不是运行时 `Map`。
+
+新项目优先 ferry——和 freezed/Riverpod 风格一致。学习曲线略陡,但大型 GraphQL 项目收益非常大。
+
+## WebSocket
+
+```yaml
+dependencies:
+  web_socket_channel: ^2.4.0
+```
+
+```dart filename="lib/api/realtime.dart"
+import 'package:web_socket_channel/web_socket_channel.dart';
+
+class RealtimeService {
+  RealtimeService(this.url);
+  final Uri url;
+  WebSocketChannel? _ch;
+
+  Stream<dynamic> connect() {
+    final ch = WebSocketChannel.connect(url);
+    _ch = ch;
+    return ch.stream;          // 直接拿 broadcast Stream
+  }
+
+  void send(Object data) => _ch?.sink.add(data);
+  void close() => _ch?.sink.close();
+}
+```
+
+要点:
+
+- `WebSocketChannel.stream` 是 broadcast,可多个 listener。
+- 必须自己实现**重连**(网络波动时 server 会断;client 要捕获 close 事件,按指数退避重连)。
+- 心跳:每 30s 发一个 ping(很多服务器会主动断 idle 连接)。
+
+实战封装(指数退避 + 心跳):
+
+```dart filename="lib/api/reconnecting_ws.dart"
+class ReconnectingWs {
+  ReconnectingWs(this.url);
+  final Uri url;
+
+  final _outgoing = StreamController<Object>();
+  final _incoming = StreamController<Object>.broadcast();
+  Stream<Object> get incoming => _incoming.stream;
+  Sink<Object> get outgoing => _outgoing.sink;
+
+  WebSocketChannel? _ch;
+  int _retries = 0;
+  Timer? _heartbeat;
+
+  Future<void> start() async {
+    while (true) {
+      try {
+        _ch = WebSocketChannel.connect(url);
+        _retries = 0;
+        _heartbeat = Timer.periodic(const Duration(seconds: 30), (_) => _ch!.sink.add('ping'));
+        final outSub = _outgoing.stream.listen(_ch!.sink.add);
+        await for (final msg in _ch!.stream) _incoming.add(msg);
+        outSub.cancel();
+        _heartbeat?.cancel();
+      } catch (_) {/* 进入重连 */}
+      _retries++;
+      await Future.delayed(Duration(milliseconds: 500 * (1 << _retries.clamp(0, 6))));
+    }
+  }
+
+  Future<void> dispose() async {
+    _heartbeat?.cancel();
+    await _ch?.sink.close();
+    await _outgoing.close();
+    await _incoming.close();
+  }
+}
+```
+
+## SSE(Server-Sent Events)
+
+服务端单向推送(LLM 流式输出、股价、订阅事件)。dio 用 stream response:
+
+```dart filename="lib/api/sse.dart"
+Stream<String> sseStream(String path, {Map<String, dynamic>? body}) async* {
+  final response = await ApiClient.instance.raw.post<ResponseBody>(
+    path,
+    data: body,
+    options: Options(responseType: ResponseType.stream, headers: {'Accept': 'text/event-stream'}),
+  );
+
+  final stream = response.data!.stream
+      .cast<List<int>>()
+      .transform(const Utf8Decoder())
+      .transform(const LineSplitter());
+
+  await for (final line in stream) {
+    if (line.startsWith('data:')) yield line.substring(5).trim();
+    // 'event:' / 'id:' / '' 分隔符按需处理
+  }
+}
+```
+
+## HTTPS 证书钉(Pinning)
+
+防止中间人攻击:**只信任服务器证书的指定指纹**,即使设备装了恶意 CA 也不放行。
+
+```yaml
+dependencies:
+  dio: ^5.4.0
+```
+
+```dart filename="lib/api/pinning.dart"
+import 'dart:io';
+import 'package:dio/io.dart';
+
+ApiClient.instance.raw.httpClientAdapter = IOHttpClientAdapter(
+  createHttpClient: () {
+    final client = HttpClient();
+    client.badCertificateCallback = (cert, host, port) {
+      // 提前算出生产证书的 SHA-256
+      const expected = 'aa:bb:cc:dd:...';
+      final hash = sha256.convert(cert.der).toString();
+      return hash == expected;       // ★ 只接受预期指纹
+    };
+    return client;
+  },
+);
+```
+
+注意:**业务证书过期前你需要把新指纹打进 app 并发版**。否则 app 一夜之间全挂——证书钉是高风险 + 高收益,只在金融、政务等场景考虑;一般 toC 项目用 HTTPS + HSTS 即可。
+
+## 心智模型清单
+
+1. **`http` 适合 demo,实战用 `dio`**——拦截器 / cancel / 重试 / 进度全套必备。
+2. **dio 单例 + 拦截器是切面的位置**——auth、log、retry、cache 都挂这里。
+3. **`CancelToken` + `ref.onDispose(cancel.cancel)`**:Riverpod 销毁自动取消 in-flight 请求。
+4. **freezed + json_serializable 是数据建模事实标准**:不可变 / `copyWith` / `==` / fromJson 一站式。
+5. **Sealed union(`@freezed sealed class` + Dart 3 switch)** 取代 if-else 错误分支,漏一种编译报错。
+6. **错误三层**:传输 → HTTP → 业务,统一映射到 `Failure`,UI 按类型定文案。
+7. **Repository 把 dio 包成 typed API**,UI 永远不直接接触 dio。
+8. **Riverpod 把 Repository 当 provider 注入**,测试时 override。
+9. **WebSocket 必须自己写重连 + 心跳**,生产代码不要直接暴露 `WebSocketChannel`。
+10. **证书钉是双刃剑**——除非威胁模型必要,普通项目用 HTTPS + HSTS。
+
+## 自查问题
+
+- 用 `http` 包写一个最小 GET 请求;再写一遍 dio 版本。说出你为什么选 dio。
+- dio 拦截器的执行顺序怎么决定?在 `add` 顺序为 [A, B, C] 时,响应方向上的执行顺序是什么?
+- 401 自动刷新 token 拦截器,如何避免"刷新接口本身 401 → 再触发刷新 → 死循环"?
+- `CancelToken.isCancel(error)` 与 `error.type == DioExceptionType.cancel` 的差别是什么?
+- 用 freezed 写一个 `User` 模型,包含 `id` / `email` / `createdAt`(epoch ms),用 `JsonConverter` 处理时间字段。
+- `@freezed sealed class ApiResult<T>` 与手写 `class ApiResult { ApiResult.success(T); ApiResult.failure(Failure); }` 的区别是什么?Dart 3 的 `switch` 在前者上能做哪些前者做不到的事?
+- 服务端返回 `{"code": "INVALID_EMAIL", "message": "..."}` 包装在 HTTP 200 里——这属于错误三层中的哪一层?如何映射成 `Failure`?
+- 写一个 Repository,把 dio 调用 + 错误映射 + cancel 串起来,只暴露 `Future<ApiResult<Article>> fetchById(String id, {CancelToken? cancel})`。
+- 用 Riverpod 把上述 Repo 包装成 `articleProvider(String id)`,UI 端用 `AsyncValue.when` + `Failure` switch 渲染。
+- 你需要并发拉 1000 个 URL 的内容,但服务端 QPS 限制 10。给出两种实现:手写 pool / 用 `pool` 包。
+- 实现"WebSocket 30s 心跳 + 断线指数退避重连",并解释为什么 client 必须主动发心跳。
+- 证书钉的"双刃剑"风险是什么?生产中应该如何配套?
+
+下一章 [持久化](/flutter/storage):请求拿回的数据,怎么存到本地。

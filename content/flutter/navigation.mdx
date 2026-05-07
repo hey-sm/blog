@@ -1,0 +1,789 @@
+---
+title: 路由与导航
+description: Navigator 1.0 命令式、Navigator 2.0 Pages API、go_router、嵌套导航、deep link、Web URL strategy、PopScope
+---
+
+# 路由与导航
+
+到现在我们写的都是单屏页面。真实 app 至少要解决三件事:
+
+1. **多个页面之间互相切换**(进入详情、返回列表)。
+2. **支持系统返回**(Android 物理返回键、iOS 边缘滑动、Web 浏览器后退)。
+3. **响应深度链接**(用户点击外部 URL 直接进入某个内部页面)。
+
+Flutter 的导航有两套 API,叫 **Navigator 1.0** 和 **Navigator 2.0**——后者是更晚加入的、声明式的版本,主要为 Web 和深度链接而生。手写 2.0 的 `RouterDelegate` 极其繁琐,**实际项目里几乎都用第三方路由库**。本章主线是 **go_router**(Flutter 团队官方维护),其他选择(auto_route)做对照。
+
+## 心智模型
+
+> **Navigator 是一个管理 `Route` 栈的 widget**。栈顶就是当前可见的页面;`push` 入栈,`pop` 出栈。每一个 `MaterialApp` 内部都包了一个 `Navigator`。
+
+```text
+        ┌──────────────────┐
+        │ /detail/42       │  ← 当前页面(栈顶)
+        ├──────────────────┤
+        │ /list            │
+        ├──────────────────┤
+        │ /home            │  ← 起始页面(栈底)
+        └──────────────────┘
+```
+
+`Navigator 1.0` 的 API 是「直接操作这个栈」:`push(route)` / `pop()`;
+`Navigator 2.0` 的 API 是「声明这个栈应该长什么样」:你给一个 `pages: [Page1, Page2, Page3]`,framework 算出 diff,自动 push/pop。
+
+声明式更适合 URL 同步——只要把 URL 解析成 pages 列表就行。
+
+## Navigator 1.0:命令式 API
+
+最小可用例:
+
+```dart filename="lib/main.dart"
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Home')),
+      body: Center(
+        child: ElevatedButton(
+          child: const Text('Open detail'),
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (context) => const DetailPage(itemId: 42),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class DetailPage extends StatelessWidget {
+  const DetailPage({super.key, required this.itemId});
+  final int itemId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Detail $itemId')),
+      body: Center(
+        child: ElevatedButton(
+          child: const Text('Back'),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+      ),
+    );
+  }
+}
+```
+
+### 主要 API 对照
+
+| 方法 | 行为 |
+| ---- | ---- |
+| `push(route)` | 把 `route` 推入栈顶 |
+| `pop([result])` | 弹出栈顶,可选返回值给 push 的 caller |
+| `pushReplacement(route)` | 替换栈顶(login → home,login 不再可返回) |
+| `pushAndRemoveUntil(route, predicate)` | 推入并清除若干历史(注销后回登录页) |
+| `pushNamed('/detail', arguments: x)` | 命名路由 push,参数走 `RouteSettings.arguments` |
+| `popUntil(predicate)` | 连续 pop 直到谓词为真(常用于"回首页") |
+| `canPop()` | 当前栈深度是否大于 1 |
+| `maybePop()` | 等价于"如果能 pop 就 pop"(用于 PopScope) |
+
+### `Route<T>`:类型化的返回值
+
+`push` 是泛型函数,`T` 是这个 route 关闭时返回的类型:
+
+```dart filename="lib/screens/home.dart"
+final picked = await Navigator.of(context).push<int>(
+  MaterialPageRoute<int>(
+    builder: (_) => const ItemPicker(),
+  ),
+);
+if (picked != null) {
+  // 拿到选中 item 的 id
+}
+```
+
+子页面这样关:
+
+```dart
+Navigator.of(context).pop<int>(42);
+```
+
+注意泛型要"两边对齐":`push<T>` 和 `pop<T>` 与 `MaterialPageRoute<T>` 同时是 `T`,否则返回 `null`。
+
+### `MaterialPageRoute` vs `CupertinoPageRoute` vs `PageRouteBuilder`
+
+| 类型 | 转场效果 |
+| ---- | ---- |
+| `MaterialPageRoute` | Android 风格:从下方淡入 + 上推(M3) |
+| `CupertinoPageRoute` | iOS 风格:从右侧滑入,带边缘滑动返回手势 |
+| `PageRouteBuilder` | 手写 transition,自由度最大 |
+
+跨平台一致体验通常用 `MaterialPageRoute`;若要在 iOS 上用更原生的体验,可用 `CupertinoPageRoute`(只影响 iOS,Android 上仍是 Material 风格,因为它内部判断了平台)。
+
+自定义转场示例:
+
+```dart filename="lib/utils/fade_route.dart"
+class FadeRoute<T> extends PageRouteBuilder<T> {
+  FadeRoute({required Widget child})
+      : super(
+          pageBuilder: (_, __, ___) => child,
+          transitionsBuilder: (_, animation, __, child) =>
+              FadeTransition(opacity: animation, child: child),
+          transitionDuration: const Duration(milliseconds: 200),
+        );
+}
+```
+
+### 命名路由(declarative routes 表)
+
+```dart filename="lib/main.dart"
+MaterialApp(
+  initialRoute: '/',
+  routes: {
+    '/':       (context) => const HomePage(),
+    '/list':   (context) => const ListPage(),
+    '/detail': (context) => const DetailPage(itemId: 0),
+  },
+);
+```
+
+```dart
+Navigator.of(context).pushNamed('/detail', arguments: 42);
+
+// detail 页面取参数:
+final itemId = ModalRoute.of(context)!.settings.arguments as int;
+```
+
+命名路由的弱点:
+
+- 参数没有类型(`arguments` 是 `Object?`)。
+- 路径无法嵌套或带参数模板(`/user/:id`)。
+- Web 上 URL 与栈不易自动同步。
+
+→ **命名路由适合"小项目里枚举几个固定页面",不要在大项目里硬撑,直接上 `go_router`。**
+
+### `onGenerateRoute`:动态路由
+
+当 `routes` 表里没匹配时调,常用于 `/user/123` 这种模板:
+
+```dart filename="lib/main.dart"
+MaterialApp(
+  onGenerateRoute: (settings) {
+    final uri = Uri.parse(settings.name ?? '/');
+    if (uri.pathSegments.length == 2 && uri.pathSegments[0] == 'user') {
+      final id = uri.pathSegments[1];
+      return MaterialPageRoute<void>(
+        settings: settings,
+        builder: (_) => UserPage(id: id),
+      );
+    }
+    return MaterialPageRoute<void>(builder: (_) => const NotFoundPage());
+  },
+);
+```
+
+实际项目几乎不会手写到这一步,因为 go_router 把这层全包了。
+
+### `Route` 的生命周期
+
+```text
+push:    install  →  didPush             (transition 进入)
+覆盖另一: install  →  didPushNext         (上面又来了一个 route)
+回到当前: didPopNext                       (上面的 pop 走了)
+pop:     didPop   →  dispose             (transition 出场)
+```
+
+如果要在"页面被覆盖时停掉视频、回到时继续",可以用 `RouteAware` + `RouteObserver`:
+
+```dart filename="lib/widgets/video_screen.dart"
+final routeObserver = RouteObserver<PageRoute<void>>();
+
+class _VideoScreenState extends State<VideoScreen> with RouteAware {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    routeObserver.subscribe(this, ModalRoute.of(context)! as PageRoute<void>);
+  }
+
+  @override
+  void dispose() {
+    routeObserver.unsubscribe(this);
+    super.dispose();
+  }
+
+  @override
+  void didPushNext() => video.pause();      // 别的页面盖到我上面
+  @override
+  void didPopNext()  => video.play();       // 别的页面退掉,我又是栈顶
+
+  // ...
+}
+```
+
+并把 observer 挂到 `MaterialApp`:
+
+```dart
+MaterialApp(navigatorObservers: [routeObserver], home: ...);
+```
+
+### 命令式的局限
+
+到这里 Navigator 1.0 全部基础都讲完了,看似够用。但当 app 长大,会撞到这几面墙:
+
+1. **Web URL 同步**:用户在 `/detail/42` 刷新,App 必须能从 URL 重建栈;命令式 push 是脚本动作,无法逆向恢复。
+2. **深度链接**:外部链接打开 `myapp://detail/42`,你需要把它解析成"先 push home,再 push list,再 push detail",而且要**幂等**(已经在 detail 不要再 push 一遍)。
+3. **测试**:命令式调用散在各处,难写"给定 URL,期望栈是什么"的断言。
+
+这些就是 Navigator 2.0 的设计动机。
+
+## Navigator 2.0:Pages API
+
+2.0 的核心:**让 Navigator 接受 `pages` 列表(声明式),而不是命令式 push/pop**。你只要保证"我希望栈长这样",framework 自动算出 diff 并执行。
+
+最小例:
+
+```dart filename="lib/main.dart"
+class _AppState extends State<MyApp> {
+  String? selectedId;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Navigator(
+        pages: [
+          const MaterialPage(child: HomePage()),
+          if (selectedId != null) MaterialPage(child: DetailPage(itemId: selectedId!)),
+        ],
+        onDidRemovePage: (page) {
+          setState(() => selectedId = null);
+        },
+      ),
+    );
+  }
+}
+```
+
+> Flutter 3.16+ 用 `onDidRemovePage` 替代了旧的 `onPopPage`。如果你看到老资料用 `onPopPage`,知道是同一个东西即可。
+
+声明式的好处:**只要存好 `selectedId`,任何路径(深链、刷新、重启)进来都能恢复**。
+
+### `Page` vs `Route`
+
+- `Route` 是 1.0 的栈条目,`MaterialPageRoute` 是它的实现。
+- `Page` 是 2.0 的"声明式描述",`MaterialPage` / `CupertinoPage` 是它的实现。
+- 内部 `Page.createRoute()` 还是会变成 `Route`,Page 只是"长寿命的、可比较的描述符"。
+
+### 全套 2.0:`Router` widget
+
+`Navigator` 只是栈;真要把"系统/浏览器 URL ↔ 栈"双向同步,需要更上一层 `Router`:
+
+```dart
+Router(
+  routerDelegate: MyRouterDelegate(),
+  routeInformationParser: MyRouteInformationParser(),
+  backButtonDispatcher: RootBackButtonDispatcher(),
+);
+```
+
+- `RouteInformationParser`:把 URL 字符串解析成"应用状态"(自定义类)。
+- `RouterDelegate`:把"应用状态"映射回 `Navigator(pages:...)`,并实现 `popRoute`。
+- `BackButtonDispatcher`:把系统返回事件路由给 delegate。
+
+**手写这三个类极其繁琐**,所以社区直接给了路由库。
+
+## go_router(主线)
+
+[go_router](https://pub.dev/packages/go_router) 是 Flutter 团队官方维护的声明式路由,2026 年事实上是 Flutter 路由的默认方案。
+
+### 安装
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  go_router: ^14.6.0
+```
+
+### 最小可用例
+
+```dart filename="lib/main.dart"
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+final _router = GoRouter(
+  initialLocation: '/',
+  routes: [
+    GoRoute(
+      path: '/',
+      builder: (context, state) => const HomePage(),
+    ),
+    GoRoute(
+      path: '/items/:id',
+      builder: (context, state) {
+        final id = state.pathParameters['id']!;
+        return DetailPage(itemId: id);
+      },
+    ),
+  ],
+);
+
+void main() => runApp(MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(
+      routerConfig: _router,            // ★ 注意是 .router 构造器
+      title: 'My App',
+      theme: ThemeData(useMaterial3: true),
+    );
+  }
+}
+```
+
+注意:用 `MaterialApp.router(...)` 而不是 `MaterialApp(...)`,go_router 会接管路由管理。
+
+### 跳转 API:`go` vs `push` vs `replace`
+
+| API | 行为 |
+| ---- | ---- |
+| `context.go('/items/42')` | **替换整个栈**为目标路径(适合 Tab 切换、登录后跳首页) |
+| `context.push('/items/42')` | **入栈**(适合从列表 → 详情) |
+| `context.replace('/items/42')` | **替换栈顶**(适合"登录页 → 首页",不可返回登录) |
+| `context.pop([result])` | 出栈,可带返回值 |
+| `context.pushReplacement('/...')` | 替换栈顶(等价 replace,旧名) |
+
+> 这套 API 替代了 1.0 的 `Navigator.of(context).push(...)`。一旦在路由表注册,**所有路径切换都用字符串 URL**,不再传 widget 实例。
+
+### 路径参数与查询参数
+
+```dart
+GoRoute(
+  path: '/items/:id',                        // 路径模板
+  builder: (context, state) {
+    final id = state.pathParameters['id']!;  // 必传
+    final tab = state.uri.queryParameters['tab'] ?? 'overview';
+    return DetailPage(itemId: id, tab: tab);
+  },
+);
+```
+
+跳转时:
+
+```dart
+context.go('/items/42?tab=reviews');
+context.goNamed('item', pathParameters: {'id': '42'}, queryParameters: {'tab': 'reviews'});
+```
+
+### `extra`:传非字符串参数
+
+URL 应该是可序列化的;但有时候你想把一个完整对象传过去(避免再请求一次):
+
+```dart
+context.push('/items/42', extra: itemFromList);
+
+// 在目标页:
+final preloaded = state.extra as Item?;
+```
+
+陷阱:`extra` **不会进入 URL**——刷新页面或外部深链来,`extra` 是 `null`。所以**永远要假设 `extra` 可能为空**,把 URL 参数(`pathParameters`)当唯一可信源。
+
+### 嵌套路由 + 共享 Shell:`StatefulShellRoute`
+
+底部 Tab 几乎是每个 app 必有的需求:
+
+```text
+HomeShell(BottomNavigationBar)
+├── /home            → HomePage
+├── /search          → SearchPage
+└── /profile         → ProfilePage
+```
+
+要求:**切换 Tab 不重建,Tab 内的栈各自保留**(从 search/results 切到 home 再切回来,results 还在)。
+
+```dart filename="lib/router.dart"
+final _router = GoRouter(
+  initialLocation: '/home',
+  routes: [
+    StatefulShellRoute.indexedStack(
+      builder: (context, state, navigationShell) {
+        return ShellPage(navigationShell: navigationShell);
+      },
+      branches: [
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/home',
+              builder: (_, __) => const HomePage(),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/search',
+              builder: (_, __) => const SearchPage(),
+              routes: [
+                GoRoute(
+                  path: 'results',                 // → /search/results
+                  builder: (_, __) => const ResultsPage(),
+                ),
+              ],
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/profile',
+              builder: (_, __) => const ProfilePage(),
+            ),
+          ],
+        ),
+      ],
+    ),
+  ],
+);
+```
+
+```dart filename="lib/widgets/shell_page.dart"
+class ShellPage extends StatelessWidget {
+  const ShellPage({super.key, required this.navigationShell});
+  final StatefulNavigationShell navigationShell;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: navigationShell,
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: navigationShell.currentIndex,
+        onDestinationSelected: (i) => navigationShell.goBranch(
+          i,
+          initialLocation: i == navigationShell.currentIndex,    // 二次点击回到分支根
+        ),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
+          NavigationDestination(icon: Icon(Icons.search), label: 'Search'),
+          NavigationDestination(icon: Icon(Icons.person), label: 'Profile'),
+        ],
+      ),
+    );
+  }
+}
+```
+
+> `StatefulShellRoute.indexedStack` 实质是一个 `IndexedStack` + 每个分支一个独立的 `Navigator`;每个分支的栈独立保留,这正是用户期望的 Tab 行为。
+
+### 鉴权重定向:`redirect`
+
+```dart filename="lib/router.dart"
+final _router = GoRouter(
+  refreshListenable: authState,         // 鉴权状态变化时,重跑 redirect
+  redirect: (context, state) {
+    final loggedIn = authState.isLoggedIn;
+    final goingToLogin = state.matchedLocation == '/login';
+
+    if (!loggedIn && !goingToLogin) return '/login?from=${state.matchedLocation}';
+    if (loggedIn && goingToLogin) return '/home';
+    return null;                        // null = 不重定向
+  },
+  routes: [...],
+);
+```
+
+要点:
+
+- `refreshListenable` 是一个 `Listenable`(`ChangeNotifier`、`ValueNotifier`、或后续我们用 Riverpod 包出来的)。它变化时,redirect 重新跑一遍,自动跳转。
+- `redirect` 也可以挂在单个 `GoRoute` 上,作"该路径专属的"鉴权 / 准入逻辑。
+
+> 我们会在第 13 章「状态管理」给出**Riverpod + go_router** 的完整鉴权骨架,这里先建立 API 形状。
+
+### 错误页与 404
+
+```dart
+GoRouter(
+  errorBuilder: (context, state) => NotFoundPage(error: state.error),
+  routes: [...],
+);
+```
+
+### 类型安全路由(可选)
+
+`go_router` 配合 `go_router_builder` 可以生成类型安全的跳转 API:
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  go_router: ^14.6.0
+dev_dependencies:
+  go_router_builder: ^2.7.0
+  build_runner: ^2.4.0
+  json_serializable: ^6.8.0
+```
+
+```dart filename="lib/routes.dart"
+import 'package:go_router/go_router.dart';
+part 'routes.g.dart';
+
+@TypedGoRoute<HomeRoute>(path: '/')
+class HomeRoute extends GoRouteData {
+  const HomeRoute();
+  @override
+  Widget build(BuildContext context, GoRouterState state) => const HomePage();
+}
+
+@TypedGoRoute<DetailRoute>(path: '/items/:id')
+class DetailRoute extends GoRouteData {
+  const DetailRoute({required this.id, this.tab = 'overview'});
+  final String id;
+  final String tab;
+
+  @override
+  Widget build(BuildContext context, GoRouterState state) =>
+      DetailPage(itemId: id, tab: tab);
+}
+```
+
+跑 `dart run build_runner build`,然后:
+
+```dart
+const DetailRoute(id: '42', tab: 'reviews').go(context);     // 类型安全,IDE 跳转可达
+```
+
+新项目推荐启用——拼字符串 URL 容易出 bug,IDE 也不能跨文件 rename。
+
+### auto_route 简略对照
+
+[auto_route](https://pub.dev/packages/auto_route) 是另一种主流方案,**默认就是类型安全 + code-gen**,API 风格更接近"声明式 + 注解":
+
+```dart
+@AutoRouterConfig()
+class AppRouter extends RootStackRouter {
+  @override
+  List<AutoRoute> get routes => [
+    AutoRoute(page: HomeRoute.page, initial: true),
+    AutoRoute(page: DetailRoute.page, path: '/items/:id'),
+  ];
+}
+```
+
+选谁?
+
+- **新项目偏好极简、文档充足、官方维护** → go_router(本系列主线)。
+- **偏好"全套都给我生成"、嵌套路由复杂、需要严格类型** → auto_route。
+
+两者本质都封装了 Navigator 2.0,差异主要在 API 风格。
+
+## Deep Link
+
+「外部链接打开 app 内某个页面」由两层组成:
+
+1. **平台层**:让操作系统识别"某个 URL 应该交给我们 app"。
+2. **应用层**:把收到的 URL 解析成栈结构(`go_router` 已经处理)。
+
+### Android: App Links
+
+```xml filename="android/app/src/main/AndroidManifest.xml"
+<activity android:name=".MainActivity" ...>
+  <intent-filter android:autoVerify="true">         <!-- ★ autoVerify=true 才是 App Link -->
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="https"
+          android:host="myapp.example.com" />
+  </intent-filter>
+</activity>
+```
+
+服务器侧需要部署 `https://myapp.example.com/.well-known/assetlinks.json`,把 app 的签名指纹绑定进去——只有验证通过的 URL,系统才会**直接打开 app 而不是浏览器选项**。
+
+### iOS: Universal Links
+
+```xml filename="ios/Runner/Info.plist"
+<key>com.apple.developer.associated-domains</key>
+<array>
+  <string>applinks:myapp.example.com</string>
+</array>
+```
+
+服务器部署 `https://myapp.example.com/.well-known/apple-app-site-association`(JSON,声明哪些路径属于哪个 app)。
+
+### 应用层
+
+go_router 默认会把"系统启动时传入的 URL"当成 `initialLocation`,运行时收到的 deep link 也会自动 push。**99% 情况下你不需要写额外代码**,只需在路由表里把对应的 path 配好。
+
+> 如果还想在收到 link 时做埋点 / 鉴权 / 重定向,挂到 `redirect` 即可。
+
+### 自定义 scheme(`myapp://`)
+
+```xml filename="android/app/src/main/AndroidManifest.xml"
+<intent-filter>
+  <action android:name="android.intent.action.VIEW" />
+  <category android:name="android.intent.category.DEFAULT" />
+  <category android:name="android.intent.category.BROWSABLE" />
+  <data android:scheme="myapp" />
+</intent-filter>
+```
+
+```xml filename="ios/Runner/Info.plist"
+<key>CFBundleURLTypes</key>
+<array>
+  <dict>
+    <key>CFBundleURLSchemes</key>
+    <array><string>myapp</string></array>
+  </dict>
+</array>
+```
+
+特点:不需要域名验证,实现简单;但**容易被别的 app 抢注**(scheme 不全局唯一)。生产环境优先用 App Links / Universal Links。
+
+## Web URL strategy
+
+在 Flutter Web,默认 URL 是 `https://app.com/#/items/42`(带 `#` 的 hash 模式)。原因是 hash 模式不需要服务器配合;但用户更习惯无 `#` 的路径模式 `https://app.com/items/42`。
+
+```dart filename="lib/main.dart"
+import 'package:flutter_web_plugins/url_strategy.dart';
+
+void main() {
+  usePathUrlStrategy();           // 改用 path 模式
+  runApp(MyApp());
+}
+```
+
+切到 path 模式后,**服务器必须配置"任何未匹配静态文件的路径都 fallback 到 index.html"**——否则刷新 `/items/42` 会 404。
+
+- nginx:`try_files $uri $uri/ /index.html;`
+- Cloudflare Pages / Vercel / Netlify:默认就有 SPA fallback。
+
+## 系统返回控制:`PopScope`(替代 `WillPopScope`)
+
+Flutter 3.12 引入 `PopScope`,**3.16 开始 `WillPopScope` 被标 deprecated**。两者解决同一类问题——拦截系统返回(Android 后退键、iOS 边缘滑动、go_router 的 pop)。
+
+### 旧 API(已废弃)
+
+```dart
+// ❌ 废弃,不要在新代码里用
+WillPopScope(
+  onWillPop: () async {
+    final shouldPop = await _confirmDialog();
+    return shouldPop;
+  },
+  child: ...,
+);
+```
+
+### 新 API:`PopScope`
+
+```dart filename="lib/screens/edit_form.dart"
+class EditFormPage extends StatefulWidget {
+  const EditFormPage({super.key});
+  @override
+  State<EditFormPage> createState() => _EditFormPageState();
+}
+
+class _EditFormPageState extends State<EditFormPage> {
+  bool _hasChanges = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope<Object?>(
+      canPop: !_hasChanges,                       // 没改动时允许直接 pop
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;                       // 已经 pop 走了,不必再处理
+        final shouldPop = await _confirmDiscard();
+        if (shouldPop && context.mounted) {
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Edit')),
+        body: TextField(
+          onChanged: (_) => setState(() => _hasChanges = true),
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _confirmDiscard() async {
+    return await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        content: const Text('Discard changes?'),
+        actions: [
+          TextButton(child: const Text('Cancel'), onPressed: () => Navigator.pop(context, false)),
+          TextButton(child: const Text('Discard'), onPressed: () => Navigator.pop(context, true)),
+        ],
+      ),
+    ) ?? false;
+  }
+}
+```
+
+要点:
+
+- `canPop: false` 时,系统返回不会真的 pop,**会触发 `onPopInvokedWithResult(false, result)`**,你在里面决定要不要手动 pop。
+- `canPop: true` 时,`onPopInvokedWithResult(true, result)` 是"已经 pop 完"的回调。
+- 在 Android 上,这套 API 配合 **predictive back gesture**(Android 14+ 的"边缘滑动预览"):`canPop: false` 时系统不会显示预览,避免误导用户。
+
+> Flutter 3.22 之前用 `onPopInvoked(didPop)`(不带 result),3.22+ 用 `onPopInvokedWithResult(didPop, result)`(可拿到 pop 的返回值)。新项目直接用后者。
+
+## 嵌套 Navigator
+
+有些场景需要"在某个屏幕的局部范围内有自己的栈",而不影响外层路由——典型是底部 Tab、对话框内向导。`StatefulShellRoute` 已经覆盖了 Tab 场景;再下一层就是手写嵌套 `Navigator`:
+
+```dart filename="lib/widgets/wizard_dialog.dart"
+showDialog(
+  context: context,
+  builder: (_) => Dialog(
+    child: SizedBox(
+      width: 400,
+      height: 500,
+      child: Navigator(
+        onGenerateRoute: (settings) {
+          switch (settings.name) {
+            case '/':     return MaterialPageRoute(builder: (_) => const _Step1());
+            case '/step2':return MaterialPageRoute(builder: (_) => const _Step2());
+            case '/step3':return MaterialPageRoute(builder: (_) => const _Step3());
+          }
+          return null;
+        },
+      ),
+    ),
+  ),
+);
+```
+
+子 Navigator 的 push/pop 不会冒泡到主 Navigator;主 Navigator 的 pop(关闭对话框)会一次性销毁子栈。
+
+## 自查问题
+
+- 用 1.0 的 `push` 后立刻 `pop` 拿到的 `result` 类型怎么保证正确?
+- 为什么 `pushNamed` 的 `arguments` 是 `Object?` 而不是泛型?这造成什么风险?
+- 为什么大型项目应该选 Navigator 2.0(或 go_router)而不是命名路由?给出 3 个具体场景。
+- `MaterialPage` 与 `MaterialPageRoute` 是什么关系?哪个属于 1.0,哪个属于 2.0?
+- `context.go` vs `context.push`,什么时候选哪个?给出"登录后进入首页"和"列表 → 详情"两种场景的正确选择。
+- `extra` 参数在什么情况下变成 `null`?设计 API 时需要注意什么?
+- `StatefulShellRoute.indexedStack` 内部用的是 `IndexedStack` 还是 `PageView`?为什么这个选择影响"切 Tab 时是否保留状态"?
+- go_router 的 `refreshListenable` 配合什么类型的对象?它和 `redirect` 怎么协作?
+- App Links 与自定义 scheme 的安全性差别在哪?生产环境为什么优先 App Links?
+- Flutter Web 切到 path strategy 后,服务器必须做什么配置?为什么?
+- `PopScope` 和 `WillPopScope` 在 Android 14 的 predictive back 行为上有什么差别?
+- 如果用户在表单页编辑了一半,按物理返回键,你想弹"是否丢弃改动?"——给出 `PopScope` 的完整代码。
+
+## 心智模型清单
+
+1. **Navigator 是一个管理 Route 栈的 widget,栈顶 = 当前页**。
+2. **1.0 命令式**:`push/pop`,直接操作栈;**2.0 声明式**:`pages: [...]`,framework 算 diff。
+3. **手写 2.0 太繁琐,生产用 go_router(主线)或 auto_route(对照)**。
+4. **`go` 替换栈,`push` 入栈,`replace` 替换栈顶**——按"用户能否 back 回来"决定选哪个。
+5. **`extra` 传不进 URL**,刷新就丢——必须以 `pathParameters` / `queryParameters` 为唯一可信源。
+6. **底部 Tab 用 `StatefulShellRoute.indexedStack`**,每个 branch 各保栈。
+7. **鉴权用 `redirect` + `refreshListenable`**,鉴权状态变化自动跳转。
+8. **Deep link 是"平台层 + 应用层"两层**:平台层配 manifest / Info.plist,应用层让 go_router 接管。
+9. **Web 上启用 `usePathUrlStrategy()` + 服务器 SPA fallback**,URL 才能干净刷新。
+10. **新代码用 `PopScope`,旧的 `WillPopScope` 已废弃**;`canPop` + `onPopInvokedWithResult` 双字段控制。
+
+下一章 [状态管理](/flutter/state-management):栈管完了,该管"页面里的数据"了。

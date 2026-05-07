@@ -1,0 +1,727 @@
+---
+title: Dart 类系统
+description: 继承、抽象、mixin、Dart 3 类修饰符、records、patterns、操作符重载、扩展、枚举
+---
+
+# Dart 类系统
+
+上一章把"基础类与构造函数"过完了。本章承接，把 Dart 类系统中**最强大也最容易踩坑**的部分讲透：继承的精细规则、`abstract`、`mixin`、`implements`、Dart 3 引入的类修饰符、records、模式匹配、操作符重载、扩展、枚举。这些不是"高级特性"——Flutter 框架自己就大量使用，**不掌握就读不懂任何源码**。
+
+## 继承：`extends`
+
+### 基本规则
+
+```dart
+class Animal {
+  Animal(this.name);
+  final String name;
+
+  void breathe() => print('$name breathes');
+}
+
+class Dog extends Animal {
+  Dog(super.name, this.breed);   // super.name：把 name 直接转给父类构造（Dart 3）
+  final String breed;
+
+  @override
+  void breathe() {
+    super.breathe();
+    print('$name (a $breed) wags tail');
+  }
+}
+```
+
+要点：
+
+- 一个类**只能 `extends` 一个父类**（Dart 没有多重继承）。
+- 不写 `extends` 时，默认继承 `Object`。
+- `@override` 不强制写，但**强烈建议**——拼错方法名时编译器才会报错。
+- `super.x` 在参数列表里转发给父类构造（**Dart 2.17+ 简写**）；老写法 `: super(x)` 仍合法但啰嗦。
+- 子类可以**覆盖**字段、方法、getter、setter，但不能**改变签名**（参数类型/数量必须一致或更宽松的协变）。
+
+### 调用顺序：构造函数三阶段
+
+构造一个子类对象时，Dart 严格按以下顺序：
+
+```text
+① 子类初始化列表（不含 super 调用）
+② 父类构造函数（递归，从最远祖先开始）
+③ 子类构造函数体
+```
+
+```dart
+class A {
+  A(this.x) { print('A body'); }
+  int x;
+}
+
+class B extends A {
+  B(int x, this.y) : y = y * 2, super(x) {   // ① y = y*2 → ② super(x) → ③ B body
+    print('B body');
+  }
+  int y;
+}
+```
+
+**陷阱**：初始化列表里 `this` 不可用——对象还没构造完，访问 `this` 是未定义行为。
+
+### `final` 字段必须在构造结束前被赋值
+
+```dart
+class User {
+  User(this.name);
+  final String name;     // 必须在构造结束前赋值
+  final int? age;        // ✓ 可空时可不赋（默认为 null）
+}
+```
+
+如果你想"延迟赋值但不可重赋"，用 `late final`：
+
+```dart
+class Auth {
+  late final String token;     // 第一次赋值后再不允许改
+  Future<void> init() async {
+    token = await fetchToken();
+  }
+}
+```
+
+## 抽象：`abstract`
+
+抽象类**不能直接实例化**，常用于定义接口或部分实现：
+
+```dart
+abstract class Shape {
+  double area();                 // 抽象方法：无方法体，必须由子类实现
+  void describe() {              // 普通方法：有实现，子类可覆盖
+    print('I have area: ${area()}');
+  }
+}
+
+class Circle extends Shape {
+  Circle(this.r);
+  final double r;
+  @override
+  double area() => 3.14 * r * r;
+}
+
+// Shape();   // ✗ 编译错：抽象类不能直接构造
+final c = Circle(2);
+c.describe();  // I have area: 12.56
+```
+
+> 注意：abstract 类**也可以有构造函数**——子类用 `super(...)` 调用即可。所以 abstract 类的"接口能力"与"部分实现能力"是**同时存在**的。
+
+## 隐式接口与 `implements`
+
+> Dart 中**每个类都自带一个同名接口**：把它的所有 public 成员当成接口定义。
+
+这是 Dart 与 Java/C# 的关键差异——你**不需要** `interface` 关键字（直到 Dart 3 引入了用于"限制接口角色"的 `interface` 修饰符，见下文）。
+
+```dart
+class Greeter {
+  String greet(String name) => 'Hello, $name';
+}
+
+class Shouter implements Greeter {       // 只继承接口，不继承实现
+  @override
+  String greet(String name) => 'HEY, $name!';
+}
+```
+
+`implements` 的语义：
+
+- **不继承父类的实现**——必须自己重新写所有 public 方法、getter、setter；
+- **可以一次 implements 多个**：`class Foo implements A, B, C {}`；
+- 与 `extends` 混用：`class Foo extends A implements B, C {}`。
+
+实际项目中，`implements` 最大的用途是**为测试创建假对象（fake / stub）**：
+
+```dart
+abstract class HttpClient {
+  Future<String> get(String url);
+}
+
+class FakeHttp implements HttpClient {
+  @override
+  Future<String> get(String url) async => '{"ok": true}';
+}
+```
+
+## `mixin`：横向能力复用
+
+继承表达"is-a"，mixin 表达"can-do"——**把某些能力（方法+字段）混入到多个不相关的类**。
+
+### 定义与使用
+
+```dart
+mixin Logging {
+  void log(String msg) => print('[$runtimeType] $msg');
+}
+
+mixin Timestamping {
+  DateTime get now => DateTime.now();
+}
+
+class Service with Logging, Timestamping {
+  void run() {
+    log('starting at $now');
+  }
+}
+
+Service().run();    // [Service] starting at 2025-...
+```
+
+要点：
+
+- 用 `mixin Name { ... }` 声明（不是 `class`），但 mixin 不能被构造；
+- 用 `with M1, M2, M3` 把 mixin 顺序应用到类上；
+- `with` 后的 mixin 顺序**重要**：后面的覆盖前面的同名成员。
+
+### `on` 限定：mixin 只能用在某些类型上
+
+```dart
+mixin DiagnosticableLogging on Diagnosticable {
+  // 这里能调用 Diagnosticable 里的方法
+  void logDiagnostics() => log(toStringShort());
+}
+```
+
+`on Type` 表示这个 mixin **只能被 `Type` 或其子类应用**。这让 mixin 内部能假定 `this` 具备某些方法。
+
+### `mixin class`（Dart 3）
+
+Dart 3 起，可以写 `mixin class`——既能 `with` 又能 `extends` / 直接构造：
+
+```dart
+mixin class Resettable {
+  void reset() => print('reset');
+}
+
+class A with Resettable {}            // OK：当 mixin 用
+class B extends Resettable {}         // OK：当父类用
+final r = Resettable();               // OK：直接构造
+r.reset();
+```
+
+普通 `mixin` 不能被 `extends` 或构造；普通 `class` 不能被 `with`（除非声明为 `mixin class`）。**Dart 3 之前老代码里把 `class` 当 mixin 用是隐式合法的，3.0 起必须显式标注**。
+
+### mixin 的"线性化"
+
+多个 mixin 应用顺序决定方法解析顺序（MRO）：
+
+```dart
+class Base { void foo() => print('Base'); }
+mixin A on Base { void foo() { print('A'); super.foo(); } }
+mixin B on Base { void foo() { print('B'); super.foo(); } }
+
+class X extends Base with A, B {}    // 应用顺序：Base → A → B
+
+X().foo();
+// 输出：B → A → Base
+```
+
+调用 `X().foo()` 时实际查找顺序是 `B → A → Base`（最后应用的最先生效，super 沿链反向走）。这个机制让多个 mixin **能彼此协作**。
+
+## Dart 3 类修饰符（class modifiers）★
+
+Dart 3 的最大语法变化之一是引入了 **5 个类修饰符**，控制一个类**能被外部以何种方式使用**：
+
+| 修饰符 | 限制 |
+| ------ | ---- |
+| `abstract` | 不能直接构造 |
+| `base` | 只能在同库 `extends`、`with`、`implements` |
+| `interface` | 只能 `implements`，不能 `extends` |
+| `final` | 不能 `extends`、`implements`、`with`（封闭） |
+| `sealed` | 隐式 `abstract` + `final`，且**所有直接子类必须在同库**——专为 switch 穷尽匹配设计 |
+
+可以组合（部分组合）。常用组合：
+
+```dart
+abstract class Foo {}            // 不能构造，但可继承/实现
+abstract base class Foo {}       // 不能构造，且只能在同库继承/实现
+abstract interface class Foo {}  // 纯接口（推荐用于"对外只暴露 API 形状"）
+final class Foo {}               // 完全封闭：第三方既不能继承也不能实现
+sealed class Result {}           // 配合 switch 表达式做穷尽匹配
+mixin class Foo {}               // 可作为 mixin 也可作为 class
+base mixin Bar {}                // 跨库时不能用 implements 假装实现，避免用户绕过 mixin 的能力期望
+```
+
+### 为什么需要这些修饰符？
+
+Dart 1/2 默认每个类都既能被 `extends` 也能被 `implements`，库作者很难做"只允许内部继承，外部只能用"。修饰符的目的就是**显式声明这种契约**——让你能控制"封装强度"。
+
+### `sealed`：穷尽 switch 的钥匙
+
+`sealed` 类的所有直接子类**必须**在同一个库里。这让编译器能在 `switch` 表达式中**穷尽性检查**：
+
+```dart filename="lib/result.dart"
+sealed class Result<T> {
+  const Result();
+}
+
+class Ok<T> extends Result<T> {
+  const Ok(this.value);
+  final T value;
+}
+
+class Err<T> extends Result<T> {
+  const Err(this.message);
+  final String message;
+}
+```
+
+```dart
+String describe(Result<int> r) => switch (r) {
+  Ok(:final value)    => 'ok: $value',
+  Err(:final message) => 'err: $message',
+  // 不写 default：编译器知道穷尽了，OK
+};
+```
+
+如果 `Ok` / `Err` 不全覆盖，编译器会报错"missing case: Err"。这就是 `sealed` 替代 Java 旧式 `instanceof` 链的方式。
+
+### 实战中如何选
+
+- **写库**：默认 `final class`（封闭，最严），有意开放再用 `base` / `interface`；
+- **写应用业务模型**：默认无修饰符（既能继承也能实现），关键的领域模型加 `sealed` 配合 switch；
+- **写 widget**：照搬 Flutter 源码的写法即可——大量 `abstract base class` 与 `final class`。
+
+## Records（记录）★
+
+> Dart 3 引入。**轻量级、不可变、带类型的元组**，无需声明类即可分组返回多个值。
+
+### 字面量与类型
+
+```dart
+// 位置字段
+(int, String) pair = (42, 'answer');
+print(pair.$1);     // 42
+print(pair.$2);     // 'answer'
+
+// 命名字段
+({String name, int age}) p = (name: 'Alice', age: 30);
+print(p.name);
+
+// 混合
+(int, {String name}) m = (1, name: 'Alice');
+```
+
+### 解构
+
+```dart
+final (id, label) = (42, 'answer');
+final (name: n, age: a) = (name: 'Alice', age: 30);
+
+// 函数返回多个值
+(int, String) parse(String s) {
+  return (int.parse(s.substring(0, 1)), s.substring(1));
+}
+
+final (n, rest) = parse('1abc');
+```
+
+### 与 class 的取舍
+
+| 维度 | record | class |
+| ---- | ------ | ----- |
+| 声明成本 | 零 | 至少几行 |
+| 字段命名 | 可有可无 | 必须有 |
+| 等价性 | **结构性等价**（字段相同即相等） | 默认引用等价 |
+| 复制变体 | 无内置（只能整个重建） | 可写 `copyWith` |
+| 可方法附加 | 不可（只是数据） | 可 |
+
+**经验法则**：函数内部要返回多值用 record；跨模块、跨层、需要附加方法用 class（且最好用 `freezed` 生成）。
+
+### Record 的等价性
+
+```dart
+final a = (1, 'x');
+final b = (1, 'x');
+print(a == b);            // true ✓
+print(identical(a, b));   // false（结构相等，但不同对象）
+```
+
+## Patterns（模式匹配）★
+
+Dart 3 的另一支柱。Patterns 出现在三个语境：
+
+1. **变量声明**：`var (x, y) = (1, 2);`
+2. **赋值**：`(x, y) = (y, x);`
+3. **`switch` 与 `if-case`**：模式 + 守卫（when）
+
+### Pattern 全景
+
+| 名称 | 例子 | 含义 |
+| ---- | ---- | ---- |
+| 字面量 | `42`、`'hi'`、`null`、`true` | 与字面量相等 |
+| 通配符 | `_` | 匹配一切，不绑定 |
+| 变量 | `var x`、`final x`、`int x` | 匹配并绑定（可加类型） |
+| 常量 | `MyEnum.foo`、`const C(1)` | 与已知常量比较 |
+| 关系 | `> 0`、`<= 100` | 关系比较 |
+| 逻辑 | `a || b`、`a && b` | 组合 |
+| 类型转换 | `var x as int` | 强制转型 |
+| 空检查 | `var x?` | 非 null 才匹配 |
+| 空判定 | `null` | 是 null 才匹配 |
+| record | `(a, b)`、`(name: var n)` | 结构匹配 record |
+| list | `[a, b, ...rest]` | 结构匹配 list |
+| map | `{'k': var v}` | 结构匹配 map |
+| object | `User(:name, age: > 18)` | 字段解构 + 子模式 |
+
+### 实战示例
+
+```dart
+// 1. 类型 + 字段绑定 + 守卫
+String classify(Object o) => switch (o) {
+  int i when i > 0           => 'pos int $i',
+  int i when i < 0           => 'neg int $i',
+  String s when s.isNotEmpty => 'str of len ${s.length}',
+  null                       => 'null',
+  _                          => 'other',
+};
+
+// 2. record 与 list 解构
+final score = switch ((subject, value)) {
+  ('math', > 90)  => 'math A',
+  ('math', > 60)  => 'math pass',
+  ('math', _)     => 'math fail',
+  (_, int v)      => 'subj $subject = $v',
+};
+
+final firstTwo = switch (list) {
+  [var a, var b, ...] => '$a $b',
+  []                  => 'empty',
+  _                   => 'one',
+};
+
+// 3. map 解构（适合 JSON 校验）
+if (json case {'name': String name, 'age': int age, 'admin': bool isAdmin}) {
+  // 这里 name / age / isAdmin 已被声明、类型已校验、非 null
+  print('$name $age $isAdmin');
+} else {
+  throw FormatException('bad shape');
+}
+
+// 4. object 解构
+final User(:name, age: var a) = user;     // user.name → name；user.age → a
+
+// 5. 与 sealed 配合穷尽
+sealed class Event {}
+class Tap extends Event { Tap(this.x, this.y); final double x, y; }
+class Drag extends Event { Drag(this.dx, this.dy); final double dx, dy; }
+
+void handle(Event e) {
+  switch (e) {
+    case Tap(:final x, :final y):  print('tap at $x,$y');
+    case Drag(:final dx, :final dy): print('drag $dx,$dy');
+    // 不需要 default
+  }
+}
+```
+
+> `Tap(:final x, :final y)` 是 **object pattern + getter shorthand**——`:final x` 等价于 `x: final x`，从对象的 `x` getter 取值并绑定到本地 `x`。
+
+### `if-case`：避免无意义嵌套
+
+```dart
+// 老写法
+if (json is Map && json['name'] is String && json['age'] is int) {
+  final name = json['name'] as String;
+  final age = json['age'] as int;
+  // ...
+}
+
+// 模式写法
+if (json case {'name': String name, 'age': int age}) {
+  // name / age 直接可用且类型已知
+}
+```
+
+## 操作符重载
+
+Dart 允许重载一组指定操作符:
+
+- **比较**:`==`、`<`、`<=`、`>`、`>=`
+- **算术**:`+`、`-`、`*`、`/`、`~/`、`%`、`unary -`
+- **位**:`&`、`|`、`^`、`~`、`<<`、`>>`、`>>>`
+- **索引**:`[]`、`[]=`
+- **调用**:`call`(实例可被当函数调)
+
+### `==` 与 `hashCode`
+
+**两者必须成对重写**——这是 Dart 与 Java/C# 共同的契约：
+
+```dart
+class Point {
+  const Point(this.x, this.y);
+  final double x, y;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is Point && other.x == x && other.y == y;
+  }
+
+  @override
+  int get hashCode => Object.hash(x, y);
+}
+```
+
+> 工程中**强烈建议用 `freezed` / `equatable` / 手写时用 `Object.hash` 与 `Object.hashAll`** 来生成。手写 `hashCode` 极易出错。
+
+### `[]` / `[]=`
+
+让对象支持下标语法：
+
+```dart
+class Matrix {
+  Matrix(int rows, int cols) : _data = List.filled(rows * cols, 0), _cols = cols;
+  final List<int> _data;
+  final int _cols;
+
+  int operator [](int i) => _data[i];
+  void operator []=(int i, int v) => _data[i] = v;
+}
+
+final m = Matrix(3, 3);
+m[0] = 42;
+print(m[0]);
+```
+
+### `call`：让实例像函数
+
+```dart
+class Adder {
+  Adder(this.delta);
+  final int delta;
+  int call(int x) => x + delta;
+}
+
+final add5 = Adder(5);
+print(add5(3));    // 8
+print(add5.call(3));  // 与 add5(3) 等价
+```
+
+实现 `call` 后，实例可以直接传给"期望函数"的位置——实战常见于策略对象。
+
+### 不能重载的操作符
+
+`=`（赋值）、`!`（逻辑非）、`&&` / `||`（短路）、`??`、`is`、`as`、`?.`、`..`、`#`（symbol）等不可重载。
+
+## 扩展方法 `extension`
+
+为已有类型**追加方法**，而不需要继承或修改源码：
+
+```dart
+extension StringX on String {
+  bool get isBlank => trim().isEmpty;
+  String capitalize() {
+    if (isEmpty) return this;
+    return '${this[0].toUpperCase()}${substring(1)}';
+  }
+}
+
+print('  '.isBlank);          // true
+print('hello'.capitalize());  // 'Hello'
+```
+
+要点：
+
+- 扩展是**静态分派**——根据**编译期类型**决定调用哪个 extension；
+- 同一类型上同名扩展冲突时需 `import 'foo.dart' show StringX;` 显式指定；
+- 扩展可以加泛型：`extension IterableX<T> on Iterable<T> { ... }`。
+
+### 匿名扩展
+
+```dart
+extension on int {                 // 不命名，但仍生效
+  bool get isEven2 => this % 2 == 0;
+}
+```
+
+匿名扩展**无法被显式 import / hide**，只能在同库使用。
+
+## 扩展类型 `extension type`（Dart 3.3+）
+
+Dart 3.3 引入。零成本包装现有类型，常用于"给某个原始类型套上类型安全"：
+
+```dart
+extension type UserId(String value) {
+  bool get isValid => value.length == 12;
+}
+
+void load(UserId id) { /* ... */ }
+
+load(UserId('abc123ef9012'));   // ✓
+// load('abc123ef9012');         // ✗ 编译错：String 不是 UserId
+```
+
+它**没有运行时开销**——`UserId` 在 JIT/AOT 后等同于 `String`，但编译期它是独立类型。常用于：
+
+- 区分 `UserId` / `OrderId` 等同为 String 的领域 ID；
+- 给从 JSON 来的 `Map<String, dynamic>` 起一个有方法的别名；
+- 替代传统的"value object"模式（不用真包一层类）。
+
+## 枚举 `enum`
+
+### 基础枚举
+
+```dart
+enum Status { idle, loading, success, error }
+
+final s = Status.loading;
+print(s.name);           // 'loading'
+print(s.index);          // 1
+print(Status.values);    // [idle, loading, success, error]
+```
+
+### Enhanced Enum（带字段、构造、方法）
+
+```dart
+enum Planet {
+  mercury(3.303e+23, 2.4397e6),
+  venus(4.869e+24, 6.0518e6),
+  earth(5.976e+24, 6.37814e6);
+
+  const Planet(this.mass, this.radius);
+
+  final double mass;     // kg
+  final double radius;   // m
+
+  double get surfaceGravity => 6.67e-11 * mass / (radius * radius);
+}
+
+print(Planet.earth.surfaceGravity);   // 9.802...
+```
+
+要点：
+
+- 枚举构造**必须** `const`；
+- 枚举可以 `implements` 接口、`with` mixin（不能 `extends`）；
+- 与 `switch` + 模式配合天然穷尽。
+
+## `Comparable` / `Iterable` / `Object` 几个核心 mixin
+
+### `Comparable<T>`
+
+让对象可排序：
+
+```dart
+class Version implements Comparable<Version> {
+  Version(this.major, this.minor);
+  final int major, minor;
+
+  @override
+  int compareTo(Version other) {
+    if (major != other.major) return major - other.major;
+    return minor - other.minor;
+  }
+}
+
+final list = [Version(1, 2), Version(0, 9), Version(1, 0)]..sort();
+```
+
+实现 `compareTo` 后，`List<T>.sort()` / `SplayTreeMap` / `binarySearch` 等会自动用它。
+
+### `Iterable<T>`
+
+实现自定义可迭代对象，最简方式是用 `sync*` 生成器（详见 [Dart 集合与函数式](/flutter/dart-functional)）。
+
+### `Object` 默认行为
+
+每个类隐式继承 `Object`，提供：
+
+- `==`：默认引用相等；
+- `hashCode`：基于身份；
+- `toString`：默认 `Instance of 'ClassName'`，**调试时强烈建议覆盖**；
+- `runtimeType`：运行时类型对象；
+- `noSuchMethod`：方法不存在时回退（极少手写）。
+
+## `noSuchMethod` 与动态分派（一笔带过）
+
+```dart
+class Mock {
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    print('called ${invocation.memberSymbol} with ${invocation.positionalArguments}');
+    return null;
+  }
+}
+```
+
+实际项目里**几乎只在 mock 库内部出现**（比如 `mockito`）。业务代码请勿主动用——它会让静态分析失效。
+
+## 一个综合示例
+
+把本章主要语法集成在一个"领域模型"里：
+
+```dart filename="lib/order.dart"
+sealed class Order {
+  const Order(this.id);
+  final String id;
+}
+
+final class Pending extends Order {
+  const Pending(super.id, this.expectedAt);
+  final DateTime expectedAt;
+}
+
+final class Shipped extends Order {
+  const Shipped(super.id, this.trackingNo);
+  final String trackingNo;
+}
+
+final class Cancelled extends Order {
+  const Cancelled(super.id, this.reason);
+  final String reason;
+}
+
+extension OrderX on Order {
+  /// 用 switch + pattern 穷尽分派
+  String describe() => switch (this) {
+    Pending(:final expectedAt) => 'pending until $expectedAt',
+    Shipped(:final trackingNo) => 'shipped, no=$trackingNo',
+    Cancelled(:final reason)   => 'cancelled: $reason',
+  };
+}
+
+void main() {
+  final orders = <Order>[
+    Pending('1', DateTime(2025, 1, 1)),
+    Shipped('2', 'TRK-001'),
+    Cancelled('3', 'out of stock'),
+  ];
+
+  for (final o in orders) {
+    print('${o.id}: ${o.describe()}');
+  }
+}
+```
+
+如果再加一种 `Refunded` 子类却忘了在 `describe()` 里处理，**编译器会立刻报错**——这就是 `sealed` 与模式匹配组合的核心价值。
+
+## Dart 类系统心智模型清单
+
+1. **`extends` 是 is-a，`implements` 是接口同形，`with` 是能力混入**；三者各司其职。
+2. **每个类都自带同名隐式接口**——`implements` 不需要 `interface` 关键字。
+3. **构造顺序：子类初始化列表 → 父类构造 → 子类构造体**；初始化列表里 `this` 不可用。
+4. **`final` 字段必须构造结束前赋值；`late final` 用于"运行时一次性赋值"**。
+5. **Dart 3 类修饰符（abstract / base / interface / final / sealed / mixin）显式声明类的开放程度**——库作者必读。
+6. **`sealed` + switch + pattern = 穷尽分派**；编译器替你保证不漏。
+7. **records 是结构性等价的不可变元组**；返回多值的首选。
+8. **patterns 出现在变量声明、赋值、switch、if-case 四个位置**；是 Dart 3 最强语法糖。
+9. **`==` 与 `hashCode` 必须成对重写**；首选 `freezed` / `equatable` 自动生成。
+10. **`extension` 是静态分派**——按编译期类型决定调用谁。
+11. **enhanced enum** 让枚举具备字段与方法，配合模式天然穷尽。
+12. **`mixin class`、`base mixin` 等组合修饰符是 Dart 3 新语法**——老代码迁移时要逐一标注。
+
+## 自查问题
+
+1. `extends` 与 `implements` 的根本差异是什么？为什么 Dart 中"实现接口"不需要写 `interface`？
+2. 一个类要做 mixin 必须声明为 `mixin`、`mixin class`，还是普通 `class` 即可？三者在 Dart 3 中的行为有什么不同？
+3. `sealed class` 与 `final class` 的区别是什么？前者解决了什么核心问题？
+4. record `(int, String)` 与 `class Pair` 在等价性、内存与可读性上各有什么取舍？
+5. 写出一个用 pattern 解构 `Map<String, dynamic>` 并同时类型校验的 `if-case` 表达式。
+6. `==` 重写时为什么必须同时重写 `hashCode`？不重写会发生什么？
+7. `extension` 是静态分派还是动态分派？这意味着什么样的代码会"看上去能工作但实际不调"？
+8. 一个 `enhanced enum` 与 `sealed class` 各适合什么场景？什么时候选哪个？

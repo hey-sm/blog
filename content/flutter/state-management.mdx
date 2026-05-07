@@ -1,0 +1,760 @@
+---
+title: 状态管理
+description: setState/InheritedWidget/Provider/Riverpod/Bloc 全谱、AsyncValue、code-gen、ref.watch vs read、autoDispose、family、selector、Riverpod + go_router 鉴权骨架
+---
+
+# 状态管理
+
+状态管理是 Flutter 社区最分裂的话题——没有"官方钦定"方案,生态有 5 个以上活跃方案。本章先把"状态"这个词说清,再按从轻到重的顺序过 Flutter 全部主流方案,主线落到 **Riverpod**。
+
+## 什么是"状态"
+
+状态 = **跨多次 build 仍然存在、影响 UI 的数据**。按"作用范围"分四档:
+
+| 等级 | 例子 | 推荐机制 |
+| ---- | ---- | -------- |
+| **临时(ephemeral)** | 按钮按下高亮、动画进度、Stepper 当前页 | `StatefulWidget` + `setState` |
+| **共享(局部)** | 表单内多个字段联动、列表展开/收起 | 状态提升 / `InheritedNotifier` / Provider |
+| **应用** | 当前用户、主题、购物车、缓存的数据 | Riverpod / Bloc(全局可访问) |
+| **服务器** | 来自 REST/GraphQL 的远端数据,带加载/错误 | Riverpod 的 `FutureProvider` / `AsyncNotifier` |
+
+> 选型的第一原则:**用最轻的够用方案**。一个临时状态硬塞进 Riverpod,等于用工业起重机抬一杯水。
+
+## setState:局部状态的极限
+
+```dart filename="lib/widgets/expandable.dart"
+class ExpandableCard extends StatefulWidget {
+  const ExpandableCard({super.key});
+  @override
+  State<ExpandableCard> createState() => _ExpandableCardState();
+}
+
+class _ExpandableCardState extends State<ExpandableCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Column(
+        children: [
+          ListTile(
+            title: const Text('Click to toggle'),
+            onTap: () => setState(() => _expanded = !_expanded),
+          ),
+          if (_expanded) const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('Hidden content'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+`setState` 的边界:
+
+- ✅ 只有当前 widget(及其子)需要这个状态。
+- ✅ 状态消失了不影响其他界面。
+- ❌ 兄弟 widget 也需要它 → 已经突破 setState 范围。
+- ❌ 异步任务返回后想更新它,而页面可能已被销毁 → 你需要写 `if (!mounted) return;`。
+- ❌ 写测试时想绕过它直接构造一个状态 → 难,因为状态被 Element 锁住。
+
+## 提升状态(lifting state up)
+
+兄弟之间共享状态时,把它搬到共同祖先,以回调方式下传:
+
+```dart filename="lib/screens/cart_demo.dart"
+class CartDemo extends StatefulWidget {
+  const CartDemo({super.key});
+  @override
+  State<CartDemo> createState() => _CartDemoState();
+}
+
+class _CartDemoState extends State<CartDemo> {
+  int _count = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ItemList(onAdd: () => setState(() => _count++)),
+        CartBadge(count: _count),
+      ],
+    );
+  }
+}
+```
+
+够用,但当需要共享的状态深入嵌套(8 层下都要),你就在写「prop drilling」(逐层传参)。这就是 `InheritedWidget` 出场的位置。
+
+## InheritedWidget / InheritedNotifier:Flutter 内置的"向下广播"
+
+`InheritedWidget` 在第 11 章已经讲过原理。复盘要点:
+
+- 把状态挂在树某一层,后代用 `Theme.of(context)` 风格的 API 取值。
+- 实质是 **Element 树往上找最近的相同类型 InheritedElement,O(深度)**。
+- 状态变化时,**所有订阅者**(`dependOnInheritedWidgetOfExactType` 注册的)被 `markNeedsBuild`。
+
+`InheritedWidget` 自身是不可变的——状态变了,你必须**重建一个新的 `InheritedWidget` 包到同一位置**。这意味着每次状态变更都触发整棵子树进入"可能 rebuild"的扫描。
+
+`InheritedNotifier` 是 Flutter 内置的"封装常见模式":底层挂一个 `Listenable`(如 `ChangeNotifier`),`Listenable` 触发 notify 时,自动重建 InheritedNotifier:
+
+```dart filename="lib/state/counter_inherited.dart"
+class CounterModel extends ChangeNotifier {
+  int value = 0;
+  void inc() { value++; notifyListeners(); }
+}
+
+class CounterScope extends InheritedNotifier<CounterModel> {
+  const CounterScope({super.key, required CounterModel super.notifier, required super.child});
+  static CounterModel of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<CounterScope>()!.notifier!;
+}
+
+// 用法:
+CounterScope(
+  notifier: CounterModel(),
+  child: const _Body(),
+);
+
+// 子节点:
+final c = CounterScope.of(context);
+Text('${c.value}');                // 自动订阅,c.value 变会重建
+ElevatedButton(onPressed: c.inc, child: const Text('+'));
+```
+
+够用了——这就是 Flutter 的"原生方案"。但实际项目还有几个痛点:
+
+1. **每个 Model 都得自己写一个 InheritedNotifier 子类**,模板代码不少。
+2. **难以处理"还在加载中"的异步数据**——你得自己塞 `loading / data / error` 三态。
+3. **测试时怎么 mock?** —— InheritedNotifier 没法整体替换。
+4. **如何按"只关心 model 的某一字段"做选择性订阅?** —— InheritedNotifier 没有 selector。
+
+这些痛点正是 Provider / Riverpod / Bloc 解决的问题。
+
+## Provider 包(简介)
+
+[provider](https://pub.dev/packages/provider) 是 InheritedWidget 的官方推荐封装(Flutter team 早期推荐),把上面 4 个痛点解决了第 1 个和部分第 4 个:
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  provider: ^6.1.0
+```
+
+```dart filename="lib/main.dart"
+ChangeNotifierProvider(
+  create: (_) => CounterModel(),
+  child: const _Body(),
+);
+
+// 子节点:
+final c = context.watch<CounterModel>();   // 订阅(rebuild)
+final d = context.read<CounterModel>();    // 不订阅
+final v = context.select<CounterModel, int>((m) => m.value);   // 字段级订阅
+```
+
+但 Provider 仍然有几个限制,这正是 **Riverpod**(Provider 作者的下一代作品)要解决的:
+
+- Provider 必须挂在 widget 树上 → "类型 + 位置"双重定位,容易 `ProviderNotFoundException`。
+- Provider 之间互相依赖时,得用 `ProxyProvider` 显式连线,语法繁琐。
+- Provider 的 `read/watch` 依赖 `BuildContext`,**不能在 provider 自身的逻辑里用**(没有 context)。
+- 测试时只能整树构造,不能"单独测一个 provider"。
+
+新项目可以直接跳过 Provider 学 Riverpod。
+
+## Riverpod 主线
+
+[Riverpod](https://riverpod.dev) 是 Provider 作者 Remi Rousselet 的新作。核心思想:
+
+> **把"状态对象"做成可全局访问的、由 framework 统一管理生命周期的 "provider";所有依赖通过 `ref` 显式注入,不再依赖 BuildContext。**
+
+它解决了 Provider 的几乎所有限制,2026 年是 Flutter 社区主流方案。
+
+### 装包
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  flutter_riverpod: ^2.5.0
+  riverpod_annotation: ^2.3.0
+
+dev_dependencies:
+  build_runner: ^2.4.0
+  riverpod_generator: ^2.4.0
+  custom_lint: ^0.6.0
+  riverpod_lint: ^2.3.0
+```
+
+> 2026 年初 Riverpod 3.0 已发布,API 95% 兼容 2.x;本章示例都用注解 + code-gen 写法,迁移到 3.0 几乎零改动。
+
+### 启用 Provider 树:`ProviderScope`
+
+```dart filename="lib/main.dart"
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+void main() {
+  runApp(const ProviderScope(child: MyApp()));   // ★ 必须包根节点
+}
+```
+
+`ProviderScope` 是 Riverpod 唯一一个挂在 widget 树上的对象,内部是一个 `ProviderContainer`。所有 provider 的状态实际存活在这个 container 里。
+
+### 第 1 类:`Provider`(同步只读值)
+
+```dart filename="lib/providers/clock.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'clock.g.dart';
+
+@riverpod
+DateTime now(NowRef ref) => DateTime.now();
+```
+
+跑 `dart run build_runner build`(或 watch 模式),`clock.g.dart` 自动生成 `nowProvider`。
+
+读取:
+
+```dart filename="lib/screens/clock_screen.dart"
+class ClockScreen extends ConsumerWidget {
+  const ClockScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final time = ref.watch(nowProvider);
+    return Scaffold(
+      body: Center(child: Text(time.toIso8601String())),
+    );
+  }
+}
+```
+
+要点:
+
+- `ConsumerWidget` 替代 `StatelessWidget`,build 多了一个 `WidgetRef ref` 入参。
+- `ref.watch(provider)` = "我订阅这个 provider,值变了我 rebuild"。
+
+### 第 2 类:`Notifier`(可变同步状态)
+
+`@riverpod` 修饰一个 class,继承 `_$ClassName`(由生成器创建):
+
+```dart filename="lib/providers/counter.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'counter.g.dart';
+
+@riverpod
+class Counter extends _$Counter {
+  @override
+  int build() => 0;             // 初始值
+
+  void increment() => state++;  // state 是受保护字段,setter 内部触发 notify
+  void reset() => state = 0;
+}
+```
+
+读 + 写:
+
+```dart filename="lib/screens/counter_screen.dart"
+class CounterScreen extends ConsumerWidget {
+  const CounterScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final n = ref.watch(counterProvider);
+    return Scaffold(
+      body: Center(child: Text('$n')),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => ref.read(counterProvider.notifier).increment(),
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+```
+
+理解 `provider` vs `provider.notifier`:
+
+- `ref.watch(counterProvider)` → 读到的是 **state**(`int`)。
+- `ref.read(counterProvider.notifier)` → 拿到 **Notifier 实例**,可以调它的方法。
+
+> 这套区分让"读取"与"调用方法"的 API 永远互斥,避免一个对象同时承担两种职责。
+
+### 第 3 类:`AsyncNotifier`(异步状态 + 三态自动管理)
+
+服务器数据是 Riverpod 的强项——它有内置 `AsyncValue`(`AsyncData / AsyncLoading / AsyncError`)三态。
+
+```dart filename="lib/providers/profile.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+import '../api/profile_api.dart';
+import '../models/profile.dart';
+
+part 'profile.g.dart';
+
+@riverpod
+class ProfileNotifier extends _$ProfileNotifier {
+  @override
+  Future<Profile> build() async {
+    final api = ref.read(profileApiProvider);
+    return api.fetch();                                  // 首帧自动加载
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncLoading();                        // 切回 loading
+    state = await AsyncValue.guard(() => ref.read(profileApiProvider).fetch());
+  }
+
+  Future<void> rename(String name) async {
+    state = await AsyncValue.guard(() async {
+      await ref.read(profileApiProvider).rename(name);
+      return Profile(name: name);
+    });
+  }
+}
+```
+
+UI:
+
+```dart filename="lib/screens/profile_screen.dart"
+class ProfileScreen extends ConsumerWidget {
+  const ProfileScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncProfile = ref.watch(profileNotifierProvider);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Profile')),
+      body: asyncProfile.when(
+        data: (p) => Center(child: Text('Hello, ${p.name}')),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (err, st) => Center(child: Text('Error: $err')),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => ref.read(profileNotifierProvider.notifier).refresh(),
+        child: const Icon(Icons.refresh),
+      ),
+    );
+  }
+}
+```
+
+`AsyncValue.when` 强制你处理三种情况——这是 Dart 3 sealed class 的味道:漏一种编译报错。
+
+`AsyncValue.guard(() async { ... })`:把抛出的异常自动包成 `AsyncError`,不必手写 try/catch。
+
+### `FutureProvider` / `StreamProvider`:更轻的异步
+
+如果异步对象**没有内部可调用方法**(纯数据),可以省掉 Notifier:
+
+```dart filename="lib/providers/news.dart"
+@riverpod
+Future<List<Article>> news(NewsRef ref) async {
+  final api = ref.read(newsApiProvider);
+  return api.headlines();
+}
+
+@riverpod
+Stream<int> ticks(TicksRef ref) async* {
+  for (var i = 0; ; i++) {
+    yield i;
+    await Future.delayed(const Duration(seconds: 1));
+  }
+}
+```
+
+`ref.watch(newsProvider)` / `ref.watch(ticksProvider)` 都返回 `AsyncValue`,UI 用 `.when` 处理。
+
+### `ref` 的四把钥匙:`watch` / `read` / `listen` / `invalidate`
+
+| API | 何时用 |
+| ---- | ---- |
+| `ref.watch(p)` | **依赖**:需要 p 的最新值,p 变要 rebuild / 重建 provider |
+| `ref.read(p)` | **一次性读取**:在事件回调里,不订阅 |
+| `ref.listen(p, fn)` | **副作用**:p 变化时触发回调(导航、Snackbar、埋点),不影响 build |
+| `ref.invalidate(p)` | **强制刷新**:把 p 标记为脏,下次访问会重建 |
+
+```dart filename="lib/screens/listen_demo.dart"
+class _Body extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen<AsyncValue<Profile>>(profileNotifierProvider, (prev, next) {
+      next.whenOrNull(
+        error: (e, _) => ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed: $e')),
+        ),
+      );
+    });
+
+    final p = ref.watch(profileNotifierProvider);
+    return p.when(
+      data: (p) => Text(p.name),
+      loading: () => const CircularProgressIndicator(),
+      error: (_, __) => const Text('Oops'),
+    );
+  }
+}
+```
+
+> 黄金法则:**`build` 里订阅用 `watch`,事件回调里读取用 `read`,副作用用 `listen`**。混用会引入"在 build 里 setState"或"事件后没收到更新"等 bug。
+
+### `autoDispose`:用完即销毁
+
+默认 provider 一旦被建,就在 `ProviderContainer` 里活到 app 退出。对一些"特定页面才用"的状态,这是浪费——你想"页面关闭就销毁,下次进来重新加载":
+
+```dart filename="lib/providers/search.dart"
+@riverpod                                             // 默认非 autoDispose
+class Foo extends _$Foo { ... }
+
+@Riverpod(keepAlive: false)                           // 一旦没人订阅就销毁
+class Search extends _$Search { ... }
+```
+
+注解的 `keepAlive: false` 等价于老 API 的 `autoDispose`。
+
+#### `keepAlive` API:延后销毁
+
+如果有个 autoDispose provider 你想"等 30 秒再销毁,以便用户快速来回切页面时复用",可以:
+
+```dart
+@Riverpod(keepAlive: false)
+Future<List<Article>> articles(ArticlesRef ref) async {
+  ref.keepAlive();                          // 永久 keep
+  // 或 ref.onDispose(...) + Timer 实现延迟销毁
+  return api.fetch();
+}
+```
+
+### `family`:参数化的 provider
+
+每个 provider 是单例。但你常常需要"按 id 查不同对象的同种状态"——`family` 把 provider 变成"以参数为 key 的工厂":
+
+```dart filename="lib/providers/article.dart"
+@riverpod
+Future<Article> article(ArticleRef ref, String id) async {
+  return ref.read(articleApiProvider).get(id);
+}
+```
+
+```dart
+final a = ref.watch(articleProvider('id-42'));      // 自动按 id 缓存,相同 id 共享
+```
+
+family 参数必须支持 `==`(基本类型 / `freezed`)。多参数用 record(Dart 3):
+
+```dart
+@riverpod
+Future<List<Comment>> comments(CommentsRef ref, ({String articleId, int page}) params) async {
+  return ref.read(commentApiProvider).list(params.articleId, params.page);
+}
+
+ref.watch(commentsProvider((articleId: 'id-42', page: 1)));
+```
+
+### `select`:字段级订阅(性能)
+
+默认 `ref.watch(provider)` 整个对象任何字段变都触发 rebuild。如果只关心某个字段,用 `select`:
+
+```dart
+final name = ref.watch(profileNotifierProvider.select((p) => p.value?.name));
+```
+
+这样 `email` 变化不会触发 rebuild,只有 `name` 变才 rebuild——长列表 / 表单场景的关键优化。
+
+### Provider 之间的依赖
+
+直接在 provider 内部用 `ref.read` / `ref.watch` 互相组合:
+
+```dart filename="lib/providers/articles.dart"
+@riverpod
+Future<List<Article>> articles(ArticlesRef ref) async {
+  final user = await ref.watch(userProvider.future);    // 等待另一个 future
+  if (user.isPremium) {
+    return ref.read(premiumApiProvider).articles();
+  }
+  return ref.read(freeApiProvider).articles();
+}
+```
+
+`ref.watch(userProvider.future)` 等待 user 加载完;user 变了,articles 自动重新计算。**这层链式依赖是 Riverpod 最强的设计之一**——你只描述"我依赖谁",依赖图自动维护。
+
+### `ProviderScope` 的 `overrides`:测试与 mock
+
+```dart filename="test/profile_test.dart"
+testWidgets('profile shows name', (tester) async {
+  await tester.pumpWidget(ProviderScope(
+    overrides: [
+      profileApiProvider.overrideWithValue(_FakeProfileApi()),
+    ],
+    child: const MaterialApp(home: ProfileScreen()),
+  ));
+
+  await tester.pumpAndSettle();
+  expect(find.text('Hello, Alice'), findsOneWidget);
+});
+
+class _FakeProfileApi implements ProfileApi {
+  @override
+  Future<Profile> fetch() async => Profile(name: 'Alice');
+  @override
+  Future<void> rename(String name) async {}
+}
+```
+
+这种 "构造一个假 API,用 override 替进去" 的模式,是 Riverpod 测试的核心。**整树构造、整树验证、零 mock 库**。
+
+### 实战:Riverpod + go_router 鉴权骨架
+
+承接第 12 章末尾的伏笔,完整把"未登录用户访问受保护页面 → 跳登录页 → 登录后回原页面"串起来。
+
+```dart filename="lib/auth/auth_state.dart"
+import 'package:freezed_annotation/freezed_annotation.dart';
+part 'auth_state.freezed.dart';
+
+@freezed
+sealed class AuthState with _$AuthState {
+  const factory AuthState.signedIn(String userId) = SignedIn;
+  const factory AuthState.signedOut() = SignedOut;
+}
+```
+
+```dart filename="lib/auth/auth_controller.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'auth_state.dart';
+part 'auth_controller.g.dart';
+
+@Riverpod(keepAlive: true)
+class AuthController extends _$AuthController {
+  @override
+  AuthState build() => const AuthState.signedOut();
+
+  Future<void> signIn(String email, String password) async {
+    final id = await ref.read(authApiProvider).login(email, password);
+    state = AuthState.signedIn(id);
+  }
+
+  Future<void> signOut() async {
+    await ref.read(authApiProvider).logout();
+    state = const AuthState.signedOut();
+  }
+}
+```
+
+```dart filename="lib/router/router.dart"
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import '../auth/auth_controller.dart';
+import '../auth/auth_state.dart';
+
+part 'router.g.dart';
+
+@riverpod
+GoRouter router(RouterRef ref) {
+  // 把 Riverpod state 桥成 Listenable,供 go_router 用
+  final notifier = ValueNotifier<AuthState>(ref.read(authControllerProvider));
+  ref.listen(authControllerProvider, (_, next) => notifier.value = next);
+  ref.onDispose(notifier.dispose);
+
+  return GoRouter(
+    refreshListenable: notifier,
+    initialLocation: '/',
+    redirect: (context, state) {
+      final auth = notifier.value;
+      final goingToLogin = state.matchedLocation == '/login';
+
+      switch (auth) {
+        case SignedOut() when !goingToLogin:
+          return '/login?from=${Uri.encodeComponent(state.matchedLocation)}';
+        case SignedIn() when goingToLogin:
+          final from = state.uri.queryParameters['from'] ?? '/';
+          return from;
+        _:
+          return null;
+      }
+    },
+    routes: [
+      GoRoute(path: '/',      builder: (_, __) => const HomePage()),
+      GoRoute(path: '/login', builder: (_, __) => const LoginPage()),
+      GoRoute(path: '/secret', builder: (_, __) => const SecretPage()),
+    ],
+  );
+}
+```
+
+```dart filename="lib/main.dart"
+class MyApp extends ConsumerWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final router = ref.watch(routerProvider);
+    return MaterialApp.router(
+      routerConfig: router,
+      theme: ThemeData(useMaterial3: true),
+    );
+  }
+}
+
+void main() => runApp(const ProviderScope(child: MyApp()));
+```
+
+骨架要点:
+
+- `AuthController.state` 一变,`ref.listen` → `notifier.value` 同步 → go_router `refreshListenable` 触发 redirect 重新计算 → 自动跳转。
+- `Dart 3 switch + sealed class`:四种登录-地址组合的判定,漏一种编译报错(详见第 3 章「Dart 类系统」的 patterns 一节)。
+- `ref.onDispose`:provider 被销毁时清理 ValueNotifier,避免内存泄漏。
+
+> 鉴权这块儿是 Riverpod + go_router 最常被问的问题,这套骨架可以直接拿去用。
+
+## Bloc / Cubit:对照参考
+
+[bloc](https://pub.dev/packages/bloc) + `flutter_bloc` 是另一极主流方案,2018 年起在企业项目中流行。设计哲学相反:**强制把状态变化建模成 Event → State 的纯函数转换**。
+
+### Cubit:轻量版本
+
+```dart filename="lib/blocs/counter_cubit.dart"
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+class CounterCubit extends Cubit<int> {
+  CounterCubit() : super(0);
+  void increment() => emit(state + 1);
+  void reset() => emit(0);
+}
+```
+
+UI:
+
+```dart filename="lib/screens/counter_bloc_screen.dart"
+BlocProvider(
+  create: (_) => CounterCubit(),
+  child: const _Body(),
+);
+
+class _Body extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final n = context.watch<CounterCubit>().state;
+    return Scaffold(
+      body: Center(child: Text('$n')),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => context.read<CounterCubit>().increment(),
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+```
+
+跟 Provider + ChangeNotifier 几乎一样,只是 `emit(newState)` 替代了 `notifyListeners()`。Cubit 更适合"小型可变状态",**没有强制 Event 模型**。
+
+### Bloc:Event-State
+
+```dart filename="lib/blocs/counter_bloc.dart"
+sealed class CounterEvent {}
+class IncrementEvent extends CounterEvent {}
+class ResetEvent extends CounterEvent {}
+
+class CounterBloc extends Bloc<CounterEvent, int> {
+  CounterBloc() : super(0) {
+    on<IncrementEvent>((event, emit) => emit(state + 1));
+    on<ResetEvent>((event, emit) => emit(0));
+  }
+}
+
+// UI:
+context.read<CounterBloc>().add(IncrementEvent());
+```
+
+加一层 Event 看似多余,但有 4 个收益:
+
+- **可序列化的 event 列表 = 可重放的操作历史**(适合"撤销/重做"、调试录屏)。
+- **`EventTransformer` 控制并发**:`on<SearchEvent>(_search, transformer: debounce(300.ms))` 一行实现搜索 debounce。
+- **明确的"一个事件 → 一组状态变化"**,大型业务流程清晰。
+- **测试时可以"send 一个 event,断言 emit 出哪些 state"**,流程可断言。
+
+### `hydrated_bloc`:自动持久化
+
+```dart
+class CounterCubit extends HydratedCubit<int> {
+  CounterCubit() : super(0);
+  void increment() => emit(state + 1);
+
+  @override
+  int? fromJson(Map<String, dynamic> json) => json['v'] as int?;
+  @override
+  Map<String, dynamic>? toJson(int state) => {'v': state};
+}
+```
+
+每次 `emit` 自动序列化到本地存储,app 重启时自动恢复——免去手写 SharedPreferences。
+
+### Riverpod vs Bloc 取舍
+
+| 维度 | Riverpod | Bloc |
+| ---- | -------- | ---- |
+| 学习曲线 | 较平,API 少 | 较陡,Event/State/transformer 概念多 |
+| 模板代码 | 少,@riverpod 一个注解 | 多,Event 类 + on handler + State 类 |
+| 异步状态 | `AsyncValue` 内置三态 | 需要自己建模 `LoadingState/DataState/ErrorState` |
+| 大型业务编排 | 自由,容易写得"散" | 强制 Event 模型,结构整齐 |
+| 测试 | override + 整树测,简洁 | bloc_test 库,流程化断言 |
+| 团队偏好 | 个人项目 / 中小型团队 | 大厂、需要严格结构的项目 |
+
+**新项目无强制约束 → Riverpod;团队已有 Bloc 经验或偏向严谨 → Bloc**。两者完全可以共存。
+
+## GetX:为什么本系列不推荐
+
+[GetX](https://pub.dev/packages/get) 把"状态管理 + 路由 + 国际化 + DI + Snackbar/Dialog"全打包,看似"开箱即用",但有几个明显缺点:
+
+- **绕过 BuildContext**:`Get.context` 内部维护全局,违背 Flutter 约定,容易在多窗口、嵌套 Navigator 场景出 bug。
+- **API 体量大但不正交**:同一个功能有 3+ 种写法,团队代码风格难统一。
+- **测试不友好**:全局 singleton 难做 override。
+- **社区维护节奏慢**:重要新特性(Material 3、predictive back)滞后。
+
+不是不能用——已有项目继续维护无妨;**但 2026 年新项目不建议**作为主线。
+
+## 选型决策矩阵
+
+```text
+                                     ┌─ 临时局部 / 跨少层 ────────► setState / 状态提升
+        需要持有的状态分类             │
+        & 项目规模评估   ─────────────┤── 中型 / 团队偏自由 ────────► Riverpod (本系列主线)
+                                     │
+                                     ├── 大型 / 团队偏严谨 / 需 event 历史 ──► Bloc
+                                     │
+                                     └── 已有 GetX / 不建议新项目  ────────────► GetX
+```
+
+判定问题:
+
+1. **这个状态会被 widget 树之外的逻辑(后台任务、push 推送)修改吗?** 是 → 必须 Riverpod / Bloc;否 → 可以 setState。
+2. **这个状态需要在多个独立路由间共享吗?** 是 → Riverpod / Bloc;否 → 状态提升够用。
+3. **这个状态是异步加载的(REST、Stream)吗?** 是 → Riverpod 的 `AsyncNotifier` 收益最大。
+4. **要不要"按 id 查一组同种状态"?** 是 → Riverpod 的 `family` 是杀手特性。
+5. **业务流程需要"完整可重放的 event 历史"吗?** 是 → Bloc 强制 event 模型更合适。
+
+## 心智模型清单
+
+1. **状态分四档**:临时 / 共享(局部)/ 应用 / 服务器——选最轻的够用方案。
+2. **`InheritedWidget` 是所有"向下传递"机制的底层**;Provider、Riverpod 都建在这之上。
+3. **Riverpod = "全局 ProviderContainer" + "用 ref 显式注入"**;不依赖 BuildContext,可在任何地方读。
+4. **三种 Notifier**:`Provider`(只读)/ `Notifier`(可变同步)/ `AsyncNotifier`(可变异步,内置 AsyncValue 三态)。
+5. **`ref.watch` 在 build 里订阅,`ref.read` 在事件里读取,`ref.listen` 做副作用,`ref.invalidate` 强刷**——四把钥匙各司其职。
+6. **`autoDispose`(`keepAlive: false`)按需释放,`family` 按参数缓存,`select` 字段级订阅**——三大优化必备。
+7. **`AsyncValue.when` 强制处理 loading/data/error 三态**,漏一种编译报错——这是 Riverpod 最值钱的设计。
+8. **`ProviderScope.overrides` 是 mock 的官方方式**,不需要 mockito。
+9. **Riverpod + go_router 鉴权 = `ref.listen` 桥成 `Listenable` + go_router `refreshListenable`**(本章实战骨架)。
+10. **Bloc 用 Event 强制结构,Riverpod 自由灵活,GetX 不推荐新项目用**。
+
+## 自查问题
+
+- 写一个"按按钮,文字翻转大小写"的 widget,**不引入任何状态库**,用 setState 实现。
+- `ref.watch` 与 `ref.read` 的区别是什么?分别在什么位置使用?如果在 build 里用 `ref.read` 会发生什么?
+- `ref.watch(profileProvider)` 与 `ref.watch(profileProvider.notifier)` 返回的对象类型有什么不同?为什么 Riverpod 要做这个区分?
+- `AsyncValue.guard(...)` 与手写 try/catch 相比的优势是什么?它怎么处理同步抛异常?
+- 一个 provider 标了 `@Riverpod(keepAlive: false)`,什么时候会被销毁?如何让它"销毁后保留 30 秒"?
+- 用 `family` 写一个"按 user id 查 profile"的 provider,展示如何对同一个 id 共享缓存。
+- 给定一个 ProfileNotifier 状态包含 `name / email / avatarUrl`,只关心 `name` 时如何避免其他字段变化触发 rebuild?
+- 用 `ref.listen` 实现"加载失败时弹一个 SnackBar",并解释为什么不能在 `build` 里直接用 `if (asyncProfile.hasError) showSnackBar(...)`。
+- 实现一个 Bloc Cubit:管理购物车 `List<Item>`,提供 `add` / `remove` / `clear`,并写一个 widget 监听它。
+- 你想测试 `ProfileNotifier` 在 API 失败时切到 AsyncError 状态,用 Riverpod 怎么写?(提示:override + ProviderContainer)
+- Riverpod + go_router 的鉴权骨架里,为什么要用 `ValueNotifier` 桥接而不是直接把 Riverpod 的 `Ref` 传给 go_router?
+
+下一章 [响应式编程](/flutter/reactive):把"状态机制"扩展到"事件流"。

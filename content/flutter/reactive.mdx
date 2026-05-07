@@ -1,0 +1,558 @@
+---
+title: 响应式编程
+description: Stream 在 UI/状态层的应用、StreamBuilder、StreamSubscription、RxDart 操作符、热冷流、与 Riverpod/Bloc 协作、搜索 debounce 实战
+---
+
+# 响应式编程
+
+第 5 章「Dart 异步与并发」介绍过 `Stream` 的语法基础(创建、`listen`、`await for`、变换、关闭)。本章不重复语言层,而是回答更实用的问题:
+
+- 怎么把 Stream **接到 UI** 上(`StreamBuilder` 的细节)?
+- 怎么把 Stream **接到状态管理层**(Riverpod、Bloc)?
+- 什么时候该装 **RxDart**,装了之后能解决什么问题?
+- "搜索框 debounce + 取消旧请求"这种典型异步流场景,怎么写得稳?
+
+> 阅读前置:[Dart 异步与并发](/flutter/dart-async)、[状态管理](/flutter/state-management)。
+
+## 响应式三件套
+
+Flutter 的响应式机制其实只有三个核心抽象:
+
+| 抽象 | 谁推 | 谁拉 | 例子 |
+| ---- | ---- | ---- | ---- |
+| `Future<T>` | 一次值 | 一次取 | API 返回 |
+| `Stream<T>` | 多次值 | 多次取(订阅) | WebSocket、滚动事件、传感器 |
+| `Listenable`(`ChangeNotifier` / `ValueNotifier`) | 多次"通知"(无值) | 拉对象当前值 | 当前主题、表单状态 |
+
+> **`Stream` 携带"值"(每次 emit 都给一个新值)**;**`Listenable` 只携带"变化信号"**(`notifyListeners()` 之后,你自己去对象上拉新值)。
+
+Riverpod / Bloc 的状态最终都通过这三种之一推到 UI——理解响应式编程,本质是理解这三者如何协作。
+
+## `StreamBuilder`:Stream 直接渲染
+
+不引入任何状态库,把一个 Stream 直接画到屏幕上:
+
+```dart filename="lib/widgets/clock.dart"
+class Clock extends StatelessWidget {
+  Clock({super.key});
+
+  final _ticks = Stream<DateTime>.periodic(
+    const Duration(seconds: 1),
+    (_) => DateTime.now(),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DateTime>(
+      stream: _ticks,
+      initialData: DateTime.now(),
+      builder: (context, snapshot) {
+        final t = snapshot.data!;
+        return Text('${t.hour}:${t.minute}:${t.second}');
+      },
+    );
+  }
+}
+```
+
+`AsyncSnapshot<T>` 字段:
+
+| 字段 | 含义 |
+| ---- | ---- |
+| `connectionState` | `none` / `waiting` / `active` / `done` |
+| `hasData` / `data` | 有数据 / 取数据 |
+| `hasError` / `error` / `stackTrace` | 有错误 / 取错误 |
+
+完整三态写法:
+
+```dart
+StreamBuilder<int>(
+  stream: counterStream,
+  builder: (context, snapshot) {
+    if (snapshot.hasError) return Text('Error: ${snapshot.error}');
+    if (!snapshot.hasData) return const CircularProgressIndicator();
+    return Text('${snapshot.data}');
+  },
+);
+```
+
+### 陷阱 1:`stream:` 不能每次 build 新建
+
+```dart
+// ❌ 错误:每次 build 都新建一个 Stream,旧的被丢弃,UI 抖动
+@override
+Widget build(BuildContext context) {
+  return StreamBuilder(
+    stream: Stream.periodic(const Duration(seconds: 1), (i) => i),
+    builder: ...,
+  );
+}
+```
+
+修法:把 Stream 提到外面(field、`initState`、provider)。`StreamBuilder` 用 `==` 比较 stream 实例,新实例 = 重新订阅。
+
+```dart
+class _ClockState extends State<Clock> {
+  late final _ticks = Stream<int>.periodic(const Duration(seconds: 1), (i) => i);
+  // ...
+}
+```
+
+### 陷阱 2:single-subscription stream 重订阅会抛
+
+如果 stream 是 single-subscription(默认创建),`StreamBuilder` 在某次 widget 重建中**换了一个新 stream**(实例变了),旧 stream 还活着但已经没人听——再次订阅会 `Bad state: Stream has already been listened to`。
+
+修法:**要么保证 stream 实例稳定**(上面那条修法),**要么用 broadcast stream**(`stream.asBroadcastStream()`)。
+
+### 陷阱 3:不需要的 rebuild
+
+`StreamBuilder` 每次 emit 触发一次 builder 调用——如果 builder 返回的子树很大且 emit 频率高,容易卡。把 `StreamBuilder` 包到**最小**的子树范围里:
+
+```dart
+// ❌ 整页跟着重建
+StreamBuilder(
+  stream: ticks,
+  builder: (_, snap) => Scaffold(
+    appBar: AppBar(title: const Text('Clock')),
+    body: Center(child: Text('${snap.data}')),
+  ),
+);
+
+// ✅ 只重建数字这一小块
+Scaffold(
+  appBar: AppBar(title: const Text('Clock')),
+  body: Center(
+    child: StreamBuilder(
+      stream: ticks,
+      builder: (_, snap) => Text('${snap.data}'),
+    ),
+  ),
+);
+```
+
+## 自己创建 Stream:`StreamController`
+
+当数据来源不是现成 Stream(自定义事件、平台插件回调、SSE 解析),你需要自己 push 值出去:
+
+```dart filename="lib/sources/event_bus.dart"
+class EventBus {
+  final _controller = StreamController<String>.broadcast();   // 多人订阅 → broadcast
+
+  Stream<String> get events => _controller.stream;
+
+  void publish(String event) => _controller.add(event);
+
+  void dispose() => _controller.close();
+}
+```
+
+`StreamController` API:
+
+| API | 作用 |
+| ---- | ---- |
+| `add(value)` | 推一个数据值 |
+| `addError(err, [stack])` | 推一个错误事件(订阅者收到的不是 data 而是 error) |
+| `close()` | 关闭,触发 done 事件,所有订阅者收到 onDone |
+| `sink` | 实现 `Sink<T>` 接口的引用,常用作"只允许写,不允许读"的入口 |
+| `stream` | 暴露给消费者的 `Stream<T>` |
+
+陷阱:**broadcast controller 在没有订阅者时 `add` 的事件会被丢弃**——不是缓冲到下一个订阅者。如果你需要"后来者也能看到最新值",用 `BehaviorSubject`(下文 RxDart)。
+
+## `StreamSubscription`:手动订阅 + 必须 cancel
+
+`listen` 返回一个 `StreamSubscription`,在 widget 销毁时**必须 cancel**,否则内存泄漏:
+
+```dart filename="lib/widgets/notif_listener.dart"
+class _NotifListenerState extends State<NotifListener> {
+  StreamSubscription<String>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = NotifService.events.listen((msg) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+```
+
+> "什么时候用 `listen` 而不是 `StreamBuilder`?" —— 当你不需要把 stream 映射成 widget(只是触发副作用:Snackbar、导航、日志、埋点),用 `listen`。把它装成 widget 是浪费一次 build。
+
+## 热流 vs 冷流
+
+经常被问到的概念:
+
+- **冷流(cold)**:每个订阅者订阅时,Stream **从头开始**。典型:`Stream.fromIterable`、`Stream.periodic`、`async*` 函数。两个订阅者独立各拿一份。
+- **热流(hot / broadcast)**:数据持续在产生,订阅者**从订阅那一刻开始**接收。典型:WebSocket、UI 事件、传感器、`StreamController.broadcast`。
+
+```dart
+// 冷流:periodic 是冷的,fromIterable 也是冷的
+final cold = Stream.fromIterable([1, 2, 3]);
+cold.listen(print);                 // 1 2 3
+cold.listen(print);                 // 1 2 3 (各自独立)
+
+// 热流:broadcast controller
+final controller = StreamController<int>.broadcast();
+controller.stream.listen((v) => print('A: $v'));
+controller.add(1);                  // A: 1
+controller.stream.listen((v) => print('B: $v'));
+controller.add(2);                  // A: 2 / B: 2(B 听不到 1)
+```
+
+实践中:
+
+- **数据流**(API、定时器)默认是冷的,适合"每次取最新一份"。
+- **事件流**(用户操作、推送)是热的,后来者只能听新事件。
+- 想把冷流变热:`stream.asBroadcastStream()`(只能转一次,转完原 stream 不能再 listen)。
+
+## `async*` generator:写 stream 像写循环
+
+```dart filename="lib/sources/countdown.dart"
+Stream<int> countdown(int from) async* {
+  for (var i = from; i >= 0; i--) {
+    yield i;
+    await Future.delayed(const Duration(seconds: 1));
+  }
+}
+```
+
+- `yield` = "推一个值给消费者"。
+- `yield*` = "把另一个 stream 整个串接进来"。
+- 自动管理 `done`(函数 return 即关闭)。
+- 异常自动包成 `addError` 推给订阅者。
+
+是 `StreamController` 的简洁替代,但只适合"线性产出"——分支事件源、合并外部回调还是用 controller。
+
+## RxDart:操作符的弹药库
+
+[RxDart](https://pub.dev/packages/rxdart) 在 Dart `Stream` 上加了几十个操作符,把响应式编程的常见模式抽成"一行调用"。它**不是必须**——Dart 内置 stream 也能写,但代码量翻倍。
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  rxdart: ^0.27.7
+```
+
+### Subjects:可推可订的 controller
+
+| Subject | 行为 |
+| ---- | ---- |
+| `PublishSubject<T>` | 后来者只看新值,等价于 `StreamController.broadcast()` |
+| `BehaviorSubject<T>` | 缓存"最后一个值",后来者订阅立刻收到该值。带 `.value` getter,可同步取当前值 |
+| `ReplaySubject<T>` | 缓存全部历史(可限定 buffer 大小),后来者收到所有历史 |
+
+```dart filename="lib/state/theme_subject.dart"
+class ThemeStore {
+  final _subject = BehaviorSubject<ThemeMode>.seeded(ThemeMode.system);
+
+  ThemeMode get current => _subject.value;       // ★ 同步取
+  Stream<ThemeMode> get stream => _subject.stream;
+
+  void set(ThemeMode mode) => _subject.add(mode);
+
+  void dispose() => _subject.close();
+}
+```
+
+`BehaviorSubject` 是日常用得最多的——**任何"有当前值且要广播变化"的状态都适合**。Riverpod 的 `Notifier` 大体是这个角色,但 BehaviorSubject 在跨非 Flutter 模块(纯 Dart 服务、isolate 之间通信)时更轻。
+
+### 操作符:链式数据变换
+
+按使用频率列前 10:
+
+| 操作符 | 作用 |
+| ---- | ---- |
+| `map` / `where` / `take` / `skip` | 同 Iterable,逐个变换 |
+| `distinct([equals])` | 与上一个值相同的丢弃 |
+| `debounceTime(d)` | 一段时间内只取最后一个值(典型:搜索框) |
+| `throttleTime(d)` | 一段时间内只取第一个值(典型:防止按钮连点) |
+| `switchMap(fn)` | 来新值就丢弃前一个映射结果(典型:搜索取消旧请求) |
+| `flatMap(fn)` | 并行映射,所有结果合并(典型:批量处理) |
+| `combineLatest2(other, (a,b)=>...)` | 两个 stream 的最新值组合 |
+| `merge` | 合并多个同类型 stream |
+| `scan(seed, (acc,v)=>...)` | reduce 但每步发出累计值(典型:累计 sum) |
+| `startWith(initial)` | 流的开头预先 emit 一个值 |
+
+> 拿到一个生疏需求,先问"能不能用一个操作符表达?"——能的话省掉一大段状态机代码。
+
+## 实战:搜索框 debounce + 取消旧请求 + 加载态
+
+需求:输入框,用户停下打字 300ms 后查询,正在打字时取消之前的请求,显示 loading / data / error 三态。
+
+### 不用 RxDart,纯 Dart Stream
+
+要写 `Timer.cancel`、上一个 future 的取消标志、加载状态 flag,容易出 bug。这里直接给 RxDart 版本作对照。
+
+### RxDart 版本(15 行)
+
+```dart filename="lib/screens/search_screen.dart"
+import 'package:flutter/material.dart';
+import 'package:rxdart/rxdart.dart';
+
+class SearchScreen extends StatefulWidget {
+  const SearchScreen({super.key});
+  @override
+  State<SearchScreen> createState() => _SearchScreenState();
+}
+
+class _SearchScreenState extends State<SearchScreen> {
+  final _query = BehaviorSubject<String>.seeded('');
+
+  late final Stream<AsyncSnapshot<List<String>>> _results = _query
+      .debounceTime(const Duration(milliseconds: 300))
+      .distinct()
+      .switchMap<AsyncSnapshot<List<String>>>((q) {
+        if (q.isEmpty) return Stream.value(const AsyncSnapshot.withData(ConnectionState.done, []));
+        return Stream.fromFuture(_fakeSearch(q))
+            .map((data) => AsyncSnapshot.withData(ConnectionState.done, data))
+            .startWith(const AsyncSnapshot.waiting())
+            .onErrorReturnWith((e, _) => AsyncSnapshot.withError(ConnectionState.done, e));
+      });
+
+  Future<List<String>> _fakeSearch(String q) async {
+    await Future.delayed(const Duration(milliseconds: 500));
+    return ['$q-result-1', '$q-result-2'];
+  }
+
+  @override
+  void dispose() {
+    _query.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Search')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: TextField(onChanged: _query.add),
+          ),
+          Expanded(
+            child: StreamBuilder<AsyncSnapshot<List<String>>>(
+              stream: _results,
+              builder: (_, outer) {
+                final inner = outer.data;
+                if (inner == null) return const SizedBox();
+                if (inner.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (inner.hasError) return Center(child: Text('${inner.error}'));
+                final list = inner.data ?? const [];
+                return ListView(children: list.map((s) => ListTile(title: Text(s))).toList());
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+剖析:
+
+- `debounceTime(300ms)`:用户停顿 300ms 才往下传。
+- `distinct()`:相同 query 不重复查。
+- `switchMap`:**新 query 来了,前一个 query 的 stream 立刻被取消**——这就是"自动取消旧请求"的语义。
+- `startWith(loading)`:每次新查询,先 emit loading 让 UI 显示转圈。
+- `onErrorReturnWith`:把错误包成数据继续传(避免 stream 因为单次错误结束)。
+
+把这几句话翻译回手写 Dart,大概 50 行 + 3 个状态字段 + 2 处 Timer 管理。**RxDart 的价值就在这里:把"事件流的常见模式"变成单词表达**。
+
+### 与 Riverpod 协作
+
+把同样需求改写到 Riverpod 主线:
+
+```dart filename="lib/providers/search.dart"
+import 'package:rxdart/rxdart.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'search.g.dart';
+
+@Riverpod(keepAlive: false)
+class SearchQuery extends _$SearchQuery {
+  @override
+  String build() => '';
+  void set(String q) => state = q;
+}
+
+@Riverpod(keepAlive: false)
+Stream<List<String>> searchResults(SearchResultsRef ref) {
+  // 把 Riverpod 状态桥成 stream
+  final querySubject = BehaviorSubject<String>.seeded(ref.read(searchQueryProvider));
+  ref.listen(searchQueryProvider, (_, next) => querySubject.add(next));
+  ref.onDispose(querySubject.close);
+
+  return querySubject
+      .debounceTime(const Duration(milliseconds: 300))
+      .distinct()
+      .switchMap((q) {
+        if (q.isEmpty) return Stream.value(<String>[]);
+        return Stream.fromFuture(ref.read(searchApiProvider).search(q));
+      });
+}
+```
+
+```dart filename="lib/screens/search_screen_riverpod.dart"
+class SearchScreen extends ConsumerWidget {
+  const SearchScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final results = ref.watch(searchResultsProvider);   // 自动 AsyncValue 包装
+
+    return Scaffold(
+      body: Column(
+        children: [
+          TextField(
+            onChanged: (q) => ref.read(searchQueryProvider.notifier).set(q),
+          ),
+          Expanded(
+            child: results.when(
+              data: (list) => ListView(children: list.map((s) => ListTile(title: Text(s))).toList()),
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Center(child: Text('$e')),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+要点:
+
+- Riverpod 的 `Stream` 类型 provider 自动用 `AsyncValue` 包装,不再需要 `StreamBuilder`。
+- `ref.listen` 把"状态变化"桥到 BehaviorSubject,从而能用 RxDart 操作符。
+- `ref.onDispose(subject.close)`:provider 销毁时自动关 subject。
+
+## 与 Bloc 协作:`EventTransformer`
+
+Bloc 内置了对 RxDart 的优雅集成——`EventTransformer` 接受一个 `Stream<Event>`,你用任意 RxDart 操作符变换,返回新的 `Stream<Event>`:
+
+```dart filename="lib/blocs/search_bloc.dart"
+import 'package:bloc/bloc.dart';
+import 'package:bloc_concurrency/bloc_concurrency.dart';
+import 'package:rxdart/rxdart.dart';
+
+sealed class SearchState {}
+class SearchLoading extends SearchState {}
+class SearchData extends SearchState {
+  SearchData(this.list);
+  final List<String> list;
+}
+class SearchError extends SearchState {
+  SearchError(this.msg);
+  final String msg;
+}
+
+class SearchBloc extends Bloc<String, SearchState> {
+  SearchBloc(this.api) : super(SearchData(const [])) {
+    on<String>(
+      _onSearch,
+      transformer: (events, mapper) => events
+          .debounceTime(const Duration(milliseconds: 300))
+          .distinct()
+          .switchMap(mapper),                // ★ 与 RxDart 一句话集成
+    );
+  }
+
+  final SearchApi api;
+
+  Future<void> _onSearch(String q, Emitter<SearchState> emit) async {
+    if (q.isEmpty) { emit(SearchData(const [])); return; }
+    emit(SearchLoading());
+    try {
+      emit(SearchData(await api.search(q)));
+    } catch (e) {
+      emit(SearchError(e.toString()));
+    }
+  }
+}
+```
+
+> Bloc 的 transformer 设计就是为了让你**把"事件并发策略"声明在一个地方**。这是 Bloc 在搜索 / 滚动加载这种典型异步流场景的优势。
+
+## 关闭与资源管理清单
+
+任何手写的 stream 资源都必须 close,否则泄漏:
+
+| 对象 | 关闭方法 | 时机 |
+| ---- | -------- | ---- |
+| `StreamController` | `close()` | 不再用时 |
+| `StreamSubscription` | `cancel()` | widget dispose / state 销毁 |
+| `BehaviorSubject` / `PublishSubject` 等 | `close()` | 不再用时 |
+| `Timer` | `cancel()` | 不再用时 |
+
+封装到一个 helper 里能减少错漏:
+
+```dart filename="lib/utils/disposable.dart"
+mixin DisposableMixin<T extends StatefulWidget> on State<T> {
+  final List<Object> _resources = [];
+
+  void registerSubscription(StreamSubscription sub) => _resources.add(sub);
+  void registerSink(Sink sink) => _resources.add(sink);
+  void registerTimer(Timer t) => _resources.add(t);
+
+  @override
+  void dispose() {
+    for (final r in _resources) {
+      switch (r) {
+        case StreamSubscription s: s.cancel();
+        case Sink s: s.close();
+        case Timer t: t.cancel();
+      }
+    }
+    super.dispose();
+  }
+}
+```
+
+## 何时不用响应式
+
+- **一次性请求 + 一次性显示**(开屏数据)→ `Future` + `FutureBuilder` 即可,别套 stream。
+- **状态简单 + 范围局部** → `setState`。
+- **没人会"持续监听变化"的数据** → 直接同步函数返回。
+
+> RxDart / Stream 的代价是**思维模型更复杂、栈跟踪更难看**。该静态的就别动态化。
+
+## 心智模型清单
+
+1. **响应式三件套**:`Future`(单值)/ `Stream`(多值)/ `Listenable`(信号)。Stream 在 UI 层最常通过 `StreamBuilder` 接入。
+2. **`StreamBuilder` 的 `stream:` 必须稳定实例**,放 build 里现场 new 会无限重订阅。
+3. **不需要映射成 widget 的副作用**(Snackbar、日志、导航)用 `listen` + `dispose` cancel,**别**包 `StreamBuilder`。
+4. **single-subscription 不能重订阅**;`asBroadcastStream()` 转一次,或干脆用 broadcast `StreamController`。
+5. **冷流 = 每订阅从头开始,热流 = 从订阅时刻开始**;Subject 系列都是热流。
+6. **`BehaviorSubject` 是日常最常用**——有当前值,后来者立刻收到上一次值。
+7. **`switchMap` = 取消旧请求,`debounceTime` = 等用户停下,`distinct` = 去重**——搜索三连。
+8. **Riverpod 的 `Stream` 类型 provider 自动包成 `AsyncValue`**,不再需要 `StreamBuilder`。
+9. **Bloc 的 `EventTransformer` 让你用 RxDart 声明并发策略**,搜索 / 节流场景非常顺。
+10. **任何手写资源必须 close / cancel**;封装 Disposable mixin 可减少漏。
+
+## 自查问题
+
+- `StreamBuilder` 的 builder 在没有数据时,`snapshot.connectionState` 是什么?如果你忘了处理 loading 直接 `snapshot.data!` 会怎样?
+- 写一个 `StreamBuilder` 例子,展示 `stream:` 放在 `build()` 里现场 new 的错误,以及为什么 UI 会"卡住"或"不停转圈"。
+- single-subscription stream 重订阅会抛什么错?有几种修法?
+- `BehaviorSubject.seeded(initial)` 与不带 seed 的 `BehaviorSubject<T>()` 行为有什么差别?第一次订阅时 `value` 分别是什么?
+- `switchMap` 与 `flatMap` 的区别?在搜索场景为什么必须用前者?
+- 写一个"上拉加载更多"的需求:页面滚动到底部触发加载,加载期间不再触发,加载完允许下次触发——用 RxDart 操作符表达,只许写一句操作符链。
+- 用 `combineLatest2` 把"用户当前位置 stream + 当前过滤条件 stream"合成"附近匹配店铺 stream"。
+- 在 Flutter `State` 中订阅了一个 controller,`dispose` 中忘记 `cancel` 会发生什么?用什么工具能发现?
+- Riverpod 的 `StreamProvider` 与 `FutureProvider` 在 UI 层用法的差别是什么?如果上游是个 `BehaviorSubject`,选哪种?
+- Bloc 的 `EventTransformer` 用 `restartable()`(`bloc_concurrency` 包)与 RxDart 的 `switchMap` 区别在哪?
+- 何时**不**应该用 RxDart?给出 2 个具体场景。
+
+下一章 [数据请求](/flutter/networking):从语言层和状态层走到网络边界。

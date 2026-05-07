@@ -1,0 +1,535 @@
+---
+title: 动画
+description: 隐式 vs 显式动画、AnimationController/Tween/Curve、TweenSequence、AnimatedBuilder、Hero、Stagger、PageRouteBuilder、Spring、Rive/Lottie、动画性能
+---
+
+# 动画
+
+Flutter 的动画 API 分两层:**隐式**(声明"目标值",framework 自己插值过去)与**显式**(你拿到 `AnimationController`,手动控制时间)。本章按这个分层组织,最后给"性能要点 + 选型清单"。
+
+## 心智模型:动画的本质
+
+> **动画 = 把"某个值在一段时间里从 A 平滑过渡到 B"。**
+
+每帧 `t = currentMs / durationMs`(归一化 0~1),应用一条 `Curve` 调整曲线,得到 `progress`,再把 `progress` 通过 `Tween` 映射到目标范围(`Color` / `Offset` / `Size`),最后传给 widget 重建。
+
+```text
+   时间 t (0~1)  ──curve──►  progress (0~1)  ──tween──►  实际值(Color/Size/Offset/...)
+   每帧重新算一次,触发依赖它的 widget 重建
+```
+
+这条链路在 Flutter 里有一个对象代表每段:`AnimationController` 出 `t`、`CurvedAnimation` 套 curve、`Tween` 套范围。隐式动画只是把这三件包成一行 API。
+
+## 隐式动画:`Animated*` 族
+
+最简单的动画:把目标值给一个 `AnimatedXxx` widget,改值时它自己 tween 过去。
+
+```dart filename="lib/screens/animated_box.dart"
+class AnimatedBoxDemo extends StatefulWidget {
+  const AnimatedBoxDemo({super.key});
+  @override
+  State<AnimatedBoxDemo> createState() => _AnimatedBoxDemoState();
+}
+
+class _AnimatedBoxDemoState extends State<AnimatedBoxDemo> {
+  bool _big = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => setState(() => _big = !_big),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        width:  _big ? 200 : 100,
+        height: _big ? 200 : 100,
+        decoration: BoxDecoration(
+          color: _big ? Colors.indigo : Colors.amber,
+          borderRadius: BorderRadius.circular(_big ? 24 : 8),
+        ),
+      ),
+    );
+  }
+}
+```
+
+只要某帧 `_big` 改了,`AnimatedContainer` 自动从老 size/color/radius tween 到新值。这就是隐式动画——**你只描述"现在应该是什么样",插值是 framework 的工作**。
+
+### 常用隐式动画
+
+| Widget | 动什么 |
+| ---- | ---- |
+| `AnimatedContainer` | size / decoration / margin / padding / alignment |
+| `AnimatedOpacity` | 透明度(配合 `IgnorePointer` 让透明的不响应点击) |
+| `AnimatedAlign` | 子的对齐位置 |
+| `AnimatedPositioned`(Stack 子) | top / left / width / height |
+| `AnimatedDefaultTextStyle` | 文本样式(字体大小、颜色、粗细) |
+| `AnimatedSwitcher` | 当 child 换了(由 key 区分),旧 child 淡出 + 新 child 淡入 |
+| `AnimatedCrossFade` | 在两个 child 之间淡入淡出 |
+| `AnimatedSize` | 子大小变化时,父 tween 自己尺寸 |
+| `TweenAnimationBuilder` | 任意值的隐式动画(自定义类型) |
+
+`AnimatedSwitcher` 的常见用法(三态切换):
+
+```dart
+AnimatedSwitcher(
+  duration: const Duration(milliseconds: 250),
+  child: switch (state) {
+    Loading()       => const CircularProgressIndicator(key: ValueKey('loading')),
+    Empty()         => const Text('Nothing here', key: ValueKey('empty')),
+    Data(:final v)  => Text(v, key: ValueKey('data-$v')),
+  },
+);
+```
+
+> **每个 child 必须有不同的 Key**,否则 `AnimatedSwitcher` 认不出"换了"。
+
+### `TweenAnimationBuilder`:任意类型的隐式动画
+
+```dart filename="lib/widgets/tween_demo.dart"
+TweenAnimationBuilder<double>(
+  tween: Tween(begin: 0, end: progress),
+  duration: const Duration(milliseconds: 600),
+  curve: Curves.easeOut,
+  builder: (context, value, _) => CircularProgressIndicator(value: value),
+);
+```
+
+需要 tween `Color` / `Size` / 自定义类型时用它。`tween.end` 改变就触发新一段动画。
+
+## 显式动画:`AnimationController`
+
+需要更多控制(往返、暂停、监听完成、与手势结合、多个 widget 联动同一进度),用显式动画。
+
+### 基础三件套
+
+```dart filename="lib/screens/explicit_demo.dart"
+class FadeIn extends StatefulWidget {
+  const FadeIn({super.key, required this.child});
+  final Widget child;
+  @override
+  State<FadeIn> createState() => _FadeInState();
+}
+
+class _FadeInState extends State<FadeIn> with SingleTickerProviderStateMixin {
+  late final _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 500),
+  );
+  late final _opacity = CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl.forward();                    // 启动:从 0 → 1
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      FadeTransition(opacity: _opacity, child: widget.child);
+}
+```
+
+**`SingleTickerProviderStateMixin`** 提供 `vsync` —— 一个 `Ticker`,在每个 vsync 帧调 `controller.tick`,推动 t 增加。
+
+> 多个 controller(同一 widget)用 **`TickerProviderStateMixin`**(注意没有 `Single`)。
+
+### 常用控制 API
+
+| API | 行为 |
+| ---- | ---- |
+| `forward()` | 从当前 t 跑到 1 |
+| `reverse()` | 跑回 0 |
+| `repeat()` / `repeat(reverse: true)` | 循环 / 往返循环 |
+| `stop()` | 暂停 |
+| `reset()` | 强制 t = 0,动画状态 dismissed |
+| `value = 0.5` | 直接跳到中间(不触发动画) |
+| `animateTo(target)` | 跑到指定 t(支持 curve / duration override) |
+| `addStatusListener` | 监听 forward/completed/reverse/dismissed 状态 |
+
+### `Tween`:把 0~1 映射到任何范围
+
+```dart
+final colorAnim = ColorTween(begin: Colors.red, end: Colors.blue).animate(_ctrl);
+final sizeAnim  = Tween<double>(begin: 50, end: 200).animate(_ctrl);
+final offsetAnim = Tween<Offset>(
+  begin: const Offset(-1, 0), end: Offset.zero,
+).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutBack));
+```
+
+任何 `Animation<T>` 都能直接喂给 `xxxTransition` widget(`FadeTransition` / `SlideTransition` / `ScaleTransition` / `RotationTransition` / `SizeTransition` / `DecoratedBoxTransition`)。
+
+### `AnimatedBuilder`:把动画喂给任意 widget
+
+`xxxTransition` 只覆盖单一属性。复杂场景用 `AnimatedBuilder`(任何 `Listenable` 都行):
+
+```dart filename="lib/widgets/pulse.dart"
+class Pulse extends StatefulWidget {
+  const Pulse({super.key, required this.child});
+  final Widget child;
+  @override
+  State<Pulse> createState() => _PulseState();
+}
+
+class _PulseState extends State<Pulse> with SingleTickerProviderStateMixin {
+  late final _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 1),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        final scale = 1.0 + 0.1 * _ctrl.value;
+        final opacity = 0.7 + 0.3 * _ctrl.value;
+        return Transform.scale(
+          scale: scale,
+          child: Opacity(opacity: opacity, child: child),
+        );
+      },
+      child: widget.child,                    // ★ 不会被 rebuild,只参与外层重新组装
+    );
+  }
+}
+```
+
+> **重要优化**:`AnimatedBuilder` 的 `child` 参数被传给 builder 的第二个参数,**不会随每帧 rebuild**。在 builder 里 `Transform.scale(...)` 包它即可。
+
+### `Curves` 速查
+
+```text
+linear       --------                    匀速
+easeIn       _________/                  慢→快
+easeOut      \_________                  快→慢
+easeInOut    _____///___                 中段加速
+easeOutBack  \_____\_/                   过冲再回(弹一下)
+elasticOut   ↗↗↗\\\\\///                 弹簧
+bounceOut    ↘↗↘↗↘↗_                     弹跳
+```
+
+实际选型:
+
+- 进场:`easeOut` / `easeOutCubic`(快速进入,平滑落定)。
+- 退场:`easeIn`(开始慢,加速消失)。
+- "弹"的反馈:`easeOutBack`(温和)或 `elasticOut`(夸张)。
+- 物理感受:用 `Spring`(下面)。
+
+### `TweenSequence`:多段拼接
+
+"先放大到 1.5,再缩小回 1,再震一下":
+
+```dart filename="lib/widgets/squash.dart"
+final squash = TweenSequence<double>([
+  TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.5), weight: 30),
+  TweenSequenceItem(tween: Tween(begin: 1.5, end: 0.95), weight: 40),
+  TweenSequenceItem(tween: Tween(begin: 0.95, end: 1.0), weight: 30),
+]).animate(_ctrl);
+```
+
+`weight` 决定每段时间占比(总和不必是 100,会归一化)。
+
+## Hero:共享元素动画
+
+两个屏幕里有"看起来是同一个东西"的元素(列表头像 → 详情大图),`Hero` 让它在路由切换时**飞过去**。
+
+```dart filename="lib/screens/list_with_hero.dart"
+// 列表项:
+ListTile(
+  leading: Hero(
+    tag: 'avatar-${user.id}',                       // ★ 全局唯一 tag
+    child: CircleAvatar(backgroundImage: NetworkImage(user.avatar)),
+  ),
+  title: Text(user.name),
+  onTap: () => context.push('/users/${user.id}'),
+);
+
+// 详情页:
+Hero(
+  tag: 'avatar-${user.id}',
+  child: CircleAvatar(radius: 80, backgroundImage: NetworkImage(user.avatar)),
+);
+```
+
+只要两个 Hero 用相同 tag,Flutter 自动:
+
+1. 路由动画开始时,把源 Hero **从树里"提起来"**到 `Overlay`;
+2. tween 它的 size + position + 内容 → 目标位置;
+3. 动画结束,把它"放回"目标位置。
+
+要点:
+
+- `tag` 必须唯一——同一帧内不能有两个相同 tag。
+- `Hero` 的 child 在飞行期会被同时挂到两个位置——**不要把状态放在飞行的 widget 里**(`StatefulWidget` 的状态会丢)。
+- 飞行期形状不一致(圆变方),用 `flightShuttleBuilder` 自定义中间形态。
+
+## Stagger:用一个 controller 驱动多段动画
+
+```dart filename="lib/widgets/staggered_card.dart"
+class StaggeredCard extends StatefulWidget {
+  const StaggeredCard({super.key});
+  @override
+  State<StaggeredCard> createState() => _StaggeredCardState();
+}
+
+class _StaggeredCardState extends State<StaggeredCard> with SingleTickerProviderStateMixin {
+  late final _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..forward();
+
+  // 用 Interval 在 [0,1] 区间里"切"出每段子动画的窗口
+  late final _slide = Tween(begin: const Offset(0, 0.3), end: Offset.zero).animate(
+    CurvedAnimation(parent: _ctrl, curve: const Interval(0.0, 0.5, curve: Curves.easeOut)),
+  );
+  late final _opacity = CurvedAnimation(
+    parent: _ctrl, curve: const Interval(0.0, 0.5, curve: Curves.easeOut),
+  );
+  late final _color = ColorTween(begin: Colors.amber, end: Colors.indigo).animate(
+    CurvedAnimation(parent: _ctrl, curve: const Interval(0.5, 1.0, curve: Curves.easeInOut)),
+  );
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SlideTransition(
+      position: _slide,
+      child: FadeTransition(
+        opacity: _opacity,
+        child: AnimatedBuilder(
+          animation: _color,
+          builder: (_, __) => Container(
+            width: 200, height: 100,
+            color: _color.value,
+            child: const Center(child: Text('Stagger')),
+          ),
+        ),
+      ),
+    );
+  }
+}
+```
+
+`Interval(begin, end, curve: ...)` = "把全局 t 限定到这一段,这之外是 0 或 1"。多个 Interval 在不同区间叠 → 错峰动画。
+
+## `PageRouteBuilder`:自定义路由转场
+
+第 12 章用过,这里展开:
+
+```dart filename="lib/utils/slide_route.dart"
+PageRouteBuilder<T> slideRoute<T>(Widget child, {Offset begin = const Offset(1, 0)}) {
+  return PageRouteBuilder<T>(
+    transitionDuration: const Duration(milliseconds: 350),
+    reverseTransitionDuration: const Duration(milliseconds: 250),
+    pageBuilder: (_, __, ___) => child,
+    transitionsBuilder: (_, animation, secondaryAnimation, child) {
+      // animation:本页面进入 0→1
+      // secondaryAnimation:本页面被覆盖时,后一页的进入 0→1
+      final slide = Tween(begin: begin, end: Offset.zero)
+          .chain(CurveTween(curve: Curves.easeOutCubic))
+          .animate(animation);
+      return SlideTransition(position: slide, child: child);
+    },
+  );
+}
+```
+
+go_router 接入:
+
+```dart filename="lib/router/router.dart"
+GoRoute(
+  path: '/detail',
+  pageBuilder: (context, state) => CustomTransitionPage<void>(
+    child: const DetailPage(),
+    transitionsBuilder: (_, animation, __, child) {
+      final fade = CurveTween(curve: Curves.easeOut).animate(animation);
+      return FadeTransition(opacity: fade, child: child);
+    },
+  ),
+);
+```
+
+## 物理动画:`SpringSimulation`
+
+非时间驱动、由初速度 + 阻尼决定的"弹簧式"动画,适合手势抛掷:
+
+```dart filename="lib/widgets/spring_demo.dart"
+class _DraggableState extends State<DraggableCard> with SingleTickerProviderStateMixin {
+  late final _ctrl = AnimationController.unbounded(vsync: this);
+  Offset _offset = Offset.zero;
+
+  void _onDragEnd(DragEndDetails d) {
+    final spring = SpringDescription(mass: 1, stiffness: 100, damping: 10);
+    _ctrl.animateWith(SpringSimulation(spring, _offset.dx, 0, d.velocity.pixelsPerSecond.dx));
+    _ctrl.addListener(() => setState(() => _offset = Offset(_ctrl.value, 0)));
+  }
+
+  // ...
+}
+```
+
+`AnimationController.unbounded` 取消 [0,1] 范围限制;`animateWith` 用任何 `Simulation`(`SpringSimulation` / `FrictionSimulation` / 自定义)驱动。
+
+## Rive 与 Lottie
+
+| 工具 | 长处 | 短板 |
+| ---- | ---- | ---- |
+| **Lottie** | After Effects 出 JSON,设计师友好,生态广 | 文件大,只能"播放",难以与代码状态联动 |
+| **Rive** | 自家设计工具 + 状态机绑定 + Dart API,可与代码双向通信 | 设计师需要学新工具 |
+
+Lottie 用法:
+
+```yaml
+dependencies:
+  lottie: ^3.1.0
+```
+
+```dart
+Lottie.asset('assets/loading.json', width: 100);
+```
+
+Rive 用法:
+
+```yaml
+dependencies:
+  rive: ^0.13.0
+```
+
+```dart
+RiveAnimation.asset(
+  'assets/character.riv',
+  stateMachines: const ['Idle'],
+  onInit: (artboard) {
+    final ctrl = StateMachineController.fromArtboard(artboard, 'Idle');
+    artboard.addController(ctrl!);
+    final input = ctrl.findInput<bool>('isHappy')!;
+    input.value = true;                          // 代码触发动画状态切换
+  },
+);
+```
+
+复杂插画动画 → Rive。简单 loading / empty 占位 → Lottie。
+
+## 动画性能要点
+
+### 1. 把动画隔离到最小子树 + RepaintBoundary
+
+回顾第 11 章:动画意味着**每帧重画**,默认会拖累整个 PictureLayer。
+
+```dart
+RepaintBoundary(
+  child: Pulse(child: ProductImage(url: ...)),
+);
+```
+
+让脉冲只重画自己的层,周围列表保持静止。
+
+### 2. `AnimatedBuilder` 的 `child` 参数
+
+复用上面例子:
+
+```dart
+AnimatedBuilder(
+  animation: _ctrl,
+  builder: (_, child) => Transform.scale(scale: ..., child: child),
+  child: const ExpensiveSubtree(),                      // ← 不参与每帧 rebuild
+);
+```
+
+`ExpensiveSubtree` 只构建一次,builder 每帧只重新组合外层 `Transform`。
+
+### 3. 避免在动画期 setState
+
+`AnimatedBuilder` / `xxxTransition` 已经在帧调度内自动重建——**别在 controller listener 里再调 `setState`**,等于触发了两次 rebuild。
+
+```dart
+// ❌
+_ctrl.addListener(() => setState(() {}));
+
+// ✅
+AnimatedBuilder(animation: _ctrl, builder: (_, __) => /* 用 _ctrl.value */);
+```
+
+### 4. 性能模式确认
+
+`debug` 模式包含大量 assert,动画会比真实情况卡。**判断动画性能必须用 `flutter run --profile`**(profile 模式)——保留性能近似 release,但保留 DevTools。
+
+### 5. 大图 / 大列表与动画并存
+
+列表项滚动 + 项内动画是性能高发区:
+
+- 项必须 `RepaintBoundary`(`ListView` 已自动包)。
+- 项内的动画进一步加 `RepaintBoundary` 隔离。
+- 图片用 `cached_network_image`,避免每帧重 decode。
+- 转场期间停止后台轮询(在 push 前 `pauseAnimation` 等)。
+
+## 动画选型决策表
+
+```text
+                          ┌─ 单一属性变化(size/color/opacity) → AnimatedXxx
+                          │
+        想"声明目标值"     │
+        值变化时动起来    ─┤── 任意类型/复杂值 → TweenAnimationBuilder
+                          │
+                          └─ 列表项进入/退出 → AnimatedSwitcher / AnimatedList
+
+                          ┌─ 单 widget 单效果 → xxxTransition + AnimationController
+                          │
+        想"控制时间轴"     │
+        循环/暂停/联动    ─┤── 多效果同时 → AnimatedBuilder + 多个 Tween
+                          │
+                          └─ 多段错峰 → Stagger(Interval)
+
+        想"路由转场"        → PageRouteBuilder / CustomTransitionPage
+        想"页面共享元素"    → Hero(同 tag)
+        想"物理感受"        → SpringSimulation
+        想"完整角色动画"    → Rive
+        想"播放设计稿动画"  → Lottie
+```
+
+## 心智模型清单
+
+1. **动画 = 时间 t → curve → tween → 实际值**;隐式动画把这层包起来,显式动画给你 controller。
+2. **AnimatedXxx 适合"目标值切换",AnimationController 适合"主动控制时间"**。
+3. **`SingleTickerProviderStateMixin` 一个 controller,`TickerProviderStateMixin` 多个**;不用 mixin = controller 没 vsync = 报错。
+4. **Tween 不重新算,curve 不重新算——它们是"映射函数"**;每帧只走一次。
+5. **`AnimatedBuilder` 的 `child` 参数是性能必备**——不参与每帧 rebuild。
+6. **Hero 飞行期 widget 同时挂到两个位置**;别把可变状态放飞行 widget 里。
+7. **多段错峰用 `Interval`**,共用一个 controller;别开几个 controller 凑节奏。
+8. **路由转场用 `PageRouteBuilder` 或 `CustomTransitionPage`**(go_router 下)。
+9. **物理感受用 `SpringSimulation`**;时间驱动用 curve,速度驱动用 simulation。
+10. **动画测性能必须 profile 模式**;每个动画区域都加 `RepaintBoundary`;controller listener 里别 setState。
+
+## 自查问题
+
+- 用 `AnimatedContainer` 实现"按钮按下,圆角从 8 → 24,颜色从蓝 → 红,300ms"。
+- `AnimatedSwitcher` 的 child 不加 key 会发生什么?为什么?
+- 写一个"心跳"按钮:不停 1s 周期放大 5% 再缩回。给出 controller / Tween / AnimatedBuilder 完整代码,并说明为什么不能用 `AnimatedContainer`。
+- `AnimatedBuilder` 的 `child` 参数为什么能优化性能?用一个对照例子说明。
+- Hero 的 `tag` 一个页面里有两个相同会发生什么?如何修?
+- 列表头像 → 详情大图,头像和大图形状不同(圆 vs 圆角矩形),用 Hero 怎么处理飞行期外观?
+- "列表项依次出现,每个延迟 80ms,持续 300ms",列出两种实现方式(`AnimatedList` / `Stagger` + `Interval`),分别说优劣。
+- 自定义路由转场:从右滑入,新页带阴影。用 `PageRouteBuilder` 写完整代码;再用 go_router 的 `CustomTransitionPage` 改写。
+- `SpringSimulation` 的三个核心参数(mass / stiffness / damping)分别影响什么效果?
+- 一个屏幕里有 1000 个 widget 中有 1 个在动,默认会重画几次什么?加哪个 widget 能优化?
+- 你怎么判断"动画卡顿是 UI thread 还是 raster thread 的问题"?(下一章 devtools-perf 会讲)
+
+下一章 [设计原则与架构](/flutter/design-principles):从单页面跳到整个工程的组织。

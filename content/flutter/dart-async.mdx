@@ -1,0 +1,596 @@
+---
+title: Dart 异步与并发
+description: Future、Stream、async/await、错误传播、事件循环、microtask、Isolate
+---
+
+# Dart 异步与并发
+
+Flutter 应用的真实工作绝大多数是异步的：网络、文件、数据库、动画、定时器、传感器、Stream 推送。**不掌握 Dart 的异步模型，写出来的代码就一定会卡顿、丢帧、崩溃**。本章把所有相关概念一次串起来。
+
+## 单线程 + 事件循环
+
+Dart 程序运行在一个**事件循环**之上。一个 isolate 内部不存在真正的并发——所有代码都跑在唯一一条线程上，**通过事件队列调度**：
+
+```text
+┌─── isolate 内部 ────────────────────────────────────────┐
+│                                                         │
+│   ┌──────────┐                                          │
+│   │ 主同步段 │   ─── 跑完一段同步代码                   │
+│   └─────┬────┘                                          │
+│         ▼                                               │
+│   检查 microtask 队列：清空（高优先级）                 │
+│         │                                               │
+│         ▼                                               │
+│   取 event 队列 head：执行                               │
+│         │                                               │
+│         └──── 回到上面（再清 microtask） …               │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+两个队列的优先级关键：
+
+| 队列 | 触发源 | 何时被处理 |
+| ---- | ------ | ---------- |
+| **microtask** | `scheduleMicrotask`、`Future.value` 的 `.then` | **每段同步执行完后立即清空** |
+| **event** | IO 回调、计时器、Stream 数据、用户输入、`Future.delayed` | microtask 清空后**取 1 个**执行 |
+
+> **关键事实**：所有 microtask 跑完才会处理下一个 event。**错把大量工作排进 microtask 队列会饿死 UI 事件**。
+
+### 关于"非阻塞"的真相
+
+Dart 的"非阻塞"指的是**不阻塞事件循环**——你写的同步代码必须很快返回，让事件循环能继续派发其他事件。一旦一段同步代码跑了 50ms，其他事件全部排队等待，UI 绝对掉帧。
+
+```dart
+// ✗ 阻塞 1 秒，UI 完全冻结
+void busy() {
+  final end = DateTime.now().add(const Duration(seconds: 1));
+  while (DateTime.now().isBefore(end)) {}
+}
+
+// ✓ 让出执行权，让事件循环运转
+Future<void> nonBlocking() async {
+  for (var i = 0; i < 100; i++) {
+    doSlice();
+    await Future.delayed(Duration.zero);   // 把控制权还给事件循环
+  }
+}
+```
+
+## `Future<T>`：单值异步
+
+`Future` 是 Dart 异步的最小单元，表示"未来某时刻会有一个 `T` 类型的值（或一个错误）"。
+
+### 创建
+
+```dart
+// 1. 立即就绪
+final f1 = Future<int>.value(42);
+final f2 = Future<Object>.error(Exception('boom'));
+
+// 2. 延迟就绪
+final f3 = Future<int>.delayed(const Duration(seconds: 1), () => 42);
+
+// 3. 显式 Completer（手动决定何时完成）
+final c = Completer<int>();
+Timer(const Duration(seconds: 2), () => c.complete(42));
+final f4 = c.future;
+
+// 4. 由 async 函数返回
+Future<int> compute() async => 42;
+```
+
+### 状态机
+
+一个 Future 有三种状态：**pending → completed with value | completed with error**。
+
+```dart
+Future<int> fetch() async {
+  await Future.delayed(const Duration(seconds: 1));
+  return 42;
+}
+
+// 等价于（手写形式）：
+Future<int> fetch2() {
+  final c = Completer<int>();
+  Timer(const Duration(seconds: 1), () => c.complete(42));
+  return c.future;
+}
+```
+
+### `then` / `catchError` / `whenComplete`
+
+```dart
+fetch()
+    .then((v) => print('got $v'))
+    .catchError((e, st) => print('err $e'))
+    .whenComplete(() => print('done'));
+```
+
+`whenComplete` 不论成功或失败都会执行，类似 try-finally。
+
+### `async` / `await`：把回调拉直
+
+```dart
+Future<int> sum() async {
+  final a = await fetchA();
+  final b = await fetchB();
+  return a + b;
+}
+```
+
+`await` 做的事：
+
+1. **暂停**当前 async 函数的执行；
+2. 把"等到 future 完成后从这里继续"包装成回调注册到 future 上；
+3. **当前函数立刻返回一个新的 Future**——它会在 sum 整体完成后 complete。
+
+要点：
+
+- `await` 必须在 `async` 函数里使用；
+- `async` 函数**总是返回 Future**（即便函数体没显式 `return Future`）；
+- 函数返回类型要写成 `Future<T>`，不能写成 `T`；
+- `await` 一个**非 Future 的值**也合法——会直接把它当作已完成 future 处理（见下文 microtask 陷阱）。
+
+### 错误传播
+
+```dart
+Future<int> a() async => throw Exception('a');
+Future<int> b() async => 1 + await a();   // 错误自动向上抛
+
+Future<void> caller() async {
+  try {
+    await b();
+  } on Exception catch (e, st) {
+    print('caught $e');
+    print(st);
+  }
+}
+```
+
+`async` / `await` 让错误**像同步异常一样冒泡**。这是它最大的好处之一。
+
+> **陷阱**：`async` 函数里的 `throw` 不会立刻"扔出去"，而是让返回的 Future 处于错误状态。调用方不 `await` 也不 `.catchError`，错误就会**沉默丢失**（被上报到当前 Zone 的 unhandled exception 处理器，开发期常常被 IDE 红框，生产期可能就丢了）。
+
+### 并行 vs 串行
+
+```dart
+// 串行：耗时 = a + b
+final r1 = [await fetchA(), await fetchB()];
+
+// 并行：耗时 = max(a, b)
+final futures = [fetchA(), fetchB()];   // 立刻同时开始
+final r2 = await Future.wait(futures);   // [intA, intB]
+```
+
+`Future.wait` 的细节：
+
+- 任一 future 报错 → 整体抛错，但**其他 future 仍在跑**（不会被取消）；
+- `eagerError: true` 时仍然抛错，但 wait 立刻 settle；
+- `Future.wait([...])` 类型是 `Future<List<T>>`；要接收异构类型就用 record + `(await fA, await fB)`（Dart 3）：
+
+```dart
+final (a, b) = (await fetchA(), await fetchB());        // 串行
+final (a2, b2) = await (fetchA(), fetchB()).wait;        // 并行（dart 3.0+ 起 record.wait）
+```
+
+`record.wait` 来自 `dart:async`，无需显式 `Future.wait`。
+
+### 其他组合 API
+
+```dart
+// 谁先完成就用谁
+final winner = await Future.any([fetchFromA(), fetchFromB()]);
+
+// 多个并行，过滤 + 聚合
+final pages = await Future.wait(urls.map(fetchPage));
+
+// 超时
+final result = await fetchSlow().timeout(
+  const Duration(seconds: 3),
+  onTimeout: () => 'fallback',
+);
+```
+
+### `Future.microtask` vs `Future.delayed(Duration.zero)`
+
+```dart
+Future.microtask(() => print('A'));
+Future.delayed(Duration.zero, () => print('B'));
+print('main');
+
+// 输出顺序：main → A → B
+```
+
+`Future.microtask` 排进 microtask 队列，`Future.delayed(Duration.zero)` 排进 event 队列。前者优先级高。**滥用 microtask 会让 UI 卡顿——`scheduleMicrotask` 几乎只在框架内部使用**。
+
+## `Stream<T>`：多值异步
+
+`Stream` 表示"未来会陆续到来的 0 个或多个 `T` 值（最后可能正常关闭或抛错）"。
+
+### 两种 Stream
+
+| 类型 | 说明 |
+| ---- | ---- |
+| **single-subscription**（默认） | 只能被一个监听者消费，且只能 `listen` 一次 |
+| **broadcast** | 可被多个监听者同时消费，每个监听者各自从订阅时刻起接收 |
+
+```dart
+// 单订阅：file IO、network response 等"仅一次性源"
+final s1 = file.openRead();
+
+// 广播：UI 事件、状态推送、PubSub
+final controller = StreamController<int>.broadcast();
+final s2 = controller.stream;
+```
+
+### 创建
+
+```dart
+// 1. 由 async* 生成
+Stream<int> ticks(Duration period) async* {
+  var i = 0;
+  while (true) {
+    await Future.delayed(period);
+    yield i++;
+  }
+}
+
+// 2. 由 StreamController 手动控制
+final c = StreamController<String>();
+c.add('hello');
+c.add('world');
+c.close();
+
+// 3. 从 Future / Iterable 转换
+Stream.fromFuture(fetchOne());
+Stream.fromIterable([1, 2, 3]);
+Stream.periodic(const Duration(seconds: 1), (n) => n);
+```
+
+### 监听：`listen`
+
+```dart
+final sub = s.listen(
+  (data) => print('data $data'),
+  onError: (e, st) => print('err $e'),
+  onDone: () => print('done'),
+  cancelOnError: false,
+);
+
+// 控制
+sub.pause();
+sub.resume();
+await sub.cancel();   // 一定要在不再需要时 cancel，否则内存泄漏
+```
+
+### `await for`：把 Stream 拉成同步循环
+
+```dart
+Future<int> sum(Stream<int> s) async {
+  var total = 0;
+  await for (final n in s) {
+    total += n;
+  }
+  return total;
+}
+```
+
+注意：
+
+- `await for` 内 `break` 会自动 cancel 订阅；
+- 在 broadcast stream 上用 `await for` 通常**不是想要的行为**——它会订阅整个生命周期；
+- `await for` 不能并行处理元素，需要并发用 `listen` + 手动并发控制。
+
+### Stream 高频变换
+
+```dart
+s.where((n) => n.isEven);
+s.map((n) => n * 2);
+s.expand((n) => [n, -n]);
+s.take(5);
+s.skip(2);
+s.distinct();
+s.timeout(const Duration(seconds: 5));
+s.handleError((e, st) => print(e));
+s.transform(StreamTransformer.fromHandlers(...));
+```
+
+复杂操作（debounce、throttle、buffer、combineLatest...）来自 `rxdart` 包，详见 [响应式编程](/flutter/reactive)。
+
+### Stream 与 BroadcastStream 的转换
+
+```dart
+final broadcast = singleSubStream.asBroadcastStream();
+```
+
+但 broadcast stream 没有缓冲——晚订阅的人**收不到先到的数据**。需要"晚订阅也能拿历史"用 `BehaviorSubject` / `ReplaySubject`（rxdart）。
+
+### 关闭与资源管理
+
+```dart
+final controller = StreamController<int>();
+// ...
+await controller.close();   // 通知所有订阅者 onDone
+```
+
+**`close` 后再 `add` 会抛错**。在 `StatefulWidget` 的 `dispose` 中关闭 controller 是 Flutter 标准模式。
+
+## 错误处理细节
+
+### Zones 与全局未处理异常
+
+```dart
+import 'dart:async';
+
+void main() {
+  runZonedGuarded(
+    () {
+      // 应用主体
+      runApp(const MyApp());
+    },
+    (error, stack) {
+      // 任何未捕获的异步异常落到这里
+      Sentry.captureException(error, stackTrace: stack);
+    },
+  );
+}
+```
+
+Flutter 自身还有一个全局错误回调：
+
+```dart
+FlutterError.onError = (FlutterErrorDetails details) {
+  Sentry.captureException(details.exception, stackTrace: details.stack);
+};
+
+PlatformDispatcher.instance.onError = (error, stack) {
+  Sentry.captureException(error, stackTrace: stack);
+  return true;
+};
+```
+
+完整异常上报方案见 [埋点与监控](/flutter/analytics)。
+
+### `unawaited`：故意不等
+
+```dart
+import 'package:meta/meta.dart';
+
+void log() async { ... }
+
+void main() {
+  unawaited(log());      // 显式声明"我知道我没等它"，关掉 lint 警告
+}
+```
+
+不写 `await` 的隐患：函数错误**沉默地**变成 unhandled exception。`unawaited` 是显式表态。
+
+## Isolate：Dart 的真正多核
+
+到这里所有讨论都局限在**一个 isolate 内部**。跨 isolate 才能利用多核 / 不阻塞主线程。
+
+### Isolate 的本质
+
+- **隔离堆**：每个 isolate 有自己的堆，对象之间不共享指针；
+- **消息通信**：通过 `SendPort` / `ReceivePort` 收发消息；消息要么是基本类型 / List / Map / typed_data，要么是支持序列化的对象；
+- **没有共享状态**：天生避免数据竞争。
+
+### 最简包装：`Isolate.run`（Dart 2.19+）
+
+```dart
+import 'dart:isolate';
+
+Future<List<Item>> parse(String json) async {
+  return Isolate.run(() => _parseSync(json));     // 在新 isolate 跑，跑完返回结果
+}
+
+List<Item> _parseSync(String json) {
+  // 大量 CPU 工作
+  return [];
+}
+```
+
+`Isolate.run` 是 Dart 官方推荐的"扔出去算"的最简形式——传一个闭包，跑完返回结果，自动管理 isolate 生命周期。
+
+### Flutter 的 `compute`
+
+```dart
+import 'package:flutter/foundation.dart';
+
+final result = await compute(_parseSync, json);
+```
+
+`compute` 是 Flutter 框架对 `Isolate.run` 的更早封装，参数必须是**顶层函数或静态方法**（不能闭包）。新代码可以直接用 `Isolate.run`，老代码 `compute` 保持兼容。
+
+### 长生命周期 Isolate：双向通信
+
+适合有持续工作（图像处理流水线、长连接代理）的场景：
+
+```dart
+import 'dart:isolate';
+
+void worker(SendPort mainPort) async {
+  final myPort = ReceivePort();
+  mainPort.send(myPort.sendPort);          // 把回信端口告诉主 isolate
+
+  await for (final msg in myPort) {
+    if (msg is String) {
+      mainPort.send('echo: $msg');
+    } else if (msg == 'stop') {
+      myPort.close();
+      break;
+    }
+  }
+}
+
+Future<void> main() async {
+  final fromWorker = ReceivePort();
+  await Isolate.spawn(worker, fromWorker.sendPort);
+
+  late final SendPort toWorker;
+  await for (final msg in fromWorker) {
+    if (msg is SendPort) {
+      toWorker = msg;
+      toWorker.send('hello');
+    } else if (msg is String) {
+      print(msg);                          // echo: hello
+      toWorker.send('stop');
+      break;
+    }
+  }
+  fromWorker.close();
+}
+```
+
+### Isolate 边界的传值规则
+
+- **基本类型 / String / List / Map / Set / typed_data**：**copy**，开销与大小成正比；
+- **`Isolate.spawn` / `Isolate.run`** 的入口闭包参数：copy；
+- **TransferableTypedData**：**transfer**（零拷贝、原 isolate 失去所有权）——发大块二进制时使用；
+- **`SendPort` 自身**：可以发，是引用；
+- **不能跨 isolate 共享 mutable 普通对象**——这是 Dart 设计的安全性来源。
+
+### 何时该 / 不该用 Isolate
+
+**该用**：
+
+- 解析超过 16KB 的 JSON；
+- 图像加解码、压缩、滤镜；
+- 大量纯计算（密码学、机器学习推理、CRC）；
+- 大文件 IO（虽然 IO 本身不会阻塞，但解析过程会）。
+
+**不该用**：
+
+- 简单的 await 等 IO（用 Future 就够）；
+- 频繁短任务（spawn 与 copy 开销可能大于收益）；
+- 需要共享大量状态的任务（无共享内存，复制成本高）。
+
+## Timer 与定时调度
+
+```dart
+final t1 = Timer(const Duration(seconds: 1), () => print('once'));
+final t2 = Timer.periodic(const Duration(seconds: 1), (timer) {
+  print('tick ${timer.tick}');
+  if (timer.tick >= 3) timer.cancel();
+});
+
+t1.cancel();   // 取消还没触发的 one-shot
+```
+
+注意：
+
+- Timer 的回调跑在事件队列上——若主 isolate 阻塞，触发会延迟；
+- 在 `StatefulWidget` 里用 Timer 务必在 `dispose` 中取消；
+- 需要"对齐到下一帧"用 `WidgetsBinding.instance.addPostFrameCallback`，不要用 Timer。
+
+## 实战：异步在 widget 中的承载
+
+**Future → UI** 用 `FutureBuilder`：
+
+```dart
+FutureBuilder<List<Item>>(
+  future: api.fetchItems(),
+  builder: (context, snapshot) {
+    return switch (snapshot.connectionState) {
+      ConnectionState.waiting => const CircularProgressIndicator(),
+      ConnectionState.done when snapshot.hasError =>
+        Text('Error: ${snapshot.error}'),
+      ConnectionState.done =>
+        ItemList(items: snapshot.data!),
+      _ => const SizedBox.shrink(),
+    };
+  },
+);
+```
+
+> **陷阱**：每次父 widget 重建，`fetchItems()` 会被重新调用——FutureBuilder 看到新的 future 就重新加载。所以 future 必须**外置缓存**（在 State 字段中持有，或交给状态管理库）。
+
+**Stream → UI** 用 `StreamBuilder`：
+
+```dart
+StreamBuilder<int>(
+  stream: ticks(const Duration(seconds: 1)),
+  builder: (context, snapshot) {
+    if (!snapshot.hasData) return const SizedBox.shrink();
+    return Text('${snapshot.data}');
+  },
+);
+```
+
+同样的"缓存"问题在 StreamBuilder 也存在。详见 [响应式编程](/flutter/reactive) 与 [状态管理](/flutter/state-management)。
+
+## 异步综合示例
+
+```dart filename="lib/feed.dart"
+import 'dart:async';
+import 'dart:isolate';
+import 'package:flutter/foundation.dart';
+
+class FeedRepository {
+  Future<List<Post>> fetch(int page) async {
+    final raw = await _http(page);
+    // 大 JSON：扔到 isolate
+    final posts = await Isolate.run(() => _parse(raw));
+    return posts;
+  }
+
+  Stream<Post> liveUpdates() async* {
+    while (true) {
+      final p = await _waitNext();
+      yield p;
+    }
+  }
+
+  Future<String> _http(int page) async {
+    await Future.delayed(const Duration(milliseconds: 200));
+    return '[{"id":1,"title":"hi"}]';
+  }
+
+  Future<Post> _waitNext() async {
+    await Future.delayed(const Duration(seconds: 5));
+    return const Post(0, 'live');
+  }
+
+  static List<Post> _parse(String json) {
+    // 假设耗时 100ms+
+    return [const Post(1, 'a'), const Post(2, 'b')];
+  }
+}
+
+class Post {
+  const Post(this.id, this.title);
+  final int id;
+  final String title;
+}
+```
+
+要点：
+
+- 同步代码（`_parse`）扔进 `Isolate.run`，避免 UI 卡顿；
+- 持续流（`liveUpdates`）用 `async*`；
+- 入口函数全是 `Future` / `Stream`，调用方决定如何展示。
+
+## Dart 异步与并发心智模型清单
+
+1. **Dart 单线程 + 事件循环 + microtask 队列优先于 event 队列**——基础事实，所有性能讨论的起点。
+2. **`async` / `await` 不开线程**，只把代码切成事件队列里的片段；不能解决 CPU 重活。
+3. **CPU 重活必须扔 Isolate**——`Isolate.run` 是首选 API。
+4. **Isolate 之间不共享可变内存**，靠消息通信，自动避免数据竞争。
+5. **`async` 函数总是返回 `Future`**；不 `await` 也不 `.catchError` 的错误会沉默丢失。
+6. **`Future.wait` 与 record.wait 用于并行**，能省掉串行 `await` 的等待时间总和。
+7. **Stream 默认 single-subscription**——`asBroadcastStream` 转广播；广播流晚订阅丢历史。
+8. **subscription / controller / Timer 必须在 dispose 中取消**，否则内存泄漏 + ghost callback。
+9. **`FutureBuilder` / `StreamBuilder` 不要传内联 `fetch()`**——会随父重建而反复触发。
+10. **错误处理要分层**：try/catch、`runZonedGuarded`、`FlutterError.onError`、`PlatformDispatcher.onError` 各管一类。
+
+## 自查问题
+
+1. microtask 队列与 event 队列有什么本质区别？为什么不该把大量工作放进 microtask？
+2. `await` 一个非 Future 值会发生什么？
+3. 写一段代码：并行发起 3 个网络请求，全部完成后取最大值；任一失败就立刻向上抛。
+4. `async*` 与返回 `List` 的同步函数在内存与执行时机上各有何差别？
+5. 单订阅 Stream 与广播 Stream 在"晚来的订阅者能看到什么"上有何不同？怎么补救？
+6. `Isolate.run` 与 `compute` 的关系是什么？什么时候选哪个？
+7. 一个 `StreamController` 不在 `dispose` 里 `close`，会有什么后果？
+8. 为什么直接在 `FutureBuilder(future: api.fetch())` 里写 future 是反模式？正确做法是什么？

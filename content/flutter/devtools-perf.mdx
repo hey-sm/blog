@@ -1,0 +1,397 @@
+---
+title: 调试与性能
+description: Flutter Inspector、DevTools(Performance/CPU/Memory/Network)、UI vs Raster thread、性能五大陷阱、profile 模式、release/profile/debug 差异、卡顿诊断方法论
+---
+
+# 调试与性能
+
+测试通过 ≠ 性能没事。DevTools 是 Flutter 自带的"显微镜",本章教你:
+
+- 怎么打开,怎么看,各面板分别在测什么。
+- 卡顿到底是 **UI thread 慢** 还是 **raster thread 慢**?——结论决定你修哪儿。
+- 5 个真正常见的性能陷阱与对应修法。
+- 一个可复用的 **量 → 修 → 复测** 性能优化方法论。
+
+> 阅读前置:[渲染机制](/flutter/rendering)——本章把那一章的"理论"翻译成 DevTools 里看到的具体数字。
+
+## 三种构建模式:必须先分清
+
+```text
+              JIT     AOT    debugFlag    assertions    inspector    断点
+   debug      ✅       ❌      true         on            ✅           ✅       ← 开发用
+   profile    ❌       ✅      false        off           ✅(只读)    ❌      ← 测性能必须用!
+   release    ❌       ✅      false        off           ❌           ❌       ← 上架版本
+```
+
+**调性能必须用 profile**:
+
+```bash
+flutter run --profile
+flutter run --profile -d <device>
+```
+
+为什么:
+
+- `debug` 模式有大量 assert 和 service extension 注入,**性能比真实情况差 5–10 倍**——你看到的"卡"可能是假的。
+- `release` 模式没有 service extension,DevTools 大部分面板用不了。
+- `profile` 模式 = release 性能 + DevTools 可用。
+
+> 任何性能讨论之前先问:**"你跑的是 profile 模式吗?"** 没说就重测。
+
+## DevTools 入口
+
+启动 app 后(任何模式),命令行输出:
+
+```
+The Flutter DevTools debugger and profiler is available at:
+http://127.0.0.1:9100?uri=ws://127.0.0.1:55555/...
+```
+
+打开这个 URL,DevTools 在浏览器里。VS Code / IntelliJ 也有内嵌入口("Open Flutter DevTools"命令)。
+
+主要面板:**Inspector / Performance / CPU Profiler / Memory / Network / Logging / App Size**。
+
+## Flutter Inspector
+
+可视化你的 widget 树。
+
+### 关键功能
+
+- **Select widget** :点界面上任何元素,Inspector 高亮对应 widget,显示完整 widget 树。
+- **Show guidelines** :显示每个 widget 的 padding / size 边框线,排查"为什么间距不对"。
+- **Highlight repaints** :⭐ **每次重绘的 widget 周围闪烁不同颜色**——一秒看出"哪里在频繁重绘"。
+- **Show oversized images** :加载分辨率 > 显示尺寸的图片标红(常见性能 / 流量浪费)。
+- **Slow animations** :2 倍慢放所有动画(看清运动曲线)。
+- **Performance overlay** :屏幕上叠两个柱状图(UI / raster 各帧耗时)。
+
+### 用 Inspector 抓 rebuild 风暴
+
+打开 *Highlight Repaints*,在屏幕上各处点点滑滑——**正常情况只有发生变化的小区域闪烁**。如果**整屏都在闪**,你大概率犯了:
+
+- 把 `setState` 调到了根 widget;
+- 在父 widget 的 `build` 里 `new` 了个 `Stream`/`Future`,触发 `StreamBuilder` 重订阅;
+- 错过了 `RepaintBoundary`。
+
+## Performance:看每帧花多久
+
+### 60fps 预算
+
+- 60 fps → 每帧 16.6 ms 内画完;
+- 120 fps(高刷设备) → 8.3 ms。
+- **超过预算就掉帧**(jank)。
+
+### UI thread vs Raster thread
+
+```text
+   一帧的处理
+   ┌───────────────────────────────────────────────┐
+   │ UI thread:                                    │
+   │   - 跑 Dart 代码                              │
+   │   - build / layout / paint(产 Layer 树)     │
+   │                                               │
+   │ Raster thread (GPU thread):                   │
+   │   - 把 Layer 树交给 Skia/Impeller             │
+   │   - 调用 GPU API 真正画到屏幕                 │
+   └───────────────────────────────────────────────┘
+
+   只要任一线程 > 16.6ms,这帧就 jank。
+```
+
+DevTools *Performance* 面板上:
+
+- 蓝色柱 = UI thread 时长
+- 紫色柱 = Raster thread 时长
+
+**柱子哪种颜色超过 16.6ms,就修哪个**:
+
+- UI 高:Dart 代码 / build 太重 → 看 *CPU Profiler*。
+- Raster 高:绘制 / 合成太重 → 减少 layer / opacity / blur / 不必要的 RepaintBoundary。
+
+### Frame chart
+
+每个柱子可点开 → flame chart,展开看这一帧具体卡在哪个函数:
+
+```text
+[==build======][=layout====][===paint=====][=raster============]
+    1.2ms          0.8ms         3.5ms          22.1ms          ← raster 飙
+                                                ▲
+                                       问题在 GPU 路径
+```
+
+### Performance overlay(在屏幕角落看)
+
+```dart filename="lib/main.dart"
+MaterialApp(
+  showPerformanceOverlay: true,                // 上 UI / 下 raster 两条柱状图
+  ...
+);
+```
+
+- 横线 = 16.6ms 阈值;柱子越过横线 = jank。
+- 只在 *profile* 模式有意义。
+- 上线前记得关掉。
+
+## CPU Profiler
+
+更细粒度的 Dart 函数耗时分析。
+
+### 怎么用
+
+1. *CPU Profiler* 面板;
+2. **Record** → 在 app 里复现卡顿动作(滚动、动画、点击);
+3. **Stop** → 看 flame chart。
+
+### 三种视图
+
+- **Flame chart**:谁在调谁,可看到调用栈深度和热点。
+- **Call tree**:按调用路径汇总,适合定位"哪个父函数总耗时长"。
+- **Bottom Up**:按叶函数汇总,适合发现"哪个底层 util 被调爆"。
+
+### 实例:发现热点
+
+flame chart 里看到 `StateA.build → ListView.build → Container._calculateStuff` 占了 8ms。
+往上追:`Container._calculateStuff` 内部一次 `EdgeInsets.fromLTRB(...)` 在每一帧都重新构造。
+修法:把 `EdgeInsets.fromLTRB(...)` 提到 `static const`。
+
+## Memory:看堆与对象分配
+
+### 关键功能
+
+- **Memory chart**:实时看 Dart heap / external usage 增长。
+- **Snapshot**:某一刻的"堆快照",可看每个类的实例数。
+- **Allocations / Diff**:两次 snapshot 对比,看新增了哪些实例。
+
+### 抓内存泄漏的标准动作
+
+1. 进入页面 A → 拍 snapshot 1。
+2. 退出 A → 进入 B → 退出 B,**回到 A 之前的状态**。
+3. 拍 snapshot 2。
+4. Diff:**所有"新增实例"都应该是 0**。如果某些类(`_AState`、`StreamController`、`AnimationController`)新增 > 0,就是泄漏。
+
+> 第 5 章「Dart 异步」和第 7 章「Widgets 基础」反复强调的"`dispose` 必须 cancel"——这就是被 DevTools Memory 抓出来的根因。
+
+### Leak Tracker(Flutter 3.16+)
+
+启动时设置:
+
+```dart
+import 'package:leak_tracker_flutter_testing/leak_tracker_flutter_testing.dart';
+
+void main() {
+  enableLeakTracking();        // 开发期开,自动检测 widget / element 泄漏
+  runApp(const App());
+}
+```
+
+任何"应该被 GC 但没被 GC"的对象,会在 console 报告类名 + 创建栈。
+
+## Network
+
+抓所有 dio / http 请求(无需配代理):
+
+- 请求方法 / URL / status / 时间;
+- 上行 / 下行字节数;
+- 请求头 / 响应头 / body。
+
+排查"为什么这个页面慢" → 先看 Network:有没有发了一堆冗余请求?有没有图片是 5MB 的?有没有串行调用应该并行?
+
+## Logging
+
+`debugPrint` / `log` 都进这里。比 console 强:
+
+- **过滤**(按 level / 关键字)。
+- **不会被节流**(`debugPrint` 在 console 高频输出会丢字符,这里不会)。
+- **可定位"哪一帧"输出的**——结合 Performance 排查"动画期某个 widget 在不该 rebuild 时却 rebuild 了"。
+
+## 性能 5 大常见陷阱
+
+### 陷阱 1:列表用 `Column` + `SingleChildScrollView`,而不是 `ListView.builder`
+
+```dart
+// ❌ 1000 项全部构建并 layout(慢)
+SingleChildScrollView(
+  child: Column(children: items.map((i) => ItemTile(i)).toList()),
+);
+
+// ✅ 只构建可视的(快)
+ListView.builder(
+  itemCount: items.length,
+  itemBuilder: (_, i) => ItemTile(items[i]),
+);
+```
+
+`ListView.builder` 用 sliver 内核,**只构建屏内 + 缓冲区的条目**。一千行变 20 行,差几百倍。
+
+附加:已知高度时给 `itemExtent: 64` —— layout 时不必询问每条高度,更快:
+
+```dart
+ListView.builder(
+  itemExtent: 64,                   // ★ 已知高度的话给上,显著加速
+  itemCount: ...,
+  itemBuilder: ...,
+);
+```
+
+### 陷阱 2:widget 没用 `const`
+
+```dart
+// ❌
+return Container(child: Text('Loading'));
+
+// ✅
+return const Padding(padding: EdgeInsets.all(8), child: Text('Loading'));
+```
+
+`const` widget 在每次 build 时是**同一个实例**,Element 复用 + canUpdate 极快。一个屏幕里 100 个能加 `const` 而没加,build 时间能差几十倍。
+
+IDE 启用 `prefer_const_constructors` lint 自动提示。
+
+### 陷阱 3:rebuild 范围太大
+
+```dart
+// ❌ 整页重建只为更新一个数字
+class _PageState extends State<Page> {
+  int count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Counter')),
+      body: Column(children: [const HeavyChart(), Text('$count')]),
+      floatingActionButton: FAB(onTap: () => setState(() => count++)),
+    );
+  }
+}
+```
+
+每点 FAB,**整个 Scaffold + HeavyChart 都重建**。
+
+修法 1:把 count 抽到 Riverpod / ValueNotifier,只让 `Text` 订阅:
+
+```dart
+// ✅ 只重建 Text
+final count = ValueNotifier(0);
+ValueListenableBuilder<int>(
+  valueListenable: count,
+  builder: (_, v, __) => Text('$v'),
+);
+```
+
+修法 2:把"会变的"小 widget 拆出去,setState 只调它的 State。
+
+### 陷阱 4:动画 widget 没加 `RepaintBoundary`
+
+```dart
+// ❌ 心跳的 1 个 widget 让整屏每帧重画
+Stack(children: [
+  ListView(children: [/* 200 项 */]),
+  Pulse(child: NewMessageBadge()),
+]);
+
+// ✅
+Stack(children: [
+  ListView(children: [/* 200 项 */]),
+  RepaintBoundary(child: Pulse(child: NewMessageBadge())),
+]);
+```
+
+第 11 章详细讲过原理。Inspector 的 "Highlight Repaints" 一开就能看到。
+
+### 陷阱 5:大图未做尺寸约束
+
+```dart
+// ❌ 一张 4096×4096 的相机原图直接显示
+Image.network('https://example.com/big.jpg');
+
+// ✅ 服务端切图 / decode 时降采样
+Image.network(
+  'https://example.com/big.jpg',
+  cacheWidth: 200,                   // decode 时缩到这个像素宽
+  cacheHeight: 200,
+);
+```
+
+`cacheWidth` 让 ImageProvider 在解码时降采样——不仅省内存,也减少 GPU 上传量。
+
+Inspector 的 "Show oversized images" 一打开就标红。
+
+## 隔离 jank:卡在哪一帧?
+
+实际场景常见"页面切换时偶尔卡一帧":
+
+1. 打开 *Performance* 面板,**点 "Performance Overlay"** 把帧图叠到屏幕。
+2. 复现卡顿——超过红线的柱子(就是 jank 帧)立刻可见。
+3. 暂停录制,**点击对应柱子**展开 flame chart。
+4. 看是 UI 还是 Raster 时长超标:
+   - UI 高:看 build / layout 哪个最重。
+   - Raster 高:数 layer 是否过多 / 有没有 backdrop filter / 大图压缩格式。
+5. 在源码相应位置加 `RepaintBoundary` / `cacheWidth` / 提取 const / 拆 widget。
+6. **回到 step 1 复测**——确认数字下来了再算修完。
+
+## 性能优化方法论
+
+```text
+   1. 量(measure)     先 profile 模式跑一遍,定位真正的 jank 帧
+   2. 假设(hypothesize) 看 flame chart,提出"我猜是 X 慢"的假设
+   3. 修(fix)          只改一个东西
+   4. 复测(re-measure)  对照 step 1 的数据,确认改善
+   5. 提交(commit)     如果改了无效,回滚——别"反正改了就留着"
+```
+
+最常见的错误:**靠直觉优化**——"我把它包了 const,应该快了吧"。**没量过就不算优化**。
+
+## release 之前的检查清单
+
+- [ ] `flutter run --profile` 跑过所有主流程,Performance overlay 没有 jank。
+- [ ] *Inspector → Highlight Repaints* 关键页面没有"整屏闪"。
+- [ ] *Inspector → Show oversized images* 无标红。
+- [ ] *Network* 面板看主流程,无重复 / 无超大请求。
+- [ ] *Memory* 进出每个页面 10 次,堆没有持续增长。
+- [ ] App Size 面板:bundle 没有意外的大文件。
+- [ ] `showPerformanceOverlay: true` 已关。
+- [ ] `Logger` 在 release 已禁用 / 不输出敏感信息。
+
+## App Size:看包大小
+
+DevTools *App Size* 面板:
+
+- **Apk / Aab / Ipa 内部各文件占比**:常发现某个 asset 文件夹巨大。
+- **Code Size 详情**:每个 `package:` 占了多少。
+
+减包大小常见做法:
+
+- 删掉未用的 asset(`flutter_lints` 没法管这个,需要人工 + DevTools)。
+- 资源压缩(`webp` 替代 png、矢量 svg)。
+- 去掉 unused locales(`MaterialLocalizations` 默认带几十种)。
+- `--split-debug-info` 把 symbol 抽出去(release 必做,Crashlytics 上传 dSYM/mapping)。
+- `--obfuscate`(混淆,稍微缩小)。
+
+## 心智模型清单
+
+1. **测性能必须 `--profile`**;debug 模式数字不可信。
+2. **每帧预算 16.6ms(60fps)/ 8.3ms(120fps)**;UI 或 raster 任一超就 jank。
+3. **Inspector 的 Highlight Repaints 是最便宜的"哪里在重画"工具**——天天开着写代码。
+4. **`ListView.builder` 替代 `Column + SingleChildScrollView`**,有高度就给 `itemExtent`。
+5. **能加 `const` 就加**;`prefer_const_constructors` lint 必开。
+6. **rebuild 范围用 `ValueListenableBuilder` / Riverpod `select` / 拆小 widget** 缩到最小。
+7. **动画区域加 `RepaintBoundary`** 隔离重绘。
+8. **大图用 `cacheWidth` / `cacheHeight`** 解码降采样。
+9. **泄漏抓法**:进 → 出 → 进 → 出,堆 snapshot diff 看新增类。
+10. **`Leak Tracker` 开着开发**,widget / element 泄漏立刻被报。
+11. **优化方法论:量 → 假设 → 修 → 复测**;不复测的不算修。
+12. **release 前过 8 项 checklist**;别让 performance overlay 跟着上架。
+
+## 自查问题
+
+- 同一段代码 debug 模式跑 200ms,profile 模式跑 30ms,你应该信哪个?为什么?
+- UI thread 高 vs Raster thread 高,你各自该看 DevTools 哪个面板?对应修法各举一例。
+- 屏幕上有 10000 项的 `Column`(套在 `SingleChildScrollView` 里),会发生什么?改成什么?
+- `const` widget 比非 const 快在哪?用第 11 章 `canUpdate` 解释一下。
+- 一个心跳动画的红点放在长列表上方,你怎么用 DevTools 验证它有没有让全屏重绘?用什么 widget 修?
+- 一张 4MB 的网络图片显示成 100×100 头像,具体浪费了什么?给出 2 个具体维度。
+- 你怀疑某个页面退出后内存没释放,用 Memory 面板的标准抓法是什么?写出 4 步。
+- `addPostFrameCallback` 的回调为什么有时不触发? (提示:State 已 unmount)如何用 Logging 抓到?
+- 性能 overlay 的两条柱子分别是什么?横线代表什么?为什么 release 不能用?
+- 一个修改你"觉得"会更快,profile 之后没差别甚至变慢——你应该怎么做?为什么不能"觉得快了就留着"?
+- 上线前的 8 项 checklist 里,你最容易忘的是哪一条?为什么?
+
+下一章 [CI/CD 与发布](/flutter/ci-cd-deploy):性能调好了,该上架了。

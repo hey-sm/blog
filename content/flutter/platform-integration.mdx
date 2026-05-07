@@ -1,0 +1,572 @@
+---
+title: 平台集成
+description: MethodChannel/EventChannel/BasicMessageChannel、Pigeon 类型安全、PlatformView/Hybrid Composition、FFI/dart:ffi/ffigen、federated 插件、Web JS interop、Desktop
+---
+
+# 平台集成
+
+Flutter 99% 业务用 Dart 写就够。剩下的 1% —— 系统 API、原生 SDK、C/C++ 库、嵌入原生视图 —— 是这一章的范围。我们按"成本从低到高"排序:
+
+```text
+Platform Channel (MethodChannel)   ──→  调原生方法,字符串 + 简单类型
+Pigeon                              ──→  自动生成强类型 channel,主线推荐
+EventChannel                        ──→  原生持续推 stream
+PlatformView                        ──→  把原生 UI 嵌进 Flutter 树
+FFI (dart:ffi)                       ──→  直接调 C / C++ 库,无 channel 开销
+Federated Plugin                    ──→  上述能力打包成跨平台插件
+```
+
+## Platform Channel 三种
+
+### `MethodChannel`:同步语义、异步实现
+
+最常用,语义"调用一个方法,等一个返回值"。
+
+#### Dart 端
+
+```dart filename="lib/native/battery.dart"
+import 'package:flutter/services.dart';
+
+class Battery {
+  static const _channel = MethodChannel('com.example.app/battery');
+
+  Future<int> getLevel() async {
+    final level = await _channel.invokeMethod<int>('getBatteryLevel');
+    return level ?? -1;
+  }
+}
+```
+
+#### Android 端(Kotlin)
+
+```kotlin filename="android/app/src/main/kotlin/.../MainActivity.kt"
+package com.example.app
+
+import android.content.Context
+import android.os.BatteryManager
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : FlutterActivity() {
+    private val CHANNEL = "com.example.app/battery"
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+            .setMethodCallHandler { call, result ->
+                if (call.method == "getBatteryLevel") {
+                    val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+                    val level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                    result.success(level)
+                } else {
+                    result.notImplemented()
+                }
+            }
+    }
+}
+```
+
+#### iOS 端(Swift)
+
+```swift filename="ios/Runner/AppDelegate.swift"
+import UIKit
+import Flutter
+
+@UIApplicationMain
+@objc class AppDelegate: FlutterAppDelegate {
+  override func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+  ) -> Bool {
+    let controller = window?.rootViewController as! FlutterViewController
+    let channel = FlutterMethodChannel(
+      name: "com.example.app/battery",
+      binaryMessenger: controller.binaryMessenger)
+    channel.setMethodCallHandler { call, result in
+      if call.method == "getBatteryLevel" {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = Int(UIDevice.current.batteryLevel * 100)
+        result(level >= 0 ? level : FlutterError(code: "UNAVAILABLE", message: "Battery info unavailable", details: nil))
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    GeneratedPluginRegistrant.register(with: self)
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+}
+```
+
+### 类型映射
+
+Dart ↔ Native 的自动序列化只支持有限基本类型(`StandardMessageCodec`):
+
+| Dart | Android (Kotlin/Java) | iOS (Swift/Obj-C) |
+| ---- | ---- | ---- |
+| `null` | `null` | `nil` / `NSNull` |
+| `bool` | `Boolean` | `Bool` / `NSNumber` |
+| `int`(8 bit) | `Byte` | `Int8` / `UInt8` |
+| `int`(32 bit) | `Int` | `Int32` |
+| `int`(64 bit) | `Long` | `Int64` |
+| `double` | `Double` | `Double` |
+| `String` | `String` | `String` |
+| `Uint8List` 等 | `byte[]` 等 | `FlutterStandardTypedData` |
+| `List<...>` | `List` | `Array` |
+| `Map<...>` | `HashMap` | `Dictionary` |
+
+复杂自定义类型自己 `jsonEncode` 成 String 传——这是 Pigeon 要消除的痛。
+
+### 错误处理
+
+```dart
+try {
+  final level = await _channel.invokeMethod<int>('getBatteryLevel');
+} on PlatformException catch (e) {
+  // e.code, e.message, e.details
+}
+```
+
+## Pigeon:类型安全 channel(主线推荐)
+
+[Pigeon](https://pub.dev/packages/pigeon) 让你**用 Dart 描述接口**,自动生成 Dart + Kotlin/Swift 三端绑定。`MethodChannel` 上手简单,Pigeon 在生产里更稳——参数和返回类型在编译期就确定。
+
+```yaml filename="pubspec.yaml"
+dev_dependencies:
+  pigeon: ^22.0.0
+```
+
+```dart filename="pigeons/messages.dart"
+import 'package:pigeon/pigeon.dart';
+
+@ConfigurePigeon(PigeonOptions(
+  dartOut: 'lib/native/messages.g.dart',
+  kotlinOut: 'android/app/src/main/kotlin/com/example/app/Messages.g.kt',
+  kotlinOptions: KotlinOptions(package: 'com.example.app'),
+  swiftOut: 'ios/Runner/Messages.g.swift',
+))
+
+class BatteryInfo {
+  late int level;
+  late bool isCharging;
+}
+
+@HostApi()
+abstract class BatteryApi {
+  BatteryInfo getInfo();
+  @async
+  bool startMonitoring();
+}
+
+@FlutterApi()
+abstract class BatteryListener {
+  void onLevelChanged(int level);
+}
+```
+
+跑生成器:
+
+```bash
+dart run pigeon --input pigeons/messages.dart
+```
+
+会生成三份:`lib/native/messages.g.dart` / Kotlin / Swift 实现绑定。
+
+### Dart 端用法
+
+```dart
+final api = BatteryApi();
+final info = await api.getInfo();
+print('${info.level}% charging=${info.isCharging}');
+```
+
+### Android Host 实现
+
+```kotlin
+class BatteryHostImpl(private val context: Context) : BatteryApi {
+    override fun getInfo(): BatteryInfo {
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        return BatteryInfo().apply {
+            level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            isCharging = bm.isCharging
+        }
+    }
+
+    override fun startMonitoring(callback: (Result<Boolean>) -> Unit) {
+        // ...
+        callback(Result.success(true))
+    }
+}
+
+// MainActivity:
+BatteryApi.setUp(flutterEngine.dartExecutor.binaryMessenger, BatteryHostImpl(this))
+```
+
+要点:
+
+- 类型安全;改 `pigeon` 文件后,Dart / Kotlin / Swift 三端编译器都会强制更新调用点。
+- `@async` 标记的方法,Native 端是 callback 风格,Dart 端是 `Future`。
+- `@FlutterApi()` 反向:Native → Dart 调用(用于事件流的"推回")。
+
+> **新项目跨平台调用统一用 Pigeon**;只有"特别简单的一两个方法"才直接用 `MethodChannel`。
+
+## EventChannel:Native 主动推 Stream
+
+适合"传感器数据 / 系统事件"——Native 持续推送,Dart 用 Stream 监听。
+
+### Dart 端
+
+```dart filename="lib/native/sensor.dart"
+class Sensor {
+  static const _events = EventChannel('com.example.app/accelerometer');
+
+  Stream<List<double>> get accelerometer =>
+      _events.receiveBroadcastStream().cast<List<dynamic>>().map(
+            (e) => e.cast<double>(),
+          );
+}
+```
+
+### Android 端
+
+```kotlin
+class AccelerometerStreamHandler(private val sensorManager: SensorManager) : EventChannel.StreamHandler, SensorEventListener {
+    private var sink: EventChannel.EventSink? = null
+
+    override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+        sink = events
+        val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
+    }
+
+    override fun onCancel(arguments: Any?) {
+        sensorManager.unregisterListener(this)
+        sink = null
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        sink?.success(listOf(event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble()))
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+}
+
+// 注册:
+EventChannel(binaryMessenger, "com.example.app/accelerometer")
+    .setStreamHandler(AccelerometerStreamHandler(getSystemService(SENSOR_SERVICE) as SensorManager))
+```
+
+要点:
+
+- `onListen` 在 Dart 端 `listen()` 时触发,`onCancel` 在 Dart 端 cancel subscription 时触发——这俩对应**资源生命周期**,务必在 `onCancel` 里释放(传感器、定位、相机)。
+- 多个 Dart 订阅者用 `receiveBroadcastStream()`(broadcast),不可用 `receive...Stream` 复用。
+
+## BasicMessageChannel:双向异步消息
+
+`MethodChannel` 是单向 RPC,`BasicMessageChannel` 是**双向自由消息**——Dart / Native 谁都能发,谁都能收。
+
+```dart
+const channel = BasicMessageChannel<Map<String, dynamic>>(
+  'com.example.app/chat',
+  StandardMessageCodec(),
+);
+
+channel.setMessageHandler((message) async {
+  print('From native: $message');
+  return {'ack': true};                   // 回复
+});
+
+await channel.send({'hello': 'world'});
+```
+
+少见但需要时再看;实际场景多用 EventChannel(Native→Dart) + MethodChannel(Dart→Native)组合。
+
+## PlatformView:把原生 UI 嵌进 Flutter
+
+需要嵌入 Native UI(Google Maps、原生视频播放器、WebView):
+
+```dart filename="lib/widgets/native_map.dart"
+import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
+
+class NativeMap extends StatelessWidget {
+  const NativeMap({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return const AndroidView(
+        viewType: 'com.example.app/map',
+        creationParams: <String, dynamic>{},
+        creationParamsCodec: StandardMessageCodec(),
+      );
+    }
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return const UiKitView(
+        viewType: 'com.example.app/map',
+        creationParams: <String, dynamic>{},
+        creationParamsCodec: StandardMessageCodec(),
+      );
+    }
+    return const SizedBox();
+  }
+}
+```
+
+Native 端用 `PlatformViewFactory` 注册一个 `viewType`,返回真实 View。
+
+### Hybrid Composition vs Texture Layer Hybrid Composition vs Virtual Display
+
+iOS / Android 实现 PlatformView 的方式不同,有两套主要模式:
+
+| 模式 | 平台 | 原理 | 性能 |
+| ---- | ---- | ---- | ---- |
+| **Hybrid Composition** | Android | Native View 直接和 Flutter 视图共渲染,事件穿透 | 较好,推荐 |
+| **Texture Layer Hybrid Composition** | Android (Flutter 3.x 默认) | Native View 渲染到 texture,再合成进 Flutter | 最好 |
+| **Virtual Display**(老,弃用) | Android | Native View 在虚拟屏渲染,有键盘 / 触摸问题 | 中 |
+| **Hybrid Composition / Layer Hosting** | iOS | UIKit View 直接被 Flutter 合成 | 良好 |
+
+> 业务侧基本无感,SDK 一般给推荐配置;但"嵌入 PlatformView 之后性能下降"通常就是这一层在偷成本——上 DevTools 看 raster thread。
+
+### PlatformView 性能注意
+
+- **不要嵌很多个**——每个都是独立的合成层,几十上百个就会卡。
+- **滚动列表里嵌 PlatformView**:慎用。Android 上有"列表滚动 + PlatformView 不同步"的历史问题。
+- **能用 Flutter 实现的优先 Flutter 实现**——只在"Native 已有成熟方案 + 重写不划算"时才用 PlatformView。
+
+## FFI:`dart:ffi`(直接调 C/C++)
+
+适合:已有 C/C++ 库(图像处理、加密算法、音视频编解码),希望"零 channel 开销 + 同语言数据布局"调用。
+
+### 最小完整例
+
+C 库:
+
+```c filename="src/math.c"
+int add(int a, int b) { return a + b; }
+```
+
+```c filename="src/math.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+int add(int a, int b);
+#ifdef __cplusplus
+}
+#endif
+```
+
+Dart 端:
+
+```dart filename="lib/native/native_math.dart"
+import 'dart:ffi';
+import 'dart:io';
+
+typedef _AddNative = Int32 Function(Int32 a, Int32 b);
+typedef _AddDart   = int    Function(int a, int b);
+
+class NativeMath {
+  static final DynamicLibrary _lib = _open();
+
+  static DynamicLibrary _open() {
+    if (Platform.isAndroid) return DynamicLibrary.open('libmath.so');
+    if (Platform.isIOS)     return DynamicLibrary.process();      // 静态链接进 app
+    if (Platform.isWindows) return DynamicLibrary.open('math.dll');
+    if (Platform.isMacOS || Platform.isLinux) return DynamicLibrary.open('libmath.dylib');
+    throw 'Unsupported platform';
+  }
+
+  static final _AddDart add = _lib.lookupFunction<_AddNative, _AddDart>('add');
+}
+
+void main() => print(NativeMath.add(2, 3));    // 5
+```
+
+要点:
+
+- `typedef _AddNative` 是 **C 端签名**;`typedef _AddDart` 是 **Dart 端签名**(`Int32` ↔ `int`)。
+- `lookupFunction<>` 返回可直接调用的 Dart 函数。
+
+### 集成 C 源码到 Flutter 项目
+
+`flutter create --template=plugin_ffi --platforms=android,ios .` 会生成模板,包含:
+
+- `src/`:C 源码
+- `android/build.gradle.kts`:CMake 配置编 .so
+- `ios/<plugin>.podspec`:把 C 源直接编进 ipa
+
+### `ffigen`:从 .h 自动生成 Dart 绑定
+
+手写 typedef 只适合小型 lib;复杂库(`libsqlite` / `ffmpeg` / `tensorflow`)用 [ffigen](https://pub.dev/packages/ffigen):
+
+```yaml filename="ffigen.yaml"
+output: 'lib/generated_bindings.dart'
+headers:
+  entry-points: ['src/math.h']
+```
+
+```bash
+dart run ffigen
+```
+
+自动生成所有函数 / struct / typedef 的 Dart 绑定。
+
+### 内存管理
+
+Dart 是 GC,C 是手动——FFI 边界要小心:
+
+```dart
+import 'package:ffi/ffi.dart';
+
+final ptr = malloc<Int32>(10);     // 分配 10 个 Int32
+ptr[0] = 1; ptr[1] = 2;
+print(ptr[0] + ptr[1]);
+malloc.free(ptr);                  // ★ 必须 free,GC 不管 native heap
+```
+
+字符串:
+
+```dart
+final cstr = 'hello'.toNativeUtf8();   // 转成 char*
+nativeFn(cstr);
+malloc.free(cstr);
+```
+
+> **Dart 内存安全停在 FFI 边界**——一个内存错误就崩 native crash,而非 Dart exception。仔细测试。
+
+## Federated Plugin
+
+主流 Flutter 插件几乎都是 federated 结构——把"接口"和"各平台实现"拆成多个 package:
+
+```text
+my_plugin/                  ← 主包,定义对外 API
+├── my_plugin_platform_interface/      ← 平台接口(纯 Dart)
+├── my_plugin_android/                 ← Android 实现
+├── my_plugin_ios/                     ← iOS 实现
+├── my_plugin_macos/                   ← macOS 实现
+├── my_plugin_windows/                 ← Windows 实现
+├── my_plugin_linux/                   ← Linux 实现
+└── my_plugin_web/                     ← Web 实现
+```
+
+好处:
+
+- 用户只装主包,各平台实现按 `pubspec` 自动选。
+- 第三方可以**贡献新平台实现**而不动主仓(社区把官方插件接到 macOS / Windows 就靠这个)。
+- 单平台 bug 修复独立发版。
+
+写自己的小插件时,通常不需要 federated;直接 `flutter create --template=plugin --platforms=android,ios .` 单仓即可。规模上去再拆。
+
+## Web:JS Interop
+
+Flutter Web 要调浏览器原生 API(`localStorage` / `Geolocation` / 第三方 JS lib):
+
+```yaml
+dependencies:
+  web: ^1.0.0
+```
+
+```dart filename="lib/web/local_storage.dart"
+import 'package:web/web.dart' as web;
+
+void setItem(String k, String v) => web.window.localStorage.setItem(k, v);
+String? getItem(String k) => web.window.localStorage.getItem(k);
+```
+
+`package:web` 是 Dart 团队官方维护的浏览器 API 类型化绑定(替代旧的 `dart:html`,2024 起推荐用法)。
+
+调任意 JS 库:
+
+```dart
+import 'dart:js_interop';
+
+@JS('myJsLibrary.foo')
+external String foo(int x);
+
+void main() => print(foo(42));
+```
+
+`@JS()` + `external` 声明一个 JS 全局函数的 Dart 端"代理"。
+
+### Web only 代码隔离
+
+业务包含"只在 Web 运行"或"只在 Native 运行"的代码,直接 import `dart:html` / `dart:io` 会让另一端编译失败。用条件 import:
+
+```dart filename="lib/native/storage.dart"
+export 'storage_io.dart' if (dart.library.html) 'storage_html.dart';
+```
+
+`storage_io.dart` 用 `dart:io` 实现,`storage_html.dart` 用 `package:web` 实现。
+
+## Desktop(Windows / macOS / Linux)
+
+Flutter 3.x 三大桌面平台都已 stable。注意:
+
+- **窗口管理**:用 [`window_manager`](https://pub.dev/packages/window_manager)(大小、最小化、置顶等)。
+- **系统托盘**:用 [`tray_manager`](https://pub.dev/packages/tray_manager) 或自家 channel。
+- **MethodChannel**:三个平台都支持,Native 端写 C++(Windows / Linux)或 Swift / Obj-C(macOS)。
+- **菜单栏**:macOS 有原生菜单栏需求时用 `menubar` 或 [`bitsdojo_window`](https://pub.dev/packages/bitsdojo_window)。
+- **打包**:Windows MSIX(`msix` 包)、macOS notarization(用 `flutter build macos` + `xcrun notarytool`)、Linux deb / snap / flatpak / AppImage。
+
+### Native 平台代码:macOS Swift 例
+
+```swift filename="macos/Runner/MainFlutterWindow.swift"
+import Cocoa
+import FlutterMacOS
+
+class MainFlutterWindow: NSWindow {
+  override func awakeFromNib() {
+    let flutterViewController = FlutterViewController()
+    let channel = FlutterMethodChannel(
+      name: "com.example.app/system",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    channel.setMethodCallHandler { call, result in
+      // ...
+    }
+    self.contentViewController = flutterViewController
+    super.awakeFromNib()
+  }
+}
+```
+
+## 选择决策表
+
+```text
+   想做的事                                           ─→  推荐方案
+   ──────────────────────────────────────────────────────────────────────────
+   调一个 Native 方法,获取一些信息                  ─→  Pigeon(简单)/ MethodChannel(临时)
+   Native 持续推数据(传感器 / 蓝牙 / 推送)        ─→  EventChannel(或 Pigeon @FlutterApi)
+   嵌入 Google Maps / WebView / 原生视频           ─→  PlatformView (Android / UiKit View)
+   调已有 C / C++ 库                                ─→  FFI(+ ffigen)
+   想发布跨平台插件给其他人用                       ─→  Federated Plugin 结构
+   Web 上调 localStorage / Geolocation              ─→  package:web + @JS interop
+   Desktop 想管窗口 / 托盘 / 菜单                   ─→  window_manager / tray_manager(社区包)
+```
+
+## 心智模型清单
+
+1. **`MethodChannel` 易上手,但只支持基本类型**;复杂 schema 用 Pigeon。
+2. **Pigeon 让 Dart / Kotlin / Swift 三端类型同步演化**——主线推荐。
+3. **`EventChannel` 是 Native → Dart 的 stream**;`onListen` / `onCancel` 对应资源生命周期,必须正确释放。
+4. **PlatformView 性能贵**——每个都是独立合成层,数量 / 列表场景慎用。
+5. **FFI 是"零 channel 开销"调 C/C++**;ffigen 让大型库绑定可生成。
+6. **FFI 边界 GC 不管,native heap 必须 `malloc.free`**;字符串等也要释放。
+7. **复杂跨平台插件用 Federated 结构**;小插件单仓足够。
+8. **Web 用 `package:web` + `@JS` interop**;条件 import 隔离 Native vs Web 代码。
+9. **Desktop 三平台 stable**,但要靠社区包补足窗口 / 托盘等"系统外壳"。
+10. **永远先问"能不能用 Flutter 自己实现"**;调 Native 的成本是测试矩阵翻倍,选型保守。
+
+## 自查问题
+
+- 用 `MethodChannel` 实现一个"获取设备型号字符串"的接口,Dart + Android Kotlin + iOS Swift 三端代码各自给出。
+- `MethodChannel` 与 `Pigeon` 的核心差别在哪?如果你新接一个 SDK,默认选哪个?为什么?
+- `EventChannel` 的 `onListen` / `onCancel` 在什么时候触发?如果你忘了在 `onCancel` 里释放传感器订阅,会发生什么?
+- 在长列表里嵌 100 个 PlatformView,会有什么后果?有什么替代方案?
+- FFI 调用 C 函数时,为什么需要写两个 typedef(`_FooNative` / `_FooDart`)?
+- `malloc<Int32>(10)` 之后忘记 `malloc.free`,会发生什么?用什么工具能发现?
+- 你想用 [tflite_flutter](https://pub.dev/packages/tflite_flutter) 跑 TensorFlow Lite——它内部很可能用了 Dart 哪种平台集成方式?
+- Federated plugin 比单仓 plugin 强在哪?给一个"社区贡献新平台实现"的具体场景。
+- `dart:html` 与 `package:web` 的关系是什么?新代码该用哪个?
+- 一段业务代码同时要在 Web 和 Native 跑,但实现完全不同——条件 import 写法是什么?
+- 在 macOS 上想拦截系统返回菜单 / 让窗口变成无边框 / 加托盘图标,各自该用什么社区包?
+- 何时**不**应该接 Native?给两个具体场景,说明保持纯 Flutter 实现的理由。

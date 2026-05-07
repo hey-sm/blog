@@ -1,0 +1,826 @@
+---
+title: Firebase 与 BaaS
+description: flutterfire CLI、Auth(邮箱/Google/Apple/匿名/链接)、Firestore(查询/实时/事务/规则/离线)、Storage、FCM、Remote Config、Functions、Crashlytics、App Check
+---
+
+# Firebase 与 BaaS
+
+把"用户、数据、推送、统计、文件存储"全交给托管服务,你的 app 几乎不用维护后端——这就是 BaaS(Backend-as-a-Service)。Firebase 是其中市占率最高、Flutter 集成最完整的一家(Google 自家产品)。
+
+本章按真实项目使用频率组织:**Auth → Firestore → Storage → FCM → Remote Config → Functions → Crashlytics → App Check**,最后给出"Firebase vs 自建"的选型参考。
+
+## 何时选 Firebase
+
+| 场景 | 推荐 |
+| ---- | ---- |
+| 个人 / 小团队 / MVP 阶段 | ✅ Firebase 生态最快 |
+| 实时数据(协作、聊天、订单状态) | ✅ Firestore `.snapshots()` 几乎免开发量 |
+| 不想自己写鉴权(邮箱 / 社交登录 / 链接账号) | ✅ Firebase Auth |
+| 用户主要在中国大陆 | ⚠️ Firebase 服务在中国大陆受限,需自建或用阿里云 Lindorm / 腾讯 CloudBase |
+| 复杂业务规则、强 SQL 查询 | ❌ Firestore 不擅长 join / 复杂聚合 |
+| 后端要跑 ML / 复杂业务、规则数百行 | ❌ Cloud Functions 写复杂业务会乱,自建后端更顺 |
+| 已经有自家后端 | ⚠️ 只用 Firebase 子模块(Auth、FCM、Crashlytics)是常见做法 |
+
+> 多数实际项目走中间路线:**Auth + FCM + Crashlytics 用 Firebase,核心数据用自家后端**。Firebase 不是"全要 / 全不要"的二选一。
+
+## 接入流程
+
+### 1. 创建 Firebase 项目
+
+在 [console.firebase.google.com](https://console.firebase.google.com) 创建项目。
+
+### 2. 安装 flutterfire CLI
+
+```bash
+dart pub global activate flutterfire_cli
+```
+
+### 3. 配置项目
+
+```bash
+cd your_flutter_project
+flutterfire configure
+```
+
+CLI 会:
+
+- 让你选 Firebase 项目;
+- 让你选要支持的平台(Android / iOS / macOS / Web);
+- 自动生成 `lib/firebase_options.dart`(包含各平台的 API key、appId);
+- 自动写入 Android 的 `google-services.json` / iOS 的 `GoogleService-Info.plist`。
+
+### 4. 添加依赖与初始化
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  firebase_core: ^3.6.0
+```
+
+```dart filename="lib/main.dart"
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  runApp(const ProviderScope(child: MyApp()));
+}
+```
+
+各 Firebase 子模块用到时再单独装包(`firebase_auth` / `cloud_firestore` 等),不会因为只用一个而把 SDK 全打进去。
+
+## Firebase Auth
+
+### 装包
+
+```yaml
+dependencies:
+  firebase_auth: ^5.3.0
+```
+
+### Email + 密码
+
+```dart filename="lib/auth/auth_repo.dart"
+import 'package:firebase_auth/firebase_auth.dart';
+
+class AuthRepo {
+  final _auth = FirebaseAuth.instance;
+
+  Stream<User?> watchUser() => _auth.authStateChanges();
+  User? get current => _auth.currentUser;
+
+  Future<UserCredential> signUp(String email, String password) =>
+      _auth.createUserWithEmailAndPassword(email: email, password: password);
+
+  Future<UserCredential> signIn(String email, String password) =>
+      _auth.signInWithEmailAndPassword(email: email, password: password);
+
+  Future<void> sendVerification() => _auth.currentUser?.sendEmailVerification() ?? Future.value();
+
+  Future<void> sendPasswordReset(String email) => _auth.sendPasswordResetEmail(email: email);
+
+  Future<void> signOut() => _auth.signOut();
+}
+```
+
+`authStateChanges()` 是 Stream:登录、登出、token 刷新都会 emit。
+
+### 错误码处理
+
+```dart
+try {
+  await authRepo.signIn(email, password);
+} on FirebaseAuthException catch (e) {
+  final msg = switch (e.code) {
+    'user-not-found' => '账号不存在',
+    'wrong-password' => '密码错误',
+    'invalid-email'  => '邮箱格式错误',
+    'too-many-requests' => '请求过于频繁,请稍后再试',
+    _ => '登录失败 (${e.code})',
+  };
+  throw msg;
+}
+```
+
+> 完整错误码列表见 [`FirebaseAuthException`](https://firebase.google.com/docs/auth/admin/errors)。把它们集中映射到中文文案,UI 直接用。
+
+### 匿名登录
+
+```dart
+await _auth.signInAnonymously();
+// 之后产生的所有 Firestore 数据都归属这个匿名 uid
+```
+
+匿名用户在用户后续注册邮箱时,可以**链接账号**保留之前数据:
+
+```dart
+final credential = EmailAuthProvider.credential(email: email, password: pwd);
+await _auth.currentUser!.linkWithCredential(credential);
+// 同一个 uid 现在既是匿名又能用 email 登录
+```
+
+### Google Sign-In(GIS,2025+ 推荐写法)
+
+```yaml
+dependencies:
+  google_sign_in: ^7.0.0           # 7.x = 新 GIS API
+  firebase_auth: ^5.3.0
+```
+
+```dart filename="lib/auth/google_signin.dart"
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+Future<UserCredential> signInWithGoogle() async {
+  await GoogleSignIn.instance.initialize();        // 7.x 新 API,需要 init
+  final account = await GoogleSignIn.instance.authenticate();
+  final auth = await account.authentication;
+  final credential = GoogleAuthProvider.credential(idToken: auth.idToken);
+  return FirebaseAuth.instance.signInWithCredential(credential);
+}
+```
+
+> `google_sign_in` 7.x 切到 GIS API 后写法变化较大,旧资料里 `signIn()` / `accessToken` 的 API 已废弃,认准 `authenticate()` + `authentication.idToken`。
+
+### Apple Sign-In(iOS 必须有,App Store 政策)
+
+```yaml
+dependencies:
+  sign_in_with_apple: ^6.1.0
+```
+
+```dart filename="lib/auth/apple_signin.dart"
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:crypto/crypto.dart';
+import 'dart:convert';
+import 'dart:math';
+
+Future<UserCredential> signInWithApple() async {
+  final rawNonce = _generateNonce();
+  final nonce = sha256.convert(utf8.encode(rawNonce)).toString();
+  final apple = await SignInWithApple.getAppleIDCredential(
+    scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+    nonce: nonce,
+  );
+  final credential = OAuthProvider('apple.com').credential(
+    idToken: apple.identityToken,
+    rawNonce: rawNonce,
+  );
+  return FirebaseAuth.instance.signInWithCredential(credential);
+}
+
+String _generateNonce([int length = 32]) {
+  const charset = '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+  final r = Random.secure();
+  return List.generate(length, (_) => charset[r.nextInt(charset.length)]).join();
+}
+```
+
+> **App Store Review Guideline 4.8** 要求:**iOS app 提供任何第三方登录(Google / Facebook / WeChat),也必须同时提供 Apple Sign-In**,且要支持隐藏邮箱。这条审核必撞,提前实现。
+
+### 与 Riverpod 集成(承接第 13 章鉴权骨架)
+
+```dart filename="lib/auth/auth_provider.dart"
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'auth_provider.g.dart';
+
+@Riverpod(keepAlive: true)
+AuthRepo authRepo(AuthRepoRef ref) => AuthRepo();
+
+@Riverpod(keepAlive: true)
+Stream<User?> authState(AuthStateRef ref) => ref.read(authRepoProvider).watchUser();
+
+@riverpod
+class SignInController extends _$SignInController {
+  @override
+  AsyncValue<void> build() => const AsyncValue.data(null);
+
+  Future<void> signIn(String email, String password) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() => ref.read(authRepoProvider).signIn(email, password));
+  }
+}
+```
+
+把 go_router redirect 切到 Firebase 登录态:
+
+```dart
+@riverpod
+GoRouter router(RouterRef ref) {
+  final notifier = ValueNotifier<User?>(null);
+  ref.listen(authStateProvider, (_, next) => notifier.value = next.value);
+  ref.onDispose(notifier.dispose);
+
+  return GoRouter(
+    refreshListenable: notifier,
+    redirect: (context, state) {
+      final user = notifier.value;
+      final goingToLogin = state.matchedLocation == '/login';
+      if (user == null && !goingToLogin) return '/login';
+      if (user != null && goingToLogin)  return '/';
+      return null;
+    },
+    routes: [...],
+  );
+}
+```
+
+## Cloud Firestore
+
+NoSQL 文档数据库。两个核心概念:
+
+- **集合(collection)** :一组文档,如 `users`、`posts`。
+- **文档(document)**:一个 JSON 对象,有 ID;可包含子集合。
+
+```text
+users (collection)
+└── uid_42 (document)
+      ├── name: "Alice"
+      ├── createdAt: Timestamp
+      └── posts (sub-collection)
+            └── post_1 (document)
+                  ├── title: "Hello"
+                  └── content: "..."
+```
+
+### 装包
+
+```yaml
+dependencies:
+  cloud_firestore: ^5.4.0
+```
+
+### CRUD
+
+```dart filename="lib/data/post_repo.dart"
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class PostRepo {
+  final _db = FirebaseFirestore.instance;
+  CollectionReference<Post> get _col => _db
+      .collection('posts')
+      .withConverter<Post>(
+        fromFirestore: (snap, _) => Post.fromJson(snap.data()!..['id'] = snap.id),
+        toFirestore: (post, _) => post.toJson()..remove('id'),
+      );
+
+  Future<void> create(Post p) => _col.add(p);
+  Future<void> update(String id, Post p) => _col.doc(id).set(p);
+  Future<void> delete(String id) => _col.doc(id).delete();
+  Future<Post?> getById(String id) async => (await _col.doc(id).get()).data();
+}
+```
+
+要点:
+
+- `.withConverter` 让你直接读写 Dart 对象(配合 freezed 的 fromJson/toJson 完美)。
+- `add()` 自动生成 ID,`set(id, ...)` / `doc(id).set` 用指定 ID。
+
+### 查询
+
+```dart
+final list = await _db.collection('posts')
+  .where('authorId', isEqualTo: 'uid_42')
+  .where('status', isEqualTo: 'published')
+  .orderBy('createdAt', descending: true)
+  .limit(20)
+  .get();
+
+for (final doc in list.docs) {
+  print(doc.id);
+  print(doc.data());
+}
+```
+
+支持的 where 操作:`==` / `!=` / `>` / `>=` / `<` / `<=` / `in` / `not-in` / `array-contains` / `array-contains-any`。
+
+### 复合索引
+
+> Firestore 的**单字段索引**自动建,**多字段查询**(2 个 `where` + 一个 `orderBy`)需要手动建复合索引。
+
+第一次跑会在 console 报错,链接里直接点"Create index"即可。也可以提前在 `firestore.indexes.json` 写好版本控制。
+
+### 实时监听:`.snapshots()`
+
+```dart filename="lib/data/post_realtime.dart"
+Stream<List<Post>> watchPosts({int limit = 20}) {
+  return _db.collection('posts')
+    .orderBy('createdAt', descending: true)
+    .limit(limit)
+    .withConverter<Post>(
+      fromFirestore: (s, _) => Post.fromJson(s.data()!..['id'] = s.id),
+      toFirestore: (p, _) => p.toJson()..remove('id'),
+    )
+    .snapshots()
+    .map((snap) => snap.docs.map((d) => d.data()).toList());
+}
+```
+
+任何客户端写入数据,所有订阅这个查询的端**几乎实时**收到更新。这是 Firestore 的"主打"——做协作、聊天、看板时省掉一整层 WebSocket / SSE 工程。
+
+包成 Riverpod:
+
+```dart
+@riverpod
+Stream<List<Post>> watchPosts(WatchPostsRef ref) =>
+    ref.read(postRepoProvider).watchPosts();
+```
+
+### 分页:cursor
+
+```dart filename="lib/data/post_paged.dart"
+DocumentSnapshot? _last;
+
+Future<List<Post>> nextPage({int pageSize = 20}) async {
+  var q = _db.collection('posts').orderBy('createdAt', descending: true).limit(pageSize);
+  if (_last != null) q = q.startAfterDocument(_last!);
+  final snap = await q.get();
+  if (snap.docs.isNotEmpty) _last = snap.docs.last;
+  return snap.docs.map((d) => Post.fromJson(d.data())).toList();
+}
+```
+
+`startAfter` 用值游标,`startAfterDocument` 用 snapshot 游标(更稳)。
+
+### 事务
+
+并发安全地"读 → 算 → 写":
+
+```dart filename="lib/data/transfer.dart"
+Future<void> transfer(String fromId, String toId, int amount) async {
+  await _db.runTransaction<void>((txn) async {
+    final fromRef = _db.collection('accounts').doc(fromId);
+    final toRef   = _db.collection('accounts').doc(toId);
+
+    final from = await txn.get(fromRef);
+    final to   = await txn.get(toRef);
+
+    final fromBal = (from['balance'] as int) - amount;
+    if (fromBal < 0) throw 'insufficient funds';
+    final toBal   = (to['balance'] as int) + amount;
+
+    txn.update(fromRef, {'balance': fromBal});
+    txn.update(toRef,   {'balance': toBal});
+  });
+}
+```
+
+要点:
+
+- transaction 体可能**被 Firestore 自动重试多次**(冲突时),**回调内不能有 side-effect**(不要发推送、不要写本地)。
+- 一次 transaction 最多读 500 个文档。
+
+### 批量写
+
+不需要"先读再算",纯一次性多写:
+
+```dart
+final batch = _db.batch();
+batch.set(_db.collection('posts').doc(), {'title': 'A'});
+batch.set(_db.collection('posts').doc(), {'title': 'B'});
+batch.delete(_db.collection('posts').doc('old_id'));
+await batch.commit();
+```
+
+最多 500 条操作。
+
+### 离线缓存
+
+Firestore SDK **默认开启**本地持久化(Android / iOS),网络断也能查询;恢复后自动同步。
+
+```dart
+FirebaseFirestore.instance.settings = const Settings(
+  persistenceEnabled: true,            // Android/iOS 默认 true
+  cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
+);
+```
+
+离线写入会进队列,联网时按顺序提交;UI 会先看到"乐观更新"。
+
+### 安全规则(rules)
+
+**所有客户端访问的鉴权必须写在规则里**——客户端代码不可信。
+
+```javascript filename="firestore.rules"
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth.uid == userId;
+    }
+
+    match /posts/{postId} {
+      allow read: if true;
+      allow create: if request.auth != null
+                    && request.resource.data.authorId == request.auth.uid;
+      allow update, delete: if request.auth != null
+                            && resource.data.authorId == request.auth.uid;
+    }
+  }
+}
+```
+
+要点:
+
+- `request.auth.uid` = 当前登录用户。
+- `resource.data` = 现存文档,`request.resource.data` = 即将写入的数据。
+- 默认 `allow read, write: if false;`——**没规则就是全部拒绝**。
+- 写规则后跑 [Rules Playground](https://firebase.google.com/docs/firestore/security/test-rules-emulator) 模拟测试。
+
+部署:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+### 数据建模:扁平 vs 嵌套
+
+Firestore 不擅长 join。设计时常见取舍:
+
+#### 选嵌套(子集合):"评论永远跟着文章"
+
+```text
+posts/{postId}/comments/{commentId}
+```
+
+- 优点:权限规则简单,父删子级联清理(用 Cloud Function)。
+- 缺点:跨 post 查"用户的所有评论"困难。
+
+#### 选扁平(顶级集合):"评论需要跨文章查询"
+
+```text
+comments/{commentId}: { postId, authorId, body, createdAt }
+posts/{postId}: { ..., commentCount }
+```
+
+- 优点:可按 `authorId` 筛选,可全局排序。
+- 缺点:需要在 post 上**冗余 commentCount**(用 Function 维护),否则查文章列表还要再查每个的评论数。
+
+**经验法则**:能扁平就扁平,Firestore 的查询更适合扁平结构。嵌套留给"无跨父查询需求 + 强生命周期绑定"的场景。
+
+## Cloud Storage
+
+存图片、视频、PDF、其他二进制。
+
+```yaml
+dependencies:
+  firebase_storage: ^12.3.0
+```
+
+```dart filename="lib/data/storage_repo.dart"
+import 'dart:io';
+import 'package:firebase_storage/firebase_storage.dart';
+
+class StorageRepo {
+  final _storage = FirebaseStorage.instance;
+
+  Future<String> uploadAvatar(String uid, File file) async {
+    final ref = _storage.ref().child('avatars/$uid.jpg');
+    final task = ref.putFile(file, SettableMetadata(contentType: 'image/jpeg'));
+
+    task.snapshotEvents.listen((s) {
+      final pct = s.totalBytes <= 0 ? 0 : (s.bytesTransferred / s.totalBytes * 100).toStringAsFixed(1);
+      debugPrint('upload $pct%');
+    });
+
+    await task;
+    return ref.getDownloadURL();
+  }
+
+  Future<File> download(String storagePath, File dest) async {
+    await _storage.ref(storagePath).writeToFile(dest);
+    return dest;
+  }
+
+  Future<void> delete(String storagePath) => _storage.ref(storagePath).delete();
+}
+```
+
+Storage 也有自己的安全规则(`storage.rules`),独立于 Firestore 规则:
+
+```javascript filename="storage.rules"
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /avatars/{uid} {
+      allow read: if true;
+      allow write: if request.auth.uid == uid
+                   && request.resource.size < 2 * 1024 * 1024
+                   && request.resource.contentType.matches('image/.*');
+    }
+  }
+}
+```
+
+## FCM(Firebase Cloud Messaging):推送
+
+```yaml
+dependencies:
+  firebase_messaging: ^15.1.0
+  flutter_local_notifications: ^17.2.0    # 前台展示通知用
+```
+
+### iOS 配置
+
+- 必须在 Apple Developer 后台开启 **Push Notifications** capability。
+- 上传 **APNs Key** 到 Firebase Console → Project Settings → Cloud Messaging → Apple app configuration。
+
+### Android 配置
+
+- `google-services.json` 已包含 sender ID,无需额外配置。
+- Android 13+ 需要请求 `POST_NOTIFICATIONS` 权限。
+
+### 初始化与拿 token
+
+```dart filename="lib/notifications/fcm.dart"
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+class FcmService {
+  final _fcm = FirebaseMessaging.instance;
+  final _local = FlutterLocalNotificationsPlugin();
+
+  Future<void> init() async {
+    // 权限
+    await _fcm.requestPermission(alert: true, badge: true, sound: true);
+
+    // token(发到自家后端关联到 user)
+    final token = await _fcm.getToken();
+    debugPrint('FCM token: $token');
+    _fcm.onTokenRefresh.listen((t) => _registerToken(t));
+
+    // 前台收到推送时自己展示(系统不会自动显示)
+    FirebaseMessaging.onMessage.listen(_onForeground);
+
+    // 用户点击通知打开 app(从后台)
+    FirebaseMessaging.onMessageOpenedApp.listen(_onTap);
+
+    // 用户点击通知打开 app(从冷启动)
+    final initial = await _fcm.getInitialMessage();
+    if (initial != null) _onTap(initial);
+
+    // 后台 / 终止状态收到推送(在独立 isolate 跑,函数必须是顶层 / static)
+    FirebaseMessaging.onBackgroundMessage(_onBackground);
+  }
+
+  void _onForeground(RemoteMessage msg) {
+    _local.show(
+      msg.hashCode,
+      msg.notification?.title,
+      msg.notification?.body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails('default', 'Default'),
+        iOS: DarwinNotificationDetails(),
+      ),
+    );
+  }
+
+  void _onTap(RemoteMessage msg) {
+    final route = msg.data['route'] as String?;
+    if (route != null) goRouter.go(route);          // 跳转到深链
+  }
+
+  Future<void> _registerToken(String token) async {/* POST 到自家后端 */}
+}
+
+@pragma('vm:entry-point')
+Future<void> _onBackground(RemoteMessage msg) async {
+  // 这里不能用 Riverpod,只能用纯 dart
+  await Firebase.initializeApp();
+  // 处理静默推送、更新本地数据库等
+}
+```
+
+### 三种状态对应的回调
+
+| App 状态 | 回调 |
+| -------- | ---- |
+| 前台运行 | `onMessage` —— **系统不会自动显示通知**,你必须用 local_notifications 自己显示 |
+| 后台运行 | `onBackgroundMessage`(独立 isolate) + 系统自动显示通知 |
+| 终止 | `onBackgroundMessage` + 系统自动显示通知 |
+| 用户点通知打开 | `onMessageOpenedApp`(后台启)/ `getInitialMessage`(冷启) |
+
+### Topic
+
+订阅一个"广播频道",所有订阅者收到同一条推送(适合通知 / 行情):
+
+```dart
+await FirebaseMessaging.instance.subscribeToTopic('news-tech');
+await FirebaseMessaging.instance.unsubscribeFromTopic('news-tech');
+```
+
+服务端发送时指定 `topic: "news-tech"` 即可,无需收集每个 token。
+
+## Remote Config:云端开关
+
+```yaml
+dependencies:
+  firebase_remote_config: ^5.1.0
+```
+
+```dart filename="lib/config/remote_config.dart"
+import 'package:firebase_remote_config/firebase_remote_config.dart';
+
+class RemoteConfigService {
+  final _rc = FirebaseRemoteConfig.instance;
+
+  Future<void> init() async {
+    await _rc.setConfigSettings(RemoteConfigSettings(
+      fetchTimeout: const Duration(seconds: 10),
+      minimumFetchInterval: const Duration(hours: 1),    // 至多每 1h 一次拉取
+    ));
+    await _rc.setDefaults(const {
+      'enable_new_home': false,
+      'banner_text': '',
+      'paywall_variant': 'A',
+    });
+    await _rc.fetchAndActivate();
+  }
+
+  bool get enableNewHome => _rc.getBool('enable_new_home');
+  String get bannerText => _rc.getString('banner_text');
+  String get paywallVariant => _rc.getString('paywall_variant');
+}
+```
+
+用法:
+
+- **新功能灰度发布**:`enable_new_home` 默认 false,console 里改 true 给 5% 用户。
+- **A/B 测试**:`paywall_variant` 切换不同价格 / 文案。
+- **紧急关闭**:线上某接口出 bug,临时把 feature flag 关掉,**不需要发版**。
+
+注意:`fetchAndActivate` 是异步的,启动时先用 `setDefaults` 给个保底值,免得首屏取到 null。
+
+## Cloud Functions(Callable)
+
+需要"客户端不可信的逻辑"(发送邮件、调用第三方 API、跨集合的复杂事务):
+
+```javascript filename="functions/src/index.ts (服务端)"
+import { onCall, HttpsError } from 'firebase-functions/v2/https';
+
+export const sendInviteEmail = onCall<{ email: string }>(async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'must be signed in');
+  await mail.send({ to: request.data.email, subject: 'Invite!', body: '...' });
+  return { ok: true };
+});
+```
+
+客户端调用:
+
+```yaml
+dependencies:
+  cloud_functions: ^5.1.0
+```
+
+```dart
+import 'package:cloud_functions/cloud_functions.dart';
+
+final result = await FirebaseFunctions.instance
+  .httpsCallable('sendInviteEmail')
+  .call({'email': 'a@example.com'});
+final ok = (result.data as Map)['ok'] == true;
+```
+
+Callable 自动带上当前用户的 ID token,服务端用 `request.auth` 直接验证。
+
+## Crashlytics
+
+```yaml
+dependencies:
+  firebase_crashlytics: ^4.1.0
+```
+
+```dart filename="lib/main.dart"
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  FlutterError.onError = FirebaseCrashlytics.instance.recordFlutterFatalError;
+  PlatformDispatcher.instance.onError = (error, stack) {
+    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    return true;
+  };
+
+  runApp(const ProviderScope(child: MyApp()));
+}
+```
+
+手动记录非致命错误:
+
+```dart
+try { ... }
+catch (e, st) {
+  await FirebaseCrashlytics.instance.recordError(e, st, reason: 'failed to load profile');
+}
+```
+
+补充上下文:
+
+```dart
+await FirebaseCrashlytics.instance.setUserIdentifier(uid);
+await FirebaseCrashlytics.instance.setCustomKey('app_section', 'checkout');
+await FirebaseCrashlytics.instance.log('user tapped pay button');
+```
+
+> Debug 模式默认**不**上传(避免开发期噪音)。要在本地调试上传:`await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);`
+
+## App Check:防止滥用
+
+防止"非自家 app 直接调用 Firebase 接口耗你的额度"。
+
+```yaml
+dependencies:
+  firebase_app_check: ^0.3.1
+```
+
+```dart
+import 'package:firebase_app_check/firebase_app_check.dart';
+
+await FirebaseAppCheck.instance.activate(
+  androidProvider: AndroidProvider.playIntegrity,             // Play Integrity API
+  appleProvider:   AppleProvider.appAttest,                   // iOS App Attest
+);
+```
+
+启用后,Firebase 后端验证每个请求都来自"真实安装、未被篡改的 app"。**Auth / Firestore / Functions / Storage 都支持**。
+
+> debug 阶段会用 debug provider(在 console 注册 debug token);生产用 Play Integrity / App Attest 真实校验。
+
+## 选型:Firebase vs 自建
+
+| 维度 | Firebase | 自建(Node + Postgres + S3 等) |
+| ---- | -------- | -------------------------- |
+| 启动速度 | 30 分钟接入 | 1-2 周搭基础 |
+| 成本(MAU 1k 以内) | 多在免费额度内 | VPS / 云服务最低成本 |
+| 成本(MAU 100k 以上) | 可能比自建贵 5-10 倍 | 可控 |
+| 实时数据 | 内置 | 自己写 WebSocket / pub-sub |
+| 复杂查询 | 弱 | 强(SQL) |
+| Vendor lock-in | 高 | 无 |
+| 中国大陆可用 | 受限 | 灵活选区 |
+| 团队所需技能 | 1 人前端就能上线 | 至少懂运维/后端 |
+
+**判定问题**:
+
+1. **预期用户规模能在百万 DAU 内吗?** 是 → Firebase 性价比高;否 → 早做自建准备。
+2. **业务是不是高度实时/协作?** 是 → Firestore 优势明显。
+3. **业务规则会快速演化吗?** 是 → 自建后端更灵活,Functions 写复杂业务会乱。
+4. **是否要做中国大陆市场?** 是 → 至少 Firestore / FCM 不能用,要双栈。
+
+## 心智模型清单
+
+1. **flutterfire CLI 一键配置**——别手动复制粘贴 API key。
+2. **Auth 的 `authStateChanges()` 是 Stream**,适合直接桥到 Riverpod / go_router。
+3. **iOS 提供任何第三方登录,必须同时提供 Apple Sign-In**(App Store 4.8)。
+4. **Firestore = NoSQL 文档,不擅长 join**;能扁平化就扁平化。
+5. **复合查询要建索引**——console 报错链接里点一下就建。
+6. **`.snapshots()` 让任何查询响应式化**;离线缓存默认开,网断也能查。
+7. **Cloud Functions transaction 体不能有 side-effect**——可能被自动重试。
+8. **安全规则是客户端访问的唯一鉴权防线**;别信任客户端代码。
+9. **FCM 三种状态(前台/后台/终止)要分别处理**;前台需要自己用 local_notifications 显示。
+10. **Remote Config 是免发版灰度的杀器**;`fetchAndActivate` 异步,先 `setDefaults` 兜底。
+11. **Crashlytics 接 `FlutterError.onError` + `PlatformDispatcher.onError`** 一次性接管所有错误。
+12. **App Check 防止非自家 app 滥用配额**;生产环境必启。
+13. **Firebase 不是非此即彼**;实战常见 Auth + FCM + Crashlytics 用 Firebase,核心数据自建。
+
+## 自查问题
+
+- 用 flutterfire CLI 接入 Firebase 比手动复制 GoogleService-Info.plist 好在哪?
+- `authStateChanges()` 是 Stream 还是 Future?它在什么时候 emit?
+- 用户先匿名登录创建了一些数据,后来想注册邮箱,既保留 uid 又能用密码登录——给出完整代码。
+- iOS 上的 Apple Sign-In 为什么必须传 `nonce`?如果不传会发生什么?
+- Firestore 的 `.snapshots()` 与 dio 轮询 `/posts` 比,优势是什么?给出 3 条。
+- 写一个 Firestore 安全规则:用户只能读公开 post,但只能修改自己创建的 post。
+- 跨集合的"评论 → 文章"关系,如何决定建子集合还是顶级集合?给出两种场景的不同选择。
+- 一个 transaction 在 Firestore 内部可能被重试,你在 transaction 体里发了 push 通知会发生什么?
+- FCM 前台收到通知,系统会自动显示吗?如果不会,补什么?
+- Remote Config 的 `minimumFetchInterval` 默认是多少?为什么不要设得太短?
+- App Check 启用后,debug 阶段如何不被拦?
+- 一个 100 万 MAU 的 IM app,用 Firestore 的成本估算策略是什么?何时考虑自建?
+
+下一章 [表单与校验](/flutter/forms):走完数据栈,回到 UI 层。

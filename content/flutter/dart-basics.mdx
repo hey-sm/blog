@@ -1,0 +1,1003 @@
+---
+title: Dart 基础
+description: Dart 语言入门——变量、类型、null safety、运算符、控制流、函数、类与构造函数
+---
+
+# Dart 基础
+
+本章把 Dart 的语法地基一次铺平。Dart 是 Flutter 的唯一语言，**不掌握 Dart 等于不会用 Flutter**——后续每一章的代码都默认你能流畅读写下面的语法。
+
+阅读节奏建议：**先通读一遍建立全景，再回头逐节练手**。每节末尾都有"陷阱"小节，新手 90% 的踩坑都集中在那里。
+
+## Dart 是一门什么样的语言
+
+读语法之前先建立印象，便于后面少走弯路：
+
+- **强类型 + 类型推断**：每个变量都有静态类型，但你大多数时候用 `var` / `final` 让编译器推；
+- **面向对象 + 一切是对象**：`int`、`bool`、函数、`null`，全是对象，全继承自 `Object`（`Null` 类型例外，与 `Object` 平级）；
+- **null safety 是默认开启的**：变量默认**不能为 null**，要为 null 必须类型后加 `?`；
+- **AOT + JIT 双模式**：开发时 JIT 编译，支持 **Hot Reload**（毫秒级看到改动）；发布时 AOT 编译为机器码，启动快、运行稳；
+- **单线程事件循环 + Isolate**：与 JavaScript 类似的异步模型，多核并行靠 Isolate（详见 [Dart 异步与并发](/flutter/dart-async)）；
+- **没有 `public` / `private` 关键字**：用下划线 `_` 开头表示**库级私有**，其他都视作公开。
+
+> Dart 3.x 是当前的稳定主线。本章默认 Dart 3，凡是 Dart 3 才有的语法（如 records、patterns、class modifiers）会显式标注。
+
+## 程序入口与最小示例
+
+一个最小 Dart 程序：
+
+```dart filename="bin/hello.dart"
+void main() {
+  print('Hello, Dart!');
+}
+```
+
+要点：
+
+- `main` 是顶层函数，是程序入口。返回类型 `void` 表示不返回值。
+- `print` 是 `dart:core`（自动导入）里的顶层函数，把字符串写到标准输出。
+- 语句以 `;` 结尾。**漏分号是 Dart 最常见的低级错误**——它不像 JavaScript 那样能自动插入。
+
+如果 `main` 接收命令行参数：
+
+```dart
+void main(List<String> args) {
+  print('Hi, ${args.firstOrNull ?? "stranger"}');
+}
+```
+
+`List<String>` 表示"字符串的列表"。`?? ` 是空合并运算符，`firstOrNull` 在列表为空时返回 `null`。这两个我们后面会单独讲。
+
+## 变量与作用域
+
+### `var` / `final` / `const`
+
+Dart 有三种变量声明，决定**变量本身**与**它指向的值**能否变化：
+
+```dart
+var n = 1;         // 类型推断为 int，变量可重新赋值
+n = 2;             // OK
+// n = 'a';        // ✗ 类型已锁死为 int，不能再赋字符串
+
+int m = 1;         // 显式标注类型
+m = 2;             // OK
+
+final x = 1;       // 类型推断为 int，变量只能赋值一次
+// x = 2;          // ✗ 编译错
+
+const y = 1;       // 编译期常量，必须能在编译期确定
+const z = DateTime.now();   // ✗ DateTime.now() 不是编译期常量
+```
+
+记忆口诀：
+
+| 关键字 | 类型 | 能否重新赋值 | 何时能确定值 | 典型用法 |
+| ------ | ---- | ------------ | ------------ | -------- |
+| `var` | 推断 | 能 | 运行时 | 局部计数器、累加变量 |
+| `final` | 推断 | 不能 | 运行时 | 大多数业务字段 |
+| `const` | 推断 | 不能 | **编译时** | widget 字面量、配置常量 |
+
+在 Flutter 中，**优先用 `final`**：状态字段、构造参数、回调引用，几乎都该是 `final`。`const` 用在所有"参数全是字面量"的 widget 上：
+
+```dart
+const Text('Hello')        // 编译期常量 widget，多次构建会被复用同一对象（性能关键）
+const SizedBox(height: 16) // 同上
+```
+
+详细的 `const` 性能含义见 [渲染机制](/flutter/rendering)。
+
+### `final` vs `const` 的微妙差异
+
+`final` 锁的是**变量绑定**，但**对象内部**可能仍然可变：
+
+```dart
+final list = [1, 2, 3];
+list.add(4);          // ✓ list 的 add 方法内部修改了它的元素，没改变量绑定
+// list = [5, 6];     // ✗ 不能重新绑定
+```
+
+`const` 不仅锁绑定，也锁**对象本身的所有字段**——这才是真正的"常量"：
+
+```dart
+const list = [1, 2, 3];
+// list.add(4);       // ✗ const 列表本身不可变（运行时抛 UnsupportedError）
+```
+
+陷阱：
+
+```dart
+final a = const [1, 2];   // a 不可重绑，且 [1,2] 本身是 const 不可变
+final b = [1, 2];          // b 不可重绑，但 [1,2] 是普通可变列表，b.add(3) 合法
+```
+
+### `late`：声明时不赋值，使用时必须已赋值
+
+```dart
+late String name;          // 暂不赋值
+// print(name);            // ✗ 运行时抛 LateInitializationError
+name = 'Alice';
+print(name);               // OK
+```
+
+适用场景：
+
+1. **依赖运行时才能拿到的值**（例如构造函数参数、`initState` 里取的值）；
+2. **延迟初始化优化**——`late final` 配合赋值表达式，第一次访问才计算：
+
+```dart
+late final answer = expensiveCompute();   // 第一次读 answer 时才执行 expensiveCompute
+```
+
+### 顶层 vs 局部
+
+Dart 允许在文件顶层（不在任何类里）声明变量与函数：
+
+```dart filename="lib/constants.dart"
+const apiBase = 'https://api.example.com';
+String greet(String n) => 'Hello, $n';
+```
+
+任何 import 这个文件的代码都可以直接用 `apiBase` / `greet`。一切都是公开的，除非以下划线开头：
+
+```dart
+const _secretKey = '...';   // 只有同文件能访问
+```
+
+> Dart 的"私有"边界是**文件**（更准确地说是"库"，单文件就是一个库），不是类——这与 Java/C# 不同，后面 [Dart 类系统](/flutter/dart-oop) 会展开。
+
+## 内置类型
+
+Dart 的核心类型分四类：**数字、字符串、布尔、集合**。集合在 [Dart 集合与函数式](/flutter/dart-functional) 单独细讲，本节只过最小子集。
+
+### 数字：`int` / `double` / `num`
+
+```dart
+int a = 1;
+double b = 1.5;
+num c = 1;     // num 是 int 与 double 的共同父类，按需选用
+c = 1.5;       // OK，num 可以装下两者
+```
+
+注意：
+
+- **没有 `float`**——精度只有 `double`（64-bit IEEE 754）；
+- 整数除法用 `~/`，普通 `/` 总是返回 `double`：
+
+```dart
+print(7 / 2);    // 3.5      double
+print(7 ~/ 2);   // 3        int
+print(7 % 2);    // 1        余数
+```
+
+- 在 **Web 平台**（编译到 JS）上，所有数字都是 JS 的 `number`，`int` 与 `double` 在运行时不可区分。代码里不要依赖 `is int` 在 Web 上的精确语义。
+- 字面量与转换：
+
+```dart
+int hex = 0xFF;             // 255
+double d = 1.5e3;           // 1500.0
+int parsed = int.parse('42');
+double dParsed = double.parse('3.14');
+int? safeParse = int.tryParse('abc');   // 返回 null 而不是抛异常
+```
+
+### 字符串：`String`
+
+```dart
+String s1 = 'single';
+String s2 = "double";       // 两种引号等价
+String s3 = 'it\'s ok';                 // 转义引号
+String s4 = '换行：\nTab：\t';          // 控制字符
+// Unicode 转义形如 \uXXXX（4 位 16 进制）或 \u{...}（任意位 16 进制码点）
+
+String multi = '''
+多行
+字符串
+''';
+
+String raw = r'C:\path\not\escaped';   // 原始字符串：r 前缀，\ 不转义
+```
+
+字符串拼接有三种方式，**优先用插值**：
+
+```dart
+const name = 'Alice';
+const age = 30;
+
+// ✗ 啰嗦
+'Hello, ' + name + '! You are ' + age.toString();
+
+// ✓ 插值（${} 内可写任意表达式，简单变量可省略花括号）
+'Hello, $name! You are $age';
+'Hello, ${name.toUpperCase()}!';
+
+// 多个相邻字符串字面量自动拼接
+const long = 'first part '
+             'second part';
+```
+
+字符串本质是 UTF-16 编码，`s.length` 返回的是**代码单元数**而非"字符数"。处理 emoji / 复合字符要用 `characters` 包：
+
+```dart
+'😀'.length              // 2（一个 emoji 占两个代码单元）
+'😀'.characters.length   // 1（来自 characters 包）
+```
+
+### 布尔：`bool`
+
+只有 `true` / `false` 两个值。**没有"真值"概念**——非空字符串、非零数字都不能直接当布尔用：
+
+```dart
+String s = 'hi';
+// if (s) { ... }        // ✗ 编译错：String 不是 bool
+if (s.isNotEmpty) { }    // ✓
+```
+
+### 集合速览：`List` / `Set` / `Map`
+
+只在这里建立印象，详细 API 留到 [Dart 集合与函数式](/flutter/dart-functional)：
+
+```dart
+List<int> list = [1, 2, 3];
+Set<int> set = {1, 2, 3};               // 注意空 {} 是 Map 不是 Set，空 Set 用 <int>{}
+Map<String, int> map = {'a': 1, 'b': 2};
+
+list.add(4);
+set.add(4);
+map['c'] = 3;
+```
+
+集合也支持 `const` 与展开：
+
+```dart
+const colors = ['red', 'green', 'blue'];
+const more = ['black', ...colors];      // spread
+```
+
+### 特殊类型：`dynamic` / `Object` / `Object?` / `Never`
+
+| 类型 | 含义 | 能否为 null | 何时用 |
+| ---- | ---- | ----------- | ------ |
+| `dynamic` | 关闭类型检查，任意类型任意操作 | 能 | **几乎不要用**，临时调试或解析 JSON |
+| `Object` | 任意对象的非空父类 | 不能 | 接收"任何东西但不能是 null"时 |
+| `Object?` | 任意对象 + null | 能 | 接收"真的什么都行"时 |
+| `Never` | 永不返回 | — | 抛异常或死循环的函数返回类型 |
+
+```dart
+dynamic d = 1;
+d = 'a';            // OK
+d.foo();            // 编译期不报错，运行时抛 NoSuchMethodError
+
+Object o = 1;
+// o.foo();         // ✗ 编译期就报错，更安全
+
+Never crash() => throw Exception('boom');
+```
+
+**新手最常见错误**：忘记 null safety 拿 `dynamic` 当万金油。`dynamic` 等于关闭了类型系统，问题会延后到运行时，建议永远先尝试用具体类型。
+
+## Null Safety
+
+Dart 2.12 引入、3.0 强制开启的 null safety 是 Dart 最重要的语言特性之一。核心一句话：
+
+> **类型默认不能为 null。要让某个变量能存 null，必须把类型写成 `T?`。**
+
+### 可空类型 `T?`
+
+```dart
+String name = 'Alice';
+// name = null;            // ✗ 类型 String 不能为 null
+
+String? maybeName;          // 默认值是 null
+maybeName = 'Bob';
+maybeName = null;           // OK
+```
+
+### `?.` / `??` / `??=`：常用空操作符
+
+```dart
+String? s;
+
+// ?. 条件成员访问：s 为 null 时整个表达式为 null，不抛异常
+print(s?.length);          // null
+
+// ?? 空合并：左边为 null 时取右边
+print(s ?? 'default');     // 'default'
+
+// ??= 空合并赋值：左边为 null 时才赋
+s ??= 'fallback';
+print(s);                  // 'fallback'
+```
+
+### 流敏感的非空提升（type promotion）
+
+编译器会跟踪流程，如果某个分支已经排除了 null，后面就把它视为非空：
+
+```dart
+String? maybe;
+
+if (maybe != null) {
+  // 此分支里 maybe 自动被提升为 String，可以直接调方法
+  print(maybe.length);     // OK，无需 maybe!.length
+}
+```
+
+但提升有局限：**对类的字段、`final` 顶层变量、跨函数边界都不一定能提升**。这种情况要么用本地变量"固化"一下，要么用 `!`。
+
+```dart
+class Foo {
+  String? name;
+
+  void show() {
+    if (name != null) {
+      // 字段在这里**不会被提升**——因为另一个线程/方法可能改它
+      // print(name.length);   // ✗
+      print(name!.length);     // ✓ 用 ! 强制断言
+      // 或：
+      final n = name;          // 固化为本地 final
+      if (n != null) print(n.length);   // OK
+    }
+  }
+}
+```
+
+### `!`：null 断言运算符
+
+`expr!` 表示"我担保 expr 不是 null，否则运行时抛异常"：
+
+```dart
+String? s = fetchMaybe();
+print(s!.length);   // 若 s 为 null，运行时抛 Null check operator used on a null value
+```
+
+`!` 是把锅从编译期推给运行时——**用前先想三秒**，多数情况下能用 `??` 或重构掉。
+
+### `late`：把"我保证用前已赋值"告诉编译器
+
+```dart
+late String userId;        // 现在不是 null，但也没初始化
+
+void init() {
+  userId = fetchUserId();  // 在这里赋值
+}
+
+void use() {
+  print(userId);           // 若 init() 没先调用，运行时抛 LateInitializationError
+}
+```
+
+### 必填命名参数：`required`
+
+构造函数与命名参数会在后面"函数"小节展开，这里先建立直觉——`required` 让命名参数在调用时**必须**传：
+
+```dart
+class User {
+  User({required this.name, this.age});
+  final String name;
+  final int? age;
+}
+
+User(name: 'Alice');                  // ✓
+// User();                            // ✗ name 是必填
+User(name: 'Bob', age: 20);           // ✓
+```
+
+### 陷阱集
+
+**陷阱 1：默认参数与可空混淆**
+
+```dart
+void greet({String? name = 'guest'}) {   // name 是 String?，默认 'guest'
+  print(name!.toUpperCase());            // 调用方传 null 也能 happy
+}
+greet(name: null);   // 输出 'GUEST'？不！传入 null 就是 null，会运行时崩
+```
+
+正确写法之一：
+
+```dart
+void greet({String name = 'guest'}) {    // 类型不可空，default 处理"未传"
+  print(name.toUpperCase());
+}
+```
+
+**陷阱 2：`!` 用在表达式而非接收方**
+
+```dart
+// 想说"map[key] 不为 null"
+map[key]!.foo();        // ✓ 在表达式后加 !
+
+// 不能省成
+// map[key].foo();      // ✗ 编译期就报错
+```
+
+**陷阱 3：忘了 `Map[]` 总是返回可空**
+
+```dart
+final m = {'a': 1};
+int v = m['a'];         // ✗ 类型是 int? 不是 int
+int v2 = m['a']!;       // ✓ 但 'b' 时会运行时崩
+int v3 = m['a'] ?? 0;   // ✓ 安全
+```
+
+## 运算符
+
+绝大多数运算符与主流语言一致，本节只列 Dart 的特色。
+
+### 算术、关系、逻辑
+
+```dart
+1 + 2; 1 - 2; 1 * 2; 1 / 2; 1 ~/ 2; 1 % 2;   // 注意 ~/ 是整除
+1 == 1; 1 != 2; 1 < 2; 1 >= 1;
+true && false; true || false; !true;
+```
+
+注意：`==` 默认比对**对象身份**，但 `Object` 默认实现已经是"判等"，所有内置类型与你给类重写的 `operator ==` 都参与其中。**没有 JS 的 `===`**——你需要"严格相等"时是 `identical(a, b)`。
+
+### 类型测试 `is` / `is!` / `as`
+
+```dart
+Object x = 'hi';
+x is String;      // true
+x is! int;        // true
+(x as String).length;     // 显式转换；失败抛 TypeCastError
+```
+
+`is` 检查后，编译器同样会做类型提升：
+
+```dart
+if (x is String) {
+  print(x.length);   // x 在此分支被提升为 String
+}
+```
+
+### 级联 `..`：链式调用同一个对象
+
+```dart
+final paint = Paint()
+  ..color = Colors.red
+  ..strokeWidth = 4
+  ..style = PaintingStyle.stroke;
+```
+
+每个 `..` 表达式返回**接收方**而不是该方法的返回值，等价于：
+
+```dart
+final paint = Paint();
+paint.color = Colors.red;
+paint.strokeWidth = 4;
+paint.style = PaintingStyle.stroke;
+```
+
+`?..`：接收方为 null 时整体为 null（带 short-circuit 的级联）。
+
+### 赋值复合运算符
+
+`+=`、`-=`、`*=`、`/=`、`~/=`、`%=`、`>>=`、`<<=`、`&=`、`|=`、`^=`、`??=`，含义同主流语言。
+
+### 位运算
+
+```dart
+0xF & 0x3;     // 0x3
+0xF | 0x10;    // 0x1F
+0x1 << 3;      // 8
+~0;            // -1（按位取反）
+```
+
+### 函数式风格的"单参绑定"：`...`、`...?`
+
+集合展开运算符既可以铺平嵌套，也能在条件下选择性追加：
+
+```dart
+final base = [1, 2, 3];
+final extra = null;   // 也可能不为空
+
+final all = [
+  0,
+  ...base,        // 1,2,3
+  ...?extra,      // 若 extra 为 null 则跳过；非 null 则展开
+  4,
+];
+```
+
+## 控制流
+
+### `if` / `else`
+
+无条件值不能省略括号：
+
+```dart
+if (count > 10) {
+  print('big');
+} else if (count > 0) {
+  print('small');
+} else {
+  print('none');
+}
+```
+
+Dart 没有"if 表达式"。**要在表达式位置选择**用三目 `?:`：
+
+```dart
+final tag = count > 0 ? 'positive' : 'non-positive';
+```
+
+### 集合 `if` / `for`：在字面量里直接条件 / 循环
+
+这是 Dart 与 Flutter 极常用的语法，**专门为构造 widget 列表设计**：
+
+```dart
+final widgets = <Widget>[
+  const Text('always shown'),
+  if (loggedIn) const ProfileButton(),
+  for (final item in items) ListTile(title: Text(item)),
+];
+```
+
+注意它们出现在**集合字面量内部**——不是普通语句。这与 if-表达式的限制无矛盾：因为这里产生的是"插入到集合中的元素 / 一组元素"。
+
+### `for` / `for-in` / `forEach`
+
+```dart
+for (var i = 0; i < 3; i++) print(i);
+
+for (final item in [1, 2, 3]) print(item);
+
+[1, 2, 3].forEach((e) => print(e));
+```
+
+三者性能差异忽略不计。**优先 `for-in`**：可读性最佳，且循环体内可以 `await`、`break`、`continue`，而 `forEach` 不行。
+
+### `while` / `do-while`
+
+与主流语言一致：
+
+```dart
+while (cond) { ... }
+
+do { ... } while (cond);
+```
+
+### `switch`：Dart 3 的重大升级
+
+Dart 3 把 `switch` 从一个"基本相等比较 + fallthrough" 的简单结构，升级为**支持模式匹配的完备表达式**。先看传统写法：
+
+```dart
+String describe(int x) {
+  switch (x) {
+    case 0:
+      return 'zero';
+    case 1:
+    case 2:
+      return 'small';        // 多 case 共用 body
+    default:
+      return 'other';
+  }
+}
+```
+
+注意：
+
+- Dart 的 `case` **默认不 fallthrough**；自然结束就退出 switch。
+- 多个 case 共用 body 直接连写（`case 1: case 2:`）就行，不需要 `break`。
+
+Dart 3 的 **switch expression**（注意是表达式，不是语句）：
+
+```dart
+String describe(int x) => switch (x) {
+  0 => 'zero',
+  1 || 2 => 'small',           // 逻辑或模式
+  > 0 && < 100 => 'medium',    // 关系模式 + 与
+  _ => 'other',                // _ 是通配符（替代 default）
+};
+```
+
+特点：
+
+- 用箭头 `=>`，每个分支必须是表达式；
+- 必须**穷尽**所有可能，否则编译错；
+- 可以用模式（pattern）做精细匹配，能匹配类型、解构、字段、范围。
+
+### 模式匹配（Patterns）— Dart 3 ★
+
+模式可以出现在 `switch` / `if-case` / 变量声明中。能力一览：
+
+```dart
+// 1) 类型 + 解构（Records）
+final (int x, int y) = (1, 2);          // 把 record 解到两个变量
+
+// 2) Map 解构
+final {'name': name, 'age': age} = json; // 从 Map 取键
+
+// 3) 类字段解构
+final User(:name, :age) = user;          // 调用 user.name / user.age
+
+// 4) switch 中匹配
+String classify(Object o) => switch (o) {
+  int i when i > 0 => 'positive int $i',         // 类型 + 守卫
+  String s => 'string of length ${s.length}',    // 类型 + 绑定
+  List<int>(:final length) => 'int list of $length', // 字段绑定
+  (var a, var b) => 'pair $a, $b',               // record 解构
+  null => 'nothing',
+  _ => 'other',
+};
+
+// 5) if-case
+if (json case {'name': String name, 'age': int age}) {
+  print('$name, $age');   // 同时类型检查 + 解构 + null 防护
+}
+```
+
+模式系统极强大，[Dart 类系统](/flutter/dart-oop) 章会专门展开。这里你只需建立认知：**Dart 3 的 switch 是表达式 + 模式匹配，能干很多原本要写一堆 if 的活**。
+
+### `break` / `continue` / 标签
+
+```dart
+outer: for (var i = 0; i < 5; i++) {
+  for (var j = 0; j < 5; j++) {
+    if (j == 3) break outer;       // 跳出外层
+    if (j == 1) continue outer;    // 直接进入外层下一轮
+  }
+}
+```
+
+### `assert`：仅 debug 模式生效
+
+```dart
+assert(name != null, 'name must not be null');
+```
+
+`assert` 在生产构建中**会被剔除**，是写"开发期不变量"的好工具。详见 [调试与性能](/flutter/devtools-perf)。
+
+## 函数
+
+Dart 的函数是**一等公民**——能赋值给变量、当参数、当返回值、嵌套定义。
+
+### 基本写法
+
+```dart
+int add(int a, int b) {
+  return a + b;
+}
+
+// 单表达式简写：=> 等价于 { return ...; }
+int add2(int a, int b) => a + b;
+```
+
+返回类型可省略（推断），但**对外公开的函数建议写出**，对维护极有帮助。
+
+### 三种参数：位置必填、位置可选、命名
+
+```dart
+// 1) 位置必填
+int add(int a, int b) => a + b;
+add(1, 2);
+
+// 2) 位置可选（[])，调用顺序固定
+String greet(String name, [String? title]) =>
+    title == null ? 'Hi $name' : 'Hi $title $name';
+greet('Alice');
+greet('Alice', 'Dr.');
+
+// 3) 命名参数（{}），调用时按名传
+void config({required String host, int port = 80, bool secure = false}) { }
+config(host: 'example.com');
+config(host: 'example.com', port: 8080, secure: true);
+```
+
+要点：
+
+- **位置可选** 与 **命名参数** 不能混用；选其一。
+- 命名参数默认是可选；用 `required` 强制必填。
+- 默认值必须是**编译期常量**（字面量、`const` 表达式）。
+- **Flutter 的 widget 几乎清一色用命名参数**——这是为了让深层嵌套调用仍然可读。
+
+### 函数类型与 typedef
+
+函数也是值，自然有类型：
+
+```dart
+int Function(int, int) op = add;
+op(2, 3);
+
+// 命名一个函数类型，便于复用
+typedef IntBinaryOp = int Function(int, int);
+IntBinaryOp op2 = add;
+```
+
+### 闭包
+
+函数能"捕获"外部作用域的变量：
+
+```dart
+Function makeAdder(int delta) {
+  return (int x) => x + delta;       // 捕获 delta
+}
+
+final add3 = makeAdder(3);
+print(add3(10));    // 13
+```
+
+闭包在 Flutter 里随处可见——`onPressed: () => doSomething(item.id)` 就是闭包捕获 `item`。
+
+### 顶层函数 / 静态方法 / 实例方法 / 局部函数
+
+```dart
+int topLevel() => 1;            // 顶层
+
+class Foo {
+  static int staticMethod() => 2;     // 静态
+  int instanceMethod() => 3;          // 实例
+
+  void demo() {
+    int local() => 4;                 // 局部，仅 demo 内可见
+    print(local());
+  }
+}
+```
+
+> 函数式风格、`Iterable` 上的 `map` / `where` / `fold` 等高阶函数留到 [Dart 集合与函数式](/flutter/dart-functional) 单独细讲。
+
+### 陷阱：`async` 函数的返回类型必须 `Future<T>`
+
+```dart
+// ✗ 推断为 Future<dynamic>，不利于类型检查
+foo() async { return 1; }
+
+// ✓ 写出返回类型
+Future<int> foo2() async => 1;
+```
+
+异步细节见 [Dart 异步与并发](/flutter/dart-async)。
+
+## 类与构造函数（基础）
+
+类是 Dart 最大的语法块。本节只覆盖**最常用的子集**——足够你看懂 90% 的 Flutter 代码；高级特性（`mixin`、`abstract`、Dart 3 的 `sealed` / `final` / `base` / `interface` 修饰符、操作符重载、扩展等）放到 [Dart 类系统](/flutter/dart-oop)。
+
+### 最小类与实例化
+
+```dart
+class Point {
+  double x;
+  double y;
+
+  Point(this.x, this.y);     // 构造函数：this.x 等价于 "把参数 x 直接赋给字段 x"
+
+  double distance(Point other) {
+    final dx = x - other.x;
+    final dy = y - other.y;
+    return _hypot(dx, dy);
+  }
+}
+
+double _hypot(double a, double b) => (a * a + b * b);
+
+void main() {
+  final p = Point(3, 4);     // 没有 new！Dart 2+ 起 new 是可选的，按惯例不写
+  print(p.x);                // 3.0
+  print(p.distance(Point(0, 0)));
+}
+```
+
+要点：
+
+- **没有 `new` 关键字**（虽然写了不会报错）。
+- 构造函数语法 `ClassName(...)` 与类同名。
+- `this.x` 在参数列表里是**自动赋值**：等价于 `Point(double x, double y) { this.x = x; this.y = y; }`。
+
+### 字段：可变 / `final` / `late`
+
+```dart
+class User {
+  String name;            // 可变
+  final int id;           // 不可变，必须在构造完成时被赋值
+  late String token;      // 暂不赋值，使用前必须赋
+
+  User({required this.name, required this.id});
+}
+```
+
+### `getter` / `setter`
+
+字段访问与方法调用语法相同——这一点对设计 API 极重要：
+
+```dart
+class Rectangle {
+  Rectangle(this.width, this.height);
+  double width;
+  double height;
+
+  double get area => width * height;            // getter
+  set scale(double factor) {                    // setter
+    width *= factor;
+    height *= factor;
+  }
+}
+
+final r = Rectangle(3, 4);
+print(r.area);            // 12.0  注意是属性访问，不是方法调用
+r.scale = 2;              // setter 用赋值语法
+print(r.area);            // 48.0
+```
+
+### 命名构造函数
+
+一个类可以有**多个构造**——通过命名区分：
+
+```dart
+class Point {
+  Point(this.x, this.y);
+  Point.origin() : x = 0, y = 0;        // 命名构造
+  Point.fromJson(Map<String, double> j) : x = j['x']!, y = j['y']!;
+
+  double x, y;
+}
+
+final a = Point(1, 2);
+final b = Point.origin();
+final c = Point.fromJson({'x': 1.0, 'y': 2.0});
+```
+
+### 初始化列表
+
+冒号 `:` 后面到 `{` 前面这一段叫"初始化列表"，作用是**在进入构造函数体之前**初始化字段（尤其是 `final` 字段）：
+
+```dart
+class Circle {
+  Circle(double r)
+      : radius = r,
+        area = 3.14 * r * r {            // 初始化列表里能用参数，但不能用 this
+    print('constructed');                // 进入构造体
+  }
+
+  final double radius;
+  final double area;
+}
+```
+
+### 重定向构造函数
+
+一个构造把工作转给另一个构造：
+
+```dart
+class Point {
+  Point(this.x, this.y);
+  Point.origin() : this(0, 0);     // 重定向到默认构造
+  double x, y;
+}
+```
+
+### 常量构造函数：`const ClassName(...)`
+
+如果类的所有字段都是 `final`，可以加 `const` 构造：
+
+```dart
+class ImmutablePoint {
+  const ImmutablePoint(this.x, this.y);
+  final double x;
+  final double y;
+}
+
+const p = ImmutablePoint(0, 0);              // 编译期对象
+const p2 = ImmutablePoint(0, 0);
+print(identical(p, p2));                     // true：编译期相同 → 同一对象
+```
+
+**这条对 Flutter 性能至关重要**——Flutter 几乎所有 widget 都提供了 const 构造，让"构造一棵 widget 树"在常量子树上零成本。后面 [渲染机制](/flutter/rendering) 章会展开。
+
+### 工厂构造函数：`factory`
+
+普通构造**必须**返回该类的新实例。`factory` 构造**可以**返回任何子类型实例、缓存的旧实例、甚至延迟决定具体类型：
+
+```dart
+class Logger {
+  Logger._internal(this.name);
+
+  static final _cache = <String, Logger>{};
+
+  factory Logger(String name) {
+    return _cache.putIfAbsent(name, () => Logger._internal(name));
+  }
+
+  final String name;
+}
+
+final a = Logger('app');
+final b = Logger('app');
+print(identical(a, b));     // true：同名共享实例
+```
+
+`Logger._internal` 是**私有命名构造**——外部不能调，只能通过 `Logger(name)` 工厂走缓存。这种"工厂 + 私有构造"是 Dart 单例 / 缓存模式的常用骨架。
+
+### 静态成员
+
+```dart
+class Math {
+  static const pi = 3.14159;
+  static double square(double x) => x * x;
+}
+
+Math.pi;
+Math.square(3);
+```
+
+静态成员属于类，不属于实例；不能访问 `this`。
+
+### 类的继承（极简版）
+
+```dart
+class Animal {
+  void breathe() => print('breathe');
+}
+
+class Dog extends Animal {
+  @override
+  void breathe() {
+    super.breathe();        // 调父类实现
+    print('and bark');
+  }
+}
+```
+
+`@override` 注解非强制，但**强烈建议加**：写错方法名时编译器会报警。
+
+更深入的继承、`mixin`、`abstract`、`implements`、Dart 3 的类修饰符（`sealed` / `final` / `base` / `interface`），见 [Dart 类系统](/flutter/dart-oop)。
+
+## 注释、文档与导入
+
+### 注释
+
+```dart
+// 单行
+/* 多行 */
+/// 文档注释（dartdoc 会渲染），支持 markdown
+```
+
+文档注释用反引号引用代码符号，会自动生成跳转链接：
+
+```dart
+/// 计算 [a] 与 [b] 的最大公约数。
+///
+/// 如果两者都为 0，返回 `0`。
+int gcd(int a, int b) => b == 0 ? a : gcd(b, a % b);
+```
+
+### 导入
+
+```dart
+import 'dart:async';                      // 核心库
+import 'package:flutter/material.dart';   // pub 包
+import '../utils/format.dart';            // 相对路径
+
+import 'package:foo/foo.dart' as foo;     // 起别名：foo.SomeClass
+import 'package:foo/foo.dart' show A, B;  // 只引入 A、B
+import 'package:foo/foo.dart' hide A;     // 屏蔽 A，其余引入
+
+export 'src/api.dart';                    // 重新导出（library 文件常见）
+```
+
+> Flutter 项目里几乎每个文件都以 `import 'package:flutter/material.dart';` 开头，因为 `Widget`、`Text`、`Scaffold` 等核心类都来自这里。
+
+## Dart 心智模型清单
+
+读完本章后，请确认以下命题已成为你的肌肉记忆：
+
+1. **`var` / `final` / `const` 三选一时优先 `final`**；只有"参数全字面量的不可变结构"才用 `const`。
+2. **null safety 是默认的**：变量类型不带 `?` 就不能为 null，编译器会逼你处理。
+3. **`!`、`as`、`dynamic` 都是把锅推给运行时**，能不用就不用。
+4. **`==` 是值相等**（如果类自定义了 `operator ==`），严格相等用 `identical`。
+5. **`switch` 在 Dart 3 是表达式 + 模式匹配**，多用、慎写老式 `case break`。
+6. **函数是一等公民**，类型 `T Function(...)`；命名参数是 Flutter 的标配。
+7. **类的私有边界是文件**，下划线开头表示同库可见。
+8. **多构造模式**：默认构造、命名构造、`factory` 构造、`const` 构造；`const` 构造是 Flutter 性能基石。
+9. **类的高级特性（mixin / 修饰符 / 操作符 / 扩展 / records / 高级 patterns）放到下一章**——这一章不要试图一次吃完。
+
+## 自查问题
+
+1. `final` 与 `const` 锁的分别是什么？为什么 Flutter 鼓励用 `const` 构造 widget？
+2. `late String name;` 与 `String? name;` 的差别是什么？什么时候各自合适？
+3. 字符串里如何嵌入表达式？三引号字符串与原始字符串各有什么用途？
+4. 为什么 `Map[]` 的返回类型一定是可空的？
+5. Dart 3 的 switch expression 与传统 switch 语句最大差别是什么？
+6. 命名参数与位置参数能混用吗？什么时候选哪个？
+7. `Logger(...)` 这样的工厂构造与默认构造有何不同？为什么常用于缓存模式？
+8. `_foo` 在 Dart 中是什么含义？谁能看到它？

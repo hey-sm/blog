@@ -1,0 +1,621 @@
+---
+title: 持久化
+description: SharedPreferences、文件 I/O、sqflite、Drift 类型安全 ORM、Hive/Isar 对照、flutter_secure_storage、加密策略、Riverpod 集成
+---
+
+# 持久化
+
+数据"取回"之后,要不要存本地?存哪里?加密吗?重启后恢复多少状态?这一章按"轻 → 重"过完 Flutter 主流持久化方案,主线落到 **Drift**(类型安全 ORM)。
+
+## 存储分层
+
+不同需求选不同工具,不要"一把锤子敲所有钉子":
+
+| 类型 | 例子 | 推荐 |
+| ---- | ---- | ---- |
+| **简单 KV** | 主题、最后访问时间、是否已通过引导 | `SharedPreferences` |
+| **敏感 KV** | access token、refresh token、生物识别开关 | `flutter_secure_storage` |
+| **结构化数据** | 草稿、收藏列表、缓存 | **Drift**(主线)/ Hive / Isar |
+| **大型二进制** | 图片缓存、下载视频、PDF | 文件系统(`path_provider` + `dart:io`) |
+| **暂存 / 中间产物** | 解压临时文件 | `getTemporaryDirectory()` |
+
+> 选错了的代价:用 SharedPreferences 存十万条记录会把启动时间拖到 5 秒;用 SQLite 存一个 bool 是杀鸡用牛刀;用文件存账号密码是安全事故。
+
+## `SharedPreferences`:最轻的 KV
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  shared_preferences: ^2.2.0
+```
+
+```dart filename="lib/storage/prefs.dart"
+import 'package:shared_preferences/shared_preferences.dart';
+
+class Prefs {
+  static late SharedPreferences _instance;
+
+  static Future<void> init() async {
+    _instance = await SharedPreferences.getInstance();
+  }
+
+  static String? get themeMode => _instance.getString('themeMode');
+  static set themeMode(String? v) {
+    if (v == null) _instance.remove('themeMode');
+    else           _instance.setString('themeMode', v);
+  }
+
+  static int get launchCount => _instance.getInt('launchCount') ?? 0;
+  static set launchCount(int v) => _instance.setInt('launchCount', v);
+}
+
+// main 里:
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Prefs.init();
+  runApp(const ProviderScope(child: MyApp()));
+}
+```
+
+支持类型:`bool` / `int` / `double` / `String` / `List<String>`。其他类型先 `jsonEncode` 成字符串再存。
+
+平台底层:Android = `SharedPreferences` xml,iOS = `NSUserDefaults`,Web = `localStorage`,Desktop = JSON 文件。**这些后端都不加密、不适合大数据量**。
+
+### 陷阱:value 限制
+
+- 单值不要超过 1 MB——会把读写都拖慢。
+- key 数不要过千——`getInstance()` 一次性把全部 key/value 读到内存。
+- 不要存数组 of 数组(只支持 `List<String>`)。这些场景直接上 SQLite。
+
+## `path_provider`:获取目录
+
+```yaml
+dependencies:
+  path_provider: ^2.1.0
+```
+
+```dart filename="lib/storage/paths.dart"
+import 'package:path_provider/path_provider.dart';
+
+Future<Directory> appDocuments() => getApplicationDocumentsDirectory();
+                                      // 用户文档,iCloud 备份(iOS)
+Future<Directory> appSupport()   => getApplicationSupportDirectory();
+                                      // app 状态,不进备份
+Future<Directory> tempDir()      => getTemporaryDirectory();
+                                      // 系统可清理
+Future<Directory> cacheDir()     => getApplicationCacheDirectory();
+                                      // app 用户可清理
+Future<Directory>? extDir()      => getExternalStorageDirectory();
+                                      // Android only,SD 卡
+```
+
+选哪一个的关键问题:
+
+- **重启后还得在吗?** → 是用 documents/support,否用 temp。
+- **App 卸载时一并删除是合理的吗?** → 是,所有这些目录都满足。
+- **iOS 用户备份恢复时希望保留吗?** → 是用 documents,否用 support 或 cache。
+
+## 文件 I/O:`dart:io File`
+
+```dart filename="lib/storage/local_file.dart"
+import 'dart:io';
+import 'dart:convert';
+
+Future<void> writeJson(File file, Map<String, dynamic> data) async {
+  await file.writeAsString(jsonEncode(data), flush: true);
+}
+
+Future<Map<String, dynamic>?> readJson(File file) async {
+  if (!await file.exists()) return null;
+  return jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+}
+
+Future<File> _draftFile() async {
+  final dir = await getApplicationDocumentsDirectory();
+  return File('${dir.path}/draft.json');
+}
+```
+
+要点:
+
+- 写大文件用 `openWrite()` 流式写,避免占大内存。
+- 跨平台路径分隔符:用 `path` 包的 `p.join(...)` 而非手拼 `/`。
+- Web 不支持 `dart:io`——若要在 Web 上跑相同逻辑,用 `idb_shim` / IndexedDB。
+
+## sqflite:SQLite 的薄封装
+
+```yaml
+dependencies:
+  sqflite: ^2.3.0
+  path: ^1.9.0
+```
+
+```dart filename="lib/storage/db_sqflite.dart"
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+
+Future<Database> openDb() async {
+  final path = p.join(await getDatabasesPath(), 'app.db');
+  return openDatabase(
+    path,
+    version: 1,
+    onCreate: (db, _) async {
+      await db.execute('''
+        CREATE TABLE notes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )
+      ''');
+    },
+    onUpgrade: (db, oldV, newV) async {
+      if (oldV < 2) {
+        await db.execute('ALTER TABLE notes ADD COLUMN tags TEXT');
+      }
+    },
+  );
+}
+
+Future<int> insertNote(Database db, String title, String body) =>
+    db.insert('notes', {
+      'title': title,
+      'body': body,
+      'created_at': DateTime.now().millisecondsSinceEpoch,
+    });
+
+Future<List<Map<String, Object?>>> listNotes(Database db) =>
+    db.query('notes', orderBy: 'created_at DESC');
+```
+
+`sqflite` 的不足:
+
+- **SQL 字符串无类型检查**:typo 到运行时才崩。
+- **结果是 `Map<String, Object?>`,需要手写转换**到 model。
+- **没有响应式**(查询变化不会主动通知 UI)。
+- **迁移要手写 if-else 序列**,容易漏。
+
+→ 这些痛点正是 Drift 的设计动机。
+
+## Drift 主线:类型安全 ORM
+
+[Drift](https://pub.dev/packages/drift)(早期叫 moor)在 sqflite 之上做了三件事:
+
+1. **DSL 描述表结构**,不写 SQL。
+2. **生成器把表结构变成 Dart 类**,字段类型从声明到查询全程类型安全。
+3. **查询返回 `Stream<List<Row>>`**,数据变化自动推送到 UI(响应式)。
+
+### 装包
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  drift: ^2.18.0
+  sqlite3_flutter_libs: ^0.5.0      # 移动端 SQLite 引擎
+  path_provider: ^2.1.0
+  path: ^1.9.0
+
+dev_dependencies:
+  drift_dev: ^2.18.0
+  build_runner: ^2.4.0
+```
+
+### 表与数据库
+
+```dart filename="lib/db/notes_db.dart"
+import 'dart:io';
+import 'package:drift/drift.dart';
+import 'package:drift/native.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+
+part 'notes_db.g.dart';
+
+class Notes extends Table {
+  IntColumn    get id        => integer().autoIncrement()();
+  TextColumn   get title     => text().withLength(min: 1, max: 200)();
+  TextColumn   get body      => text()();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+  TextColumn   get tags      => text().nullable()();   // 逗号分隔
+}
+
+@DriftDatabase(tables: [Notes])
+class AppDb extends _$AppDb {
+  AppDb() : super(_openConnection());
+
+  @override
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (m) => m.createAll(),
+    onUpgrade: (m, from, to) async {
+      if (from < 2) {
+        await m.addColumn(notes, notes.tags);            // ★ 编译期已知字段
+      }
+    },
+  );
+
+  // CRUD 直接写在这里(简单情况),复杂业务用 DAO 拆分
+  Future<List<Note>> allNotes() => select(notes).get();
+
+  Stream<List<Note>> watchAll() =>
+      (select(notes)..orderBy([(n) => OrderingTerm.desc(n.createdAt)])).watch();
+
+  Future<int> addNote({required String title, required String body}) =>
+      into(notes).insert(NotesCompanion.insert(title: title, body: body));
+
+  Future<int> deleteNote(int id) =>
+      (delete(notes)..where((n) => n.id.equals(id))).go();
+}
+
+LazyDatabase _openConnection() => LazyDatabase(() async {
+  final dir = await getApplicationDocumentsDirectory();
+  return NativeDatabase.createInBackground(File(p.join(dir.path, 'app.db')));
+});
+```
+
+跑 `dart run build_runner build`,生成:
+
+- `Note` / `NotesCompanion`(行类型 / 插入用的可空字段类型)
+- `_$AppDb` 内部实现
+
+### 类型安全查询的味道
+
+```dart filename="lib/db/queries.dart"
+// 等价 SQL:SELECT * FROM notes WHERE title LIKE 'Hello%' ORDER BY created_at DESC LIMIT 20
+final list = await (db.select(db.notes)
+      ..where((n) => n.title.like('Hello%'))
+      ..orderBy([(n) => OrderingTerm.desc(n.createdAt)])
+      ..limit(20))
+    .get();
+```
+
+打错字段名 → 编译期就崩。改字段类型 → 所有用到这个字段的查询都会被检查。
+
+### Stream 查询:响应式
+
+```dart filename="lib/screens/notes_screen.dart"
+class NotesScreen extends ConsumerWidget {
+  const NotesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return StreamBuilder<List<Note>>(
+      stream: ref.watch(appDbProvider).watchAll(),
+      builder: (_, snap) {
+        final list = snap.data ?? const [];
+        return ListView.builder(
+          itemCount: list.length,
+          itemBuilder: (_, i) => ListTile(title: Text(list[i].title)),
+        );
+      },
+    );
+  }
+}
+```
+
+任何一处 `into(notes).insert(...)` / `update(...)` / `delete(...)` 之后,`watchAll()` 自动 emit 新结果——UI 刷新无需手动触发。
+
+> 在 Riverpod 主线下,直接用 `StreamProvider` 包 `watchAll()`,UI 端 `AsyncValue.when` 处理,不再需要 `StreamBuilder`。下一节给完整骨架。
+
+### DAO:拆分大型数据库类
+
+数据库长大后,把不同表 / 业务的查询拆到 DAO:
+
+```dart filename="lib/db/notes_dao.dart"
+@DriftAccessor(tables: [Notes])
+class NotesDao extends DatabaseAccessor<AppDb> with _$NotesDaoMixin {
+  NotesDao(super.db);
+
+  Stream<List<Note>> watchAll() =>
+      (select(notes)..orderBy([(n) => OrderingTerm.desc(n.createdAt)])).watch();
+
+  Future<int> addNote({required String title, required String body}) =>
+      into(notes).insert(NotesCompanion.insert(title: title, body: body));
+
+  Future<int> deleteNote(int id) =>
+      (delete(notes)..where((n) => n.id.equals(id))).go();
+}
+
+@DriftDatabase(tables: [Notes], daos: [NotesDao])
+class AppDb extends _$AppDb { ... }
+```
+
+外部直接 `db.notesDao.watchAll()`。
+
+### 事务
+
+```dart
+await db.transaction(() async {
+  await db.into(db.notes).insert(NotesCompanion.insert(title: 'A', body: 'a'));
+  await db.into(db.notes).insert(NotesCompanion.insert(title: 'B', body: 'b'));
+  // 任一抛错 → 全部回滚
+});
+```
+
+### 与 Riverpod 集成
+
+```dart filename="lib/db/db_provider.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'db_provider.g.dart';
+
+@Riverpod(keepAlive: true)
+AppDb appDb(AppDbRef ref) {
+  final db = AppDb();
+  ref.onDispose(db.close);                // app 退出 / hot restart 时关闭
+  return db;
+}
+
+@Riverpod(keepAlive: true)
+NotesDao notesDao(NotesDaoRef ref) => ref.read(appDbProvider).notesDao;
+
+@riverpod
+Stream<List<Note>> watchNotes(WatchNotesRef ref) =>
+    ref.read(notesDaoProvider).watchAll();
+```
+
+UI 端:
+
+```dart filename="lib/screens/notes_screen.dart"
+class NotesScreen extends ConsumerWidget {
+  const NotesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncNotes = ref.watch(watchNotesProvider);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Notes')),
+      body: asyncNotes.when(
+        data: (list) => ListView(
+          children: list.map((n) => ListTile(title: Text(n.title))).toList(),
+        ),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error:   (e, _) => Center(child: Text('$e')),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => ref.read(notesDaoProvider).addNote(title: 'Hi', body: '...'),
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+```
+
+要点:
+
+- `appDb` 用 `keepAlive: true`——数据库在整个 app 生命周期共享。
+- `watchNotes` 用 `Stream`,Riverpod 自动包成 `AsyncValue`。
+- `addNote` 后 UI 自动刷新——没有 `setState`,没有手动 `invalidate`。
+
+### 迁移策略
+
+```dart filename="lib/db/migrations.dart"
+@override
+MigrationStrategy get migration => MigrationStrategy(
+  onCreate: (m) => m.createAll(),
+  onUpgrade: (m, from, to) async {
+    if (from < 2) await m.addColumn(notes, notes.tags);
+    if (from < 3) await m.createTable(folders);
+    if (from < 4) await m.addColumn(notes, notes.folderId);
+  },
+);
+```
+
+要点:
+
+- **`if` 是 `<` 不是 `==`**——用户可能从 v1 一次性升到 v4,中间所有迁移都要按顺序跑。
+- 迁移**不能改字段类型**(SQLite 限制);要变类型,新加字段 + 拷贝数据 + 删旧字段(后者 SQLite 3.35+ 支持)。
+- Drift `drift_dev` 提供[迁移工具](https://drift.simonbinder.eu/Migrations/tests/),根据 schema 历史自动生成迁移代码与测试。
+
+### 测试
+
+```dart filename="test/notes_dao_test.dart"
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  late AppDb db;
+  setUp(() => db = AppDb.connect(DatabaseConnection(NativeDatabase.memory())));
+  tearDown(() => db.close());
+
+  test('add and watch', () async {
+    final stream = db.notesDao.watchAll();
+    expect(stream, emitsInOrder([
+      isEmpty,
+      [predicate<Note>((n) => n.title == 'A')],
+    ]));
+    await db.notesDao.addNote(title: 'A', body: 'a');
+  });
+}
+```
+
+`NativeDatabase.memory()` 让数据库跑在内存里,测试快且互不影响。
+
+## Hive / Isar 对照
+
+| 维度 | Hive | Isar |
+| ---- | ---- | ---- |
+| 类型 | KV(box)+ object 序列化 | NoSQL,基于 mmap |
+| 性能 | 读快,写中等 | 读写都极快(声称是社区最快) |
+| 类型安全 | 通过 `@HiveType` + 适配器 | 通过 `@collection` + code-gen |
+| 查询能力 | 几乎没有(只能整 box 扫) | 支持索引、复合查询 |
+| 维护状态(2026 年初) | 原 hive v2 维护放缓,推荐 [hive_ce](https://pub.dev/packages/hive_ce) 社区分支 | v3 → v4 大改,部分老 API 不兼容,生态在迁移 |
+
+### Hive 简要
+
+```yaml
+dependencies:
+  hive_ce: ^2.0.0
+  hive_ce_flutter: ^2.0.0
+```
+
+```dart filename="lib/storage/hive_demo.dart"
+@HiveType(typeId: 0)
+class Note extends HiveObject {
+  @HiveField(0) String title;
+  @HiveField(1) String body;
+  Note({required this.title, required this.body});
+}
+
+await Hive.initFlutter();
+Hive.registerAdapter(NoteAdapter());          // code-gen 产物
+final box = await Hive.openBox<Note>('notes');
+box.add(Note(title: 'a', body: 'a'));
+final all = box.values.toList();
+```
+
+适合:**纯 KV,无复杂查询**,如缓存表、设置项。
+
+### Isar 简要
+
+```yaml
+dependencies:
+  isar: ^4.0.0
+  isar_flutter_libs: ^4.0.0
+```
+
+```dart filename="lib/storage/isar_demo.dart"
+@collection
+class Note {
+  Id id = Isar.autoIncrement;
+  late String title;
+  late String body;
+  @Index() late DateTime createdAt;
+}
+
+final isar = await Isar.open([NoteSchema]);
+await isar.writeTxn(() async {
+  await isar.notes.put(Note()..title = 'A'..body = 'a'..createdAt = DateTime.now());
+});
+
+final list = await isar.notes.where().sortByCreatedAtDesc().findAll();
+```
+
+适合:**几十万条 + 复杂查询 + 极致性能**(本地搜索、嵌入式数据库)。
+
+### 取舍
+
+- **关系型数据(用户↔笔记↔标签)、迁移多** → **Drift**(主线推荐)。
+- **简单 KV** → SharedPreferences 或 Hive。
+- **极致性能 + NoSQL 风格 + 你接受重大版本变更** → Isar。
+
+> 在没有特定性能瓶颈时,2026 年新项目优先 Drift——因为生态稳定、社区资料最多、迁移工具最成熟。
+
+## `flutter_secure_storage`:Keychain / Keystore
+
+存敏感数据(token、私钥、生物认证开关)必须用系统级安全存储,而不是 SharedPreferences:
+
+```yaml
+dependencies:
+  flutter_secure_storage: ^9.2.0
+```
+
+```dart filename="lib/storage/secure.dart"
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+class SecureStore {
+  SecureStore._();
+  static final instance = SecureStore._();
+
+  final _storage = const FlutterSecureStorage(
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+
+  Future<void> writeToken(String value) => _storage.write(key: 'access', value: value);
+  Future<String?> readToken() => _storage.read(key: 'access');
+  Future<void> deleteToken() => _storage.delete(key: 'access');
+}
+```
+
+后端:
+
+| 平台 | 后端 | 加密强度 |
+| ---- | ---- | -------- |
+| iOS / macOS | Keychain | 系统级,可绑定生物识别 |
+| Android | EncryptedSharedPreferences (`androidx.security`) | AES-256,密钥放硬件 KeyStore |
+| Windows / Linux | DPAPI / libsecret | 系统级 |
+| Web | LocalStorage | **不加密**(浏览器无系统密钥库)— 不要在 Web 存敏感数据 |
+
+### 陷阱:卸载后保留
+
+iOS Keychain 默认**卸载 app 不删除**——下次重装会读到上一次的 token。如果不想要这个行为,启动时清空一次:
+
+```dart
+final installFlag = await Prefs.bool('app_installed');
+if (!installFlag) {
+  await SecureStore.instance.deleteAll();
+  await Prefs.setBool('app_installed', true);
+}
+```
+
+## 加密
+
+如果业务规则要求"本地数据库本身加密"(医疗、金融):
+
+### Drift + SQLCipher
+
+```yaml
+dependencies:
+  drift: ^2.18.0
+  sqlcipher_flutter_libs: ^0.6.0   # 替代 sqlite3_flutter_libs
+```
+
+```dart filename="lib/db/encrypted_db.dart"
+import 'package:drift_sqlite_async/drift_sqlite_async.dart';
+import 'package:sqlite_async/sqlite_async.dart';
+
+LazyDatabase _openEncrypted() => LazyDatabase(() async {
+  final dir = await getApplicationDocumentsDirectory();
+  final path = p.join(dir.path, 'app.db');
+
+  // SQLCipher 用 PRAGMA key 解密
+  final db = SqliteDatabase(
+    path: path,
+    options: SqliteOptions(setupQueries: ["PRAGMA key = '${await _loadDbKey()}'"]),
+  );
+  return SqliteAsyncQueryExecutor(db);
+});
+```
+
+数据库加密密钥**必须存在 Secure Storage**——否则等于不加密。
+
+### 字段级加密
+
+数据库不加密,只加密少数敏感字段(信用卡尾号 / 身份证):
+
+```dart
+final cipher = await encrypt(plain, key: await _loadFieldKey());
+notesDao.insert(NotesCompanion.insert(body: cipher));
+```
+
+`encrypt` 包提供 AES-256-GCM 实现。
+
+## 心智模型清单
+
+1. **存储分层**:简单 KV → SharedPreferences / 敏感 KV → Secure Storage / 结构化 → Drift / 二进制 → 文件。
+2. **`SharedPreferences` 单值 < 1MB,key 数 < 千**;不要塞大数据。
+3. **`path_provider`**:**重启要在用 documents/support,可清理用 temp/cache**。
+4. **sqflite 是字符串 SQL,无类型检查**;新项目直接上 Drift。
+5. **Drift = 类型安全 SQL + 响应式 Stream + 自动迁移工具**——本系列主线。
+6. **Drift 迁移用 `if (from < N)` 链,因为用户可能跨大版本升级**。
+7. **任何"敏感数据"(token / 私钥)必须 `flutter_secure_storage`**;Web 上 secure storage 不加密,不要存敏感数据。
+8. **iOS Keychain 卸载默认保留**——业务上不希望则手动清。
+9. **数据库加密用 SQLCipher,字段加密用 AES-GCM**——密钥必须放 Secure Storage。
+10. **Hive / Isar 只在有具体性能 / 风格需求时考虑**;否则 Drift 是 default。
+
+## 自查问题
+
+- 用 SharedPreferences 存"用户最后访问时间"和"是否第一次启动",写出完整代码(`init` + 读 + 写)。
+- `getApplicationDocumentsDirectory()` vs `getApplicationSupportDirectory()` vs `getTemporaryDirectory()` 三者的差别,各举一个适合的存储场景。
+- sqflite 写一个"按 title 模糊搜索"的查询会有什么风险?Drift 怎么避免?
+- 在 Drift 中给现有 `Notes` 表增加 `nullable` 的 `folderId` 列,写完整迁移代码,并解释为什么用户从 v1 直接升到 v3 时也能正确执行。
+- Drift 的 `Stream<List<Note>>` 查询,UI 不主动 invalidate,数据如何"自动刷新"?(提示:Drift 内部维护 table-level 监听)
+- 用 Riverpod + Drift 写一个 todo list:增删改 + 实时刷新 + 状态过滤(已完成/未完成),给出 provider 链路。
+- 测试 Dao 时为什么用 `NativeDatabase.memory()` 而不是真实文件数据库?
+- 把 access token 用 SharedPreferences 存,会发生什么具体的安全问题?切到 `flutter_secure_storage` 之后,iOS / Android 各自的后端是什么?
+- iOS 上"用户卸载并重装 app",Keychain 中的 token 还在吗?如果业务希望卸载即清,该怎么做?
+- 数据库加密(SQLCipher)的密钥本身存在哪里?如果写在 Dart 代码里硬编码,等于做了什么?
+- 何时选 Hive,何时选 Isar,何时选 Drift?给出三个具体场景。
+
+下一章 [Firebase 与 BaaS](/flutter/firebase):把"自家服务器 + 本地数据库"的方案换成"Firebase 一站式",并对比两套思路的取舍。

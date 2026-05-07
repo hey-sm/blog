@@ -1,0 +1,793 @@
+---
+title: 布局、约束与主题
+description: Flutter 约束系统、Row/Column/Stack/Flex、间距与对齐、滚动、响应式、资源与字体
+---
+
+# 布局、约束与主题
+
+布局是 Flutter 最反直觉的部分。掌握以下 13 个字，整个布局体系豁然开朗：
+
+> **Constraints go down, sizes go up, parent sets position.**
+> （约束自上而下，尺寸自下而上，父级决定位置。）
+
+本章把这条原则展开，再过一遍最常用的布局 widget 与响应式 / 资源管理。
+
+## 约束系统
+
+### 一帧布局的过程
+
+```text
+   父 widget
+     │
+     │ ① 把"约束（BoxConstraints）"传给子 widget
+     ▼
+   子 widget 内部根据约束 + 自己的偏好决定"我要多大"
+     │
+     │ ② 把"尺寸（Size）"返给父
+     ▼
+   父 widget 拿到子尺寸，决定"子放在我哪个位置"
+     │
+     ▼
+   渲染（layout 完成 → paint）
+```
+
+这是 RenderObject 层的 layout 协议。**Widget 永远不能自己决定自己的位置——位置完全由父控制；尺寸是父给的约束 + 子的偏好共同算出来的**。
+
+### `BoxConstraints`
+
+```dart
+class BoxConstraints {
+  final double minWidth;
+  final double maxWidth;
+  final double minHeight;
+  final double maxHeight;
+}
+```
+
+四个数字定义"子可以挑的尺寸范围"。一些常见名词：
+
+- **tight**（紧约束）：min == max，子必须接受这个精确尺寸；
+- **loose**（松约束）：min == 0，max < ∞，子可以挑 0 到 max 之间任意；
+- **bounded**：max < ∞；
+- **unbounded**：max == ∞，子可以是任意大（典型是 `ListView` 内部的纵向约束）。
+
+### 调试约束：在脑子里跑一遍
+
+任何"为什么我的 widget 位置不对 / 大小不对"问题，按这个顺序问：
+
+1. 父给的约束是什么（tight / loose / bounded）？
+2. 子的偏好尺寸是什么？
+3. 子在父的约束内能否满足偏好？
+4. 父怎么决定位置？
+
+举一个新手常踩的坑：
+
+```dart
+Center(
+  child: Row(
+    children: [
+      Text('Left'),
+      Text('Right'),
+    ],
+  ),
+);
+```
+
+为什么没有错误？因为 `Center` 只给 Row 一个**松约束**，Row 把自己的尺寸算成"两个 Text 加起来的宽度"，再返回给 Center；Center 接到这个尺寸，把 Row 居中。
+
+但下面的写法会爆：
+
+```dart
+Center(
+  child: Row(
+    children: [
+      Container(color: Colors.red, child: Text('A' * 1000)),    // 子内容超过屏幕
+    ],
+  ),
+);
+```
+
+Row 默认沿主轴**无限放置子**，但 Center 给的是"屏幕宽度"，Row 的子加起来超过它，立刻 RenderOverflow。修法见后续 `Expanded` / `Flexible`。
+
+### `LayoutBuilder`：拿到父级约束
+
+```dart
+LayoutBuilder(
+  builder: (context, constraints) {
+    if (constraints.maxWidth > 600) {
+      return const _WideLayout();
+    }
+    return const _NarrowLayout();
+  },
+);
+```
+
+`LayoutBuilder` 在 build 时拿到父给它的约束——是"响应式布局"的核心 API。
+
+## 单子布局
+
+### `Container`
+
+```dart
+Container(
+  padding: const EdgeInsets.all(16),
+  margin: const EdgeInsets.symmetric(horizontal: 8),
+  decoration: BoxDecoration(
+    color: Colors.indigo,
+    borderRadius: BorderRadius.circular(8),
+    boxShadow: const [BoxShadow(blurRadius: 4)],
+    border: Border.all(color: Colors.white, width: 2),
+  ),
+  alignment: Alignment.center,
+  width: 200,
+  height: 100,
+  child: const Text('Box'),
+);
+```
+
+`Container` 是个"组合 widget"，内部其实是 `Padding` / `DecoratedBox` / `ConstrainedBox` / `Align` 的组合。**简单需求用专用 widget 更轻**：
+
+```dart
+Padding(padding: ..., child: ...);
+SizedBox(width: 100, height: 50, child: ...);
+ColoredBox(color: ..., child: ...);
+DecoratedBox(decoration: ..., child: ...);
+Align(alignment: ..., child: ...);
+Center(child: ...);    // 等价于 Align(alignment: Alignment.center)
+```
+
+业内最佳实践：**没用到 decoration 时就别用 Container**，省一层 widget。
+
+### `SizedBox`：万能间距 / 限定尺寸
+
+```dart
+SizedBox(width: 100, height: 50);            // 占据 100×50
+SizedBox(width: 100);                         // 高度由父约束决定
+const SizedBox.shrink();                      // 0×0，常用作"不渲染"
+const SizedBox.expand(child: ColoredBox(color: Colors.red));   // 撑满父
+const SizedBox(height: 16);                   // 等价于 16 的纵向间距
+```
+
+`SizedBox` 因为常常 const + 字段固定，是性能友好的"空隙"实现。
+
+### `Padding`
+
+```dart
+const Padding(
+  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+  child: Text('Hi'),
+);
+```
+
+`EdgeInsets` 的几个工厂：
+
+- `EdgeInsets.all(16)`
+- `EdgeInsets.symmetric(horizontal: 16, vertical: 8)`
+- `EdgeInsets.only(left: 16, top: 8)`
+- `EdgeInsets.fromLTRB(16, 8, 16, 8)`
+
+需要 RTL（阿拉伯文等）支持用 `EdgeInsetsDirectional`：
+
+```dart
+const Padding(
+  padding: EdgeInsetsDirectional.only(start: 16, end: 8),
+  child: ...,
+);
+```
+
+`start` / `end` 在 LTR 语言里等价于 `left` / `right`，在 RTL 里自动翻转。
+
+### `Align` / `Center`
+
+```dart
+const Align(alignment: Alignment.topRight, child: Text('TR'));
+const Center(child: Text('mid'));      // 等价于 Align(Alignment.center)
+```
+
+`Alignment` 是 `(-1..1, -1..1)` 的双轴坐标：`Alignment(0, 0)` 是中心，`(-1, -1)` 是左上。
+
+### `ConstrainedBox` / `LimitedBox`
+
+```dart
+ConstrainedBox(
+  constraints: const BoxConstraints(maxWidth: 400, minHeight: 100),
+  child: const Text('limited'),
+);
+
+// LimitedBox：仅当父给 unbounded 约束时才生效
+LimitedBox(maxWidth: 200, child: ...);
+```
+
+`ConstrainedBox` 在子需要"有边界保护"时使用；`LimitedBox` 在父可能给无限约束的地方做防御。
+
+### `FractionallySizedBox`：按比例
+
+```dart
+FractionallySizedBox(
+  widthFactor: 0.5,
+  heightFactor: 0.3,
+  child: const ColoredBox(color: Colors.amber),
+);
+```
+
+让子按父的某个比例占据空间。
+
+### `AspectRatio`：长宽比
+
+```dart
+AspectRatio(
+  aspectRatio: 16 / 9,
+  child: const ColoredBox(color: Colors.black),
+);
+```
+
+要点：父给的约束决定"主导方向"——若宽是紧约束，则按 16:9 算高；反之亦然。给两轴都 unbounded 会崩。
+
+### `IntrinsicWidth` / `IntrinsicHeight`：按内容自适应
+
+```dart
+IntrinsicWidth(
+  child: Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: const [Text('Short'), Text('A bit longer text')],
+  ),
+);
+```
+
+让 Column 的所有子都以"最长那个"的宽度对齐。**性能开销很大**——它需要走两遍 layout 才能算出 intrinsic 尺寸。**列表里慎用**。
+
+## 多子布局：Flex 系列
+
+### `Row` / `Column`
+
+最常用的横向 / 纵向布局：
+
+```dart
+Column(
+  mainAxisAlignment: MainAxisAlignment.center,        // 主轴（纵向）对齐
+  crossAxisAlignment: CrossAxisAlignment.stretch,     // 交叉轴（横向）对齐
+  mainAxisSize: MainAxisSize.min,                     // 主轴尺寸：紧贴内容 / 最大化
+  children: const [...],
+);
+```
+
+主轴 / 交叉轴：
+
+| Widget | 主轴 | 交叉轴 |
+| ------ | ---- | ------ |
+| Row | 横 | 纵 |
+| Column | 纵 | 横 |
+
+`MainAxisAlignment`：`start` / `end` / `center` / `spaceBetween` / `spaceAround` / `spaceEvenly`。
+`CrossAxisAlignment`：`start` / `end` / `center` / `stretch` / `baseline`。
+
+### `Expanded` / `Flexible` / `Spacer`
+
+让子按"剩余空间比例"分配尺寸：
+
+```dart
+Row(
+  children: [
+    Container(width: 80, color: Colors.red),                        // 固定 80
+    Expanded(flex: 2, child: ColoredBox(color: Colors.green)),      // 占剩余空间 2 份
+    Expanded(flex: 1, child: ColoredBox(color: Colors.blue)),       // 占剩余空间 1 份
+  ],
+);
+```
+
+- `Expanded`：占据剩余空间，**强制紧约束**（子必须填满它分到的）；
+- `Flexible(fit: FlexFit.loose)`：占据**至多**那么多，子可以更小；
+- `Spacer`：占空白，等价于 `Expanded(child: SizedBox.shrink())`。
+
+陷阱：`Expanded` **只能直接放在 Flex 子（Row / Column / Flex）的孩子位置**，包一层 Container 就崩。
+
+### `Wrap`：自动换行的 Row/Column
+
+```dart
+Wrap(
+  spacing: 8,                  // 主轴间距
+  runSpacing: 8,               // 换行间距
+  children: const [
+    Chip(label: Text('A')),
+    Chip(label: Text('B')),
+    Chip(label: Text('Lots of text')),
+    // ...
+  ],
+);
+```
+
+子超过一行会自动换行，常用于 chip / tag。
+
+### `Flow`：完全自定义位置
+
+少数高性能动画场景使用，详见动画章节。
+
+## 层叠布局：`Stack`
+
+```dart
+Stack(
+  alignment: Alignment.bottomRight,                 // 默认子的对齐
+  children: [
+    Container(color: Colors.indigo, height: 200),
+    const Positioned(
+      top: 16,
+      right: 16,
+      child: Icon(Icons.close, color: Colors.white),
+    ),
+    const Positioned.fill(child: Center(child: Text('overlay'))),
+  ],
+);
+```
+
+要点：
+
+- `Positioned`：用 `top` / `right` / `bottom` / `left` / `width` / `height` 显式定位；
+- 无 `Positioned` 包裹的子按 `alignment` 摆放；
+- `Stack.fit`：`StackFit.loose`（默认）/ `StackFit.expand`（撑满父）/ `StackFit.passthrough`。
+
+陷阱：Stack 里的"非 Positioned"子如果尺寸是 `unbounded`，会崩——给它们 `SizedBox.expand` 或换 `StackFit.expand`。
+
+## 滚动：ListView / GridView / SingleChildScrollView / CustomScrollView
+
+### `SingleChildScrollView`：包一层让超长内容能滚
+
+```dart
+SingleChildScrollView(
+  child: Column(
+    children: const [
+      // 内容超过屏幕高度
+    ],
+  ),
+);
+```
+
+注意：`SingleChildScrollView` 不会做"懒加载"——里面的所有子在首次 build 时就构造完。**不要把超长 ListView 替换成 SingleChildScrollView + Column**。
+
+### `ListView`
+
+最常用的滚动列表，自动懒加载视口外的子：
+
+```dart
+// 1. 静态列表
+ListView(
+  children: [for (final s in items) ListTile(title: Text(s))],
+);
+
+// 2. 大量数据：用 .builder（懒加载）
+ListView.builder(
+  itemCount: items.length,
+  itemBuilder: (ctx, i) => ListTile(title: Text(items[i])),
+);
+
+// 3. 带分隔
+ListView.separated(
+  itemCount: items.length,
+  itemBuilder: (ctx, i) => ListTile(title: Text(items[i])),
+  separatorBuilder: (_, __) => const Divider(height: 0),
+);
+```
+
+**实战 80% 用 `ListView.builder`**——再短的列表用它也无妨（性能可忽略）。`ListView()` 仅在内容确定固定且不会增长时使用。
+
+### `GridView`
+
+```dart
+GridView.builder(
+  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+    crossAxisCount: 3,
+    mainAxisSpacing: 8,
+    crossAxisSpacing: 8,
+    childAspectRatio: 1,
+  ),
+  itemCount: items.length,
+  itemBuilder: (ctx, i) => Card(child: Center(child: Text(items[i]))),
+);
+
+// 列宽自适应
+GridView.builder(
+  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+    maxCrossAxisExtent: 200,
+  ),
+  ...
+);
+```
+
+### `CustomScrollView` + Slivers
+
+需要"AppBar 折叠 + 多种内容混合滚动"时用 CustomScrollView：
+
+```dart
+CustomScrollView(
+  slivers: [
+    SliverAppBar(pinned: true, expandedHeight: 200, ...),
+    SliverList.builder(itemCount: 20, itemBuilder: ...),
+    SliverGrid(gridDelegate: ..., delegate: ...),
+    SliverToBoxAdapter(child: Container(height: 200, color: Colors.amber)),
+  ],
+);
+```
+
+`SliverList` / `SliverGrid` / `SliverAppBar` / `SliverToBoxAdapter` 等 sliver 是"切片"——可以混合一起滚。
+
+### 控制滚动：`ScrollController`
+
+```dart
+class _MyState extends State<MyWidget> {
+  final _ctrl = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl.addListener(() {
+      if (_ctrl.position.pixels > _ctrl.position.maxScrollExtent - 200) {
+        // 滚动接近底部 → 加载更多
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      controller: _ctrl,
+      itemCount: items.length,
+      itemBuilder: (ctx, i) => ...,
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+}
+```
+
+控制器与 TextEditingController 一样，**必须 dispose**。
+
+### 嵌套滚动陷阱
+
+```dart
+// ✗ 嵌套 ListView 会有约束冲突
+ListView(
+  children: [
+    ListView.builder(...),    // 内层无界高度，崩
+  ],
+);
+
+// ✓ 内层指定 shrinkWrap + physics: NeverScrollable
+ListView(
+  children: [
+    ListView.builder(
+      shrinkWrap: true,                                // 自适应高度
+      physics: const NeverScrollableScrollPhysics(),   // 不响应滚动手势
+      itemCount: 10,
+      itemBuilder: (_, i) => Text('$i'),
+    ),
+  ],
+);
+```
+
+`shrinkWrap` 让内层 ListView 不再尝试占据"无穷"高度，但代价是会一次性 build 所有子（失去懒加载）。**真正优雅的解法是改用 `CustomScrollView` + slivers**。
+
+## `MediaQuery` 与设备信息
+
+```dart
+final mq = MediaQuery.of(context);
+
+mq.size;              // 屏幕逻辑尺寸（dp）
+mq.devicePixelRatio;  // 设备像素比
+mq.padding;           // 系统留白（刘海、导航栏）
+mq.viewInsets;        // 软键盘等"覆盖物"
+mq.viewPadding;       // padding + viewInsets
+mq.orientation;       // portrait / landscape
+mq.platformBrightness;// 系统亮 / 暗
+mq.textScaler;        // 系统字体缩放（无障碍）
+```
+
+性能优化：用 `MediaQuery.sizeOf(context)` / `MediaQuery.paddingOf(context)` 等**只订阅特定字段的 helper**，避免任何 MediaQuery 任意字段变化都触发整个 widget 重建。
+
+### `SafeArea`
+
+把内容塞进"非系统留白"的安全区：
+
+```dart
+return SafeArea(
+  child: const Padding(
+    padding: EdgeInsets.all(16),
+    child: ...,
+  ),
+);
+```
+
+只保留某些方向的安全区：
+
+```dart
+SafeArea(top: false, bottom: true, child: ...);
+```
+
+通常 `Scaffold` 会自动处理一部分 SafeArea；自定义 stack 布局或 BottomSheet 时显式包一层。
+
+## 响应式布局
+
+### 简单：`LayoutBuilder` 分支
+
+```dart
+LayoutBuilder(
+  builder: (context, c) {
+    if (c.maxWidth >= 1200) return const _Desktop();
+    if (c.maxWidth >= 600) return const _Tablet();
+    return const _Mobile();
+  },
+);
+```
+
+### 中等：`MediaQuery.sizeOf` + 工具函数
+
+```dart
+extension Breakpoint on BuildContext {
+  bool get isMobile => MediaQuery.sizeOf(this).width < 600;
+  bool get isTablet {
+    final w = MediaQuery.sizeOf(this).width;
+    return w >= 600 && w < 1200;
+  }
+  bool get isDesktop => MediaQuery.sizeOf(this).width >= 1200;
+}
+
+if (context.isDesktop) ... else ...
+```
+
+### 大型：`AdaptiveScaffold` / `flutter_adaptive_scaffold`
+
+Material 提供的 `AdaptiveScaffold`（`flutter_adaptive_scaffold` 包）会自动按宽度切换底栏 / 侧栏 / 抽屉，适合"导航 + 内容"型应用。
+
+### 字体缩放与无障碍
+
+iOS / Android 都允许用户在系统设置里放大字体。Flutter 默认尊重该设置：
+
+```dart
+final scaler = MediaQuery.textScalerOf(context);
+final scaled = scaler.scale(16);     // 放大到对应字号
+```
+
+要点：
+
+- 不要硬编码 `fontSize` 然后用 `Container` 限定高度——超大字体会被截断；
+- 文本应允许换行；
+- 测试时打开 Settings → 显示 → 字体 → 最大；
+- 如果某些 UI 必须固定字号（防止破坏布局），用 `MediaQuery(data: mq.copyWith(textScaler: TextScaler.linear(1.0)), child: ...)` 局部禁用缩放。
+
+## 资源管理
+
+### `pubspec.yaml` 注册
+
+```yaml
+flutter:
+  assets:
+    - assets/images/
+    - assets/data/seed.json
+    - assets/icons/logo.svg
+```
+
+整个目录或单文件都可以注册。**注册后才能 load**——忘了注册是 Flutter 报"unable to load asset" 的最常见原因。
+
+### 加载图片
+
+```dart
+Image.asset('assets/images/logo.png');
+Image.network('https://example.com/x.jpg');
+Image.file(File('/path/to/file.jpg'));
+Image.memory(bytes);
+```
+
+实战推荐 `cached_network_image`：
+
+```dart
+import 'package:cached_network_image/cached_network_image.dart';
+
+CachedNetworkImage(
+  imageUrl: url,
+  placeholder: (_, __) => const CircularProgressIndicator(),
+  errorWidget: (_, __, ___) => const Icon(Icons.error),
+);
+```
+
+### 多分辨率图
+
+Flutter 支持自动选最匹配的密度版本。目录结构：
+
+```text
+assets/
+├── images/
+│   └── logo.png          (1x)
+├── 2.0x/
+│   └── logo.png          (2x)
+└── 3.0x/
+    └── logo.png          (3x)
+```
+
+只在 `pubspec.yaml` 注册 `assets/images/logo.png`——Flutter 会自动按 `MediaQuery.devicePixelRatio` 选合适的。
+
+### SVG
+
+Flutter 不内置 SVG。装 `flutter_svg`：
+
+```dart
+import 'package:flutter_svg/flutter_svg.dart';
+
+SvgPicture.asset('assets/icons/logo.svg', width: 24, height: 24);
+SvgPicture.network(url);
+```
+
+### 字体
+
+```yaml
+flutter:
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+        - asset: assets/fonts/Inter-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Inter-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Inter-Italic.ttf
+          style: italic
+```
+
+```dart
+ThemeData(
+  useMaterial3: true,
+  fontFamily: 'Inter',
+);
+```
+
+或局部使用：
+
+```dart
+const Text('Custom', style: TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w500));
+```
+
+线上字体可用 `google_fonts` 包：
+
+```dart
+import 'package:google_fonts/google_fonts.dart';
+
+ThemeData(
+  textTheme: GoogleFonts.interTextTheme(),
+);
+```
+
+`google_fonts` 默认运行时下载，生产环境为减少首次启动延迟，建议**预下载放进 assets**。
+
+### 国际化资源
+
+Flutter 官方推荐 ARB（Application Resource Bundle）文件 + 代码生成。`pubspec.yaml`：
+
+```yaml
+flutter:
+  generate: true
+```
+
+`l10n.yaml`：
+
+```yaml
+arb-dir: lib/l10n
+template-arb-file: app_en.arb
+output-localization-file: app_localizations.dart
+```
+
+文件：
+
+```json filename="lib/l10n/app_en.arb"
+{
+  "@@locale": "en",
+  "hello": "Hello",
+  "greeting": "Hello, {name}",
+  "@greeting": { "placeholders": { "name": { "type": "String" } } }
+}
+```
+
+```json filename="lib/l10n/app_zh.arb"
+{
+  "@@locale": "zh",
+  "hello": "你好",
+  "greeting": "你好，{name}"
+}
+```
+
+`MaterialApp`：
+
+```dart
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:my_app/l10n/app_localizations.dart';
+
+MaterialApp(
+  localizationsDelegates: const [
+    AppLocalizations.delegate,
+    GlobalMaterialLocalizations.delegate,
+    GlobalCupertinoLocalizations.delegate,
+    GlobalWidgetsLocalizations.delegate,
+  ],
+  supportedLocales: const [Locale('en'), Locale('zh')],
+);
+
+// 使用
+final l = AppLocalizations.of(context)!;
+Text(l.greeting('Alice'));
+```
+
+更现代的替代是 [`slang`](https://pub.dev/packages/slang)——类型安全、热重载支持更好、更易模板化。
+
+## 主题进阶（接 Material 章）
+
+### 一处定义、多个组件 theme 字段
+
+```dart
+ThemeData(
+  useMaterial3: true,
+  colorSchemeSeed: Colors.indigo,
+  // 文本
+  textTheme: GoogleFonts.interTextTheme(),
+  // 输入
+  inputDecorationTheme: const InputDecorationTheme(
+    border: OutlineInputBorder(),
+    filled: true,
+  ),
+  // AppBar
+  appBarTheme: const AppBarTheme(centerTitle: false, scrolledUnderElevation: 1),
+  // Card
+  cardTheme: const CardTheme(elevation: 0, margin: EdgeInsets.zero),
+  // Button
+  filledButtonTheme: FilledButtonThemeData(
+    style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+  ),
+);
+```
+
+### 多套主题切换
+
+```dart
+class AppTheme {
+  static const seedColor = Colors.indigo;
+  static ThemeData light() => ThemeData(
+    useMaterial3: true,
+    brightness: Brightness.light,
+    colorSchemeSeed: seedColor,
+  );
+  static ThemeData dark() => ThemeData(
+    useMaterial3: true,
+    brightness: Brightness.dark,
+    colorSchemeSeed: seedColor,
+  );
+}
+
+MaterialApp(
+  theme: AppTheme.light(),
+  darkTheme: AppTheme.dark(),
+  themeMode: themeMode,    // 由用户选择驱动：system / light / dark
+);
+```
+
+## 布局心智模型清单
+
+1. **约束自上而下、尺寸自下而上、父决定位置**——所有 Flutter 布局都遵循这条。
+2. **`Expanded` 只能直接放在 Flex 子位置**；包一层 Container 就崩。
+3. **没有 decoration 时不要用 Container**，用 `SizedBox` / `Padding` / `ColoredBox`。
+4. **大列表必用 `ListView.builder`**，永远不要 `SingleChildScrollView` + Column。
+5. **嵌套滚动 → 改 `CustomScrollView` + slivers**；`shrinkWrap` 是次优解。
+6. **`MediaQuery.sizeOf` 等 helper** 比 `MediaQuery.of(context).size` 更省重建。
+7. **资源必须 `pubspec.yaml` 注册**；多分辨率图 Flutter 自动选。
+8. **支持系统字体缩放是无障碍底线**，不要硬限定文本高度。
+9. **`SafeArea` 在 Scaffold 之外的页面（透明状态栏、底部 sheet）必须显式加**。
+10. **国际化用官方 ARB + `flutter gen-l10n`** 或 `slang`，不要自己写一套字典。
+
+## 自查问题
+
+1. 用一句话描述 Flutter 的"约束 → 尺寸 → 位置"协议。
+2. `Expanded` 与 `Flexible` 的 fit 区别是什么？写一个例子让两者表现不同。
+3. 为什么 `ListView` 不能直接放进另一个 `ListView` 而不出问题？两种解法各有什么权衡？
+4. `SizedBox(height: 16)` 与 `Padding(padding: EdgeInsets.only(top: 16))` 在效果上有何差别？哪个更"轻"？
+5. `MediaQuery.of(context).size` 与 `MediaQuery.sizeOf(context)` 有什么区别？什么场景下前者会触发不必要的重建？
+6. 如何让一个 widget 占父宽度的 60%？写出至少两种实现。
+7. 注册了 1x 与 2x 图片但没注册 3x，3x 设备上会发生什么？
+8. 系统字体缩放到 200% 时，你的硬高度按钮会出什么问题？该怎么修？

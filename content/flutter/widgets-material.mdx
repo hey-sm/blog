@@ -1,0 +1,733 @@
+---
+title: Material 3 与 Cupertino
+description: Material 3 设计系统、ColorScheme、Scaffold/AppBar/Card/Button 全套、Cupertino 对照
+---
+
+# Material 3 与 Cupertino
+
+Flutter 内置两套系统级 UI 套件：
+
+- **Material**：Google 设计语言，对齐 Android 默认外观；最新版本是 **Material 3**（M3，自 Flutter 3.16 起为默认）。
+- **Cupertino**：iOS 风格组件，外观与 iOS 系统应用一致。
+
+业务里 95% 项目以 **Material 3 为主，关键路径补 Cupertino**——这也是本章的取舍。
+
+## 启动 Material 3
+
+```dart
+import 'package:flutter/material.dart';
+
+void main() => runApp(const MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'My App',
+      theme: ThemeData(
+        useMaterial3: true,                              // ★ 启用 M3
+        colorSchemeSeed: Colors.indigo,                  // 由一个种子色派生整套色板
+        brightness: Brightness.light,
+      ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: Colors.indigo,
+        brightness: Brightness.dark,
+      ),
+      themeMode: ThemeMode.system,                       // 跟随系统
+      home: const HomePage(),
+    );
+  }
+}
+```
+
+`useMaterial3` 在 Flutter 3.16+ 默认是 `true`，但显式写出能让代码意图清晰。
+
+## ColorScheme：M3 的色彩骨架
+
+M3 抛弃了旧的"primary / accent / 多个 surface 色"散乱命名，改用一套**配对色**结构：
+
+| 角色 | 用途 |
+| ---- | ---- |
+| `primary` / `onPrimary` | 主色 / 主色之上的前景色 |
+| `primaryContainer` / `onPrimaryContainer` | 主色的弱化容器 / 其上前景 |
+| `secondary` / `onSecondary` / `secondaryContainer` / `onSecondaryContainer` | 次色 |
+| `tertiary` / `onTertiary` / `tertiaryContainer` / `onTertiaryContainer` | 第三色（强调/装饰） |
+| `error` / `onError` / `errorContainer` / `onErrorContainer` | 错误色 |
+| `surface` / `onSurface` | 卡片、对话框、菜单等表面 |
+| `surfaceContainerLowest` / `surfaceContainerLow` / `surfaceContainer` / `surfaceContainerHigh` / `surfaceContainerHighest` | M3 新增的"层次表面"，替代旧 `background` |
+| `outline` / `outlineVariant` | 边框、分割线 |
+
+> **Material 3.22 起 `background` / `onBackground` / `surfaceVariant` 被废弃**，换成 `surface*` 一族。新代码不要再使用 `background` 字段。
+
+### 三种获取 scheme 的方式
+
+```dart
+// 1. 从种子色生成
+final scheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
+
+// 2. 完全手写
+const scheme2 = ColorScheme(
+  brightness: Brightness.light,
+  primary: Color(0xFF6750A4),
+  onPrimary: Colors.white,
+  // ... 全套填完
+);
+
+// 3. 从图片提取（dynamic_color 包，结合系统主题色）
+import 'package:dynamic_color/dynamic_color.dart';
+DynamicColorBuilder(
+  builder: (lightDynamic, darkDynamic) => MaterialApp(
+    theme: ThemeData(colorScheme: lightDynamic ?? defaultLight, useMaterial3: true),
+    darkTheme: ThemeData(colorScheme: darkDynamic ?? defaultDark, useMaterial3: true),
+  ),
+);
+```
+
+种子色生成是 M3 的精髓——给一个色，算出符合无障碍对比度要求的整套色板。
+
+### 在 widget 里取色
+
+```dart
+final scheme = Theme.of(context).colorScheme;
+return Container(
+  color: scheme.primaryContainer,
+  child: Text('hi', style: TextStyle(color: scheme.onPrimaryContainer)),
+);
+```
+
+**永远从 `Theme.of(context).colorScheme` 取色**，而不是硬编码 `Colors.blue`。这是支持 dark mode 与多主题的前提。
+
+## TextTheme：字体与文本样式
+
+```dart
+final t = Theme.of(context).textTheme;
+Text('标题', style: t.headlineMedium);
+Text('正文', style: t.bodyLarge);
+Text('注释', style: t.labelSmall?.copyWith(color: scheme.outline));
+```
+
+M3 的 TextTheme 角色：
+
+- **Display**：超大标题（splash、营销）—— `displayLarge` / `Medium` / `Small`
+- **Headline**：屏幕标题 —— `headlineLarge` / `Medium` / `Small`
+- **Title**：组件标题（卡片标题、对话框标题）—— `titleLarge` / `Medium` / `Small`
+- **Body**：正文 —— `bodyLarge` / `Medium` / `Small`
+- **Label**：按钮、输入框 label —— `labelLarge` / `Medium` / `Small`
+
+在 ThemeData 里覆写：
+
+```dart
+ThemeData(
+  useMaterial3: true,
+  colorSchemeSeed: Colors.indigo,
+  textTheme: const TextTheme(
+    bodyLarge: TextStyle(fontSize: 16, height: 1.5),
+    headlineMedium: TextStyle(fontWeight: FontWeight.bold),
+  ),
+);
+```
+
+## Scaffold：屏幕脚手架
+
+`Scaffold` 是几乎每个 page 的根 widget，提供 AppBar、body、抽屉、底栏、悬浮按钮、SnackBar 容器。
+
+```dart
+Scaffold(
+  appBar: AppBar(
+    title: const Text('Home'),
+    centerTitle: false,
+    actions: [
+      IconButton(icon: const Icon(Icons.search), onPressed: () {}),
+      IconButton(icon: const Icon(Icons.more_vert), onPressed: () {}),
+    ],
+  ),
+  drawer: const NavigationDrawer(children: []),
+  body: const Center(child: Text('Body')),
+  floatingActionButton: FloatingActionButton(
+    onPressed: () {},
+    child: const Icon(Icons.add),
+  ),
+  bottomNavigationBar: NavigationBar(
+    selectedIndex: 0,
+    onDestinationSelected: (i) {},
+    destinations: const [
+      NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
+      NavigationDestination(icon: Icon(Icons.person), label: 'Me'),
+    ],
+  ),
+);
+```
+
+要点：
+
+- `body` 是主内容区，自动避开 AppBar / 底栏 / 键盘安全区；
+- **每个 page 一个 Scaffold**；嵌套 Scaffold 仅在你确实想"局部布局含 AppBar"时才用；
+- `Scaffold.of(context)` / `ScaffoldMessenger.of(context)` 提供 SnackBar、底栏、Drawer 操作 API。
+
+### `AppBar` vs `SliverAppBar`
+
+```dart
+// 普通：固定高度
+AppBar(title: const Text('Home'))
+
+// Sliver 版本：嵌入 CustomScrollView，可滚动隐藏 / 折叠
+CustomScrollView(
+  slivers: [
+    SliverAppBar(
+      pinned: true,
+      floating: false,
+      expandedHeight: 200,
+      flexibleSpace: const FlexibleSpaceBar(title: Text('Big')),
+    ),
+    SliverList(...),
+  ],
+);
+```
+
+需要"滚动时 AppBar 折叠 / 视差"用 SliverAppBar；其他用普通 AppBar。
+
+### NavigationBar vs BottomNavigationBar
+
+M3 的底部导航是 `NavigationBar`（5 项以下推荐），旧的 `BottomNavigationBar` 仍可用但属于 M2 风格。
+
+### NavigationRail（侧栏）
+
+平板 / 桌面端用 `NavigationRail` 替代底栏：
+
+```dart
+Row(
+  children: [
+    NavigationRail(
+      selectedIndex: 0,
+      onDestinationSelected: (i) {},
+      destinations: const [
+        NavigationRailDestination(icon: Icon(Icons.home), label: Text('Home')),
+        NavigationRailDestination(icon: Icon(Icons.person), label: Text('Me')),
+      ],
+    ),
+    const VerticalDivider(width: 1),
+    Expanded(child: Body()),
+  ],
+);
+```
+
+响应式切换底栏 / 侧栏的做法见 [布局、约束与主题](/flutter/layout-styling)。
+
+## 按钮全家桶
+
+M3 提供 5 种按钮，按"视觉强度"递减：
+
+| Widget | 用途 | 视觉 |
+| ------ | ---- | ---- |
+| `FilledButton` | 主要 CTA | 实心、强调色 |
+| `FilledButton.tonal` | 次要 CTA | 弱调色 |
+| `ElevatedButton` | 浅色背景上的强调 | 带阴影实心 |
+| `OutlinedButton` | 边框按钮 | 边框 + 文字 |
+| `TextButton` | 文本链接 | 仅文字 |
+
+```dart
+FilledButton(onPressed: () {}, child: const Text('Save'))
+FilledButton.tonal(onPressed: () {}, child: const Text('Cancel'))
+ElevatedButton(onPressed: () {}, child: const Text('Submit'))
+OutlinedButton(onPressed: () {}, child: const Text('Skip'))
+TextButton(onPressed: () {}, child: const Text('Learn more'))
+
+// 带图标
+FilledButton.icon(
+  onPressed: () {},
+  icon: const Icon(Icons.add),
+  label: const Text('Add'),
+);
+
+// 圆形纯图标
+IconButton.filled(onPressed: () {}, icon: const Icon(Icons.bolt));
+IconButton.filledTonal(onPressed: () {}, icon: const Icon(Icons.bolt));
+IconButton.outlined(onPressed: () {}, icon: const Icon(Icons.bolt));
+IconButton(onPressed: () {}, icon: const Icon(Icons.bolt));
+```
+
+`onPressed` 传 `null` 会让按钮**自动进入 disabled 视觉**——这是 Flutter 与命令式框架的关键差异。
+
+### 自定义按钮样式
+
+```dart
+FilledButton(
+  style: FilledButton.styleFrom(
+    minimumSize: const Size(double.infinity, 48),
+    padding: const EdgeInsets.symmetric(horizontal: 24),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+  ),
+  onPressed: () {},
+  child: const Text('Continue'),
+);
+```
+
+更深的样式覆盖通过 `WidgetStateProperty` / `WidgetStatesController`（M3 起 `MaterialState*` 改名为 `WidgetState*`）：
+
+```dart
+ElevatedButton(
+  style: ButtonStyle(
+    backgroundColor: WidgetStateProperty.resolveWith((states) {
+      if (states.contains(WidgetState.disabled)) return Colors.grey;
+      if (states.contains(WidgetState.pressed)) return Colors.indigo.shade700;
+      return Colors.indigo;
+    }),
+  ),
+  onPressed: () {},
+  child: const Text('Custom'),
+);
+```
+
+## 常用容器：Card / ListTile / Chip
+
+### Card
+
+```dart
+Card(
+  child: Padding(
+    padding: const EdgeInsets.all(16),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Title', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        const Text('Body'),
+      ],
+    ),
+  ),
+);
+```
+
+M3 引入 `Card.filled` / `Card.outlined` 三种样式：
+
+```dart
+const Card(...);                 // elevated（默认）
+const Card.filled(...);
+const Card.outlined(...);
+```
+
+### ListTile
+
+90% 列表行不需要自己 Row + Padding 拼，直接 ListTile：
+
+```dart
+ListTile(
+  leading: const CircleAvatar(child: Text('A')),
+  title: const Text('Alice'),
+  subtitle: const Text('Online'),
+  trailing: const Icon(Icons.chevron_right),
+  onTap: () {},
+);
+```
+
+### Chip 系列
+
+```dart
+Chip(label: const Text('Plain'));
+ActionChip(label: const Text('Action'), onPressed: () {});
+ChoiceChip(label: const Text('Choose'), selected: true, onSelected: (v) {});
+FilterChip(label: const Text('Filter'), selected: true, onSelected: (v) {});
+InputChip(label: const Text('Input'), onDeleted: () {});
+```
+
+## 输入：TextField / TextFormField
+
+简单使用：
+
+```dart
+TextField(
+  decoration: const InputDecoration(
+    labelText: 'Email',
+    border: OutlineInputBorder(),
+    prefixIcon: Icon(Icons.email_outlined),
+  ),
+  keyboardType: TextInputType.emailAddress,
+  textInputAction: TextInputAction.next,
+  onChanged: (v) {},
+);
+```
+
+带 controller：
+
+```dart
+final controller = TextEditingController();
+TextField(controller: controller);
+// 读：controller.text
+// 写：controller.text = 'foo';
+// 监听：controller.addListener(...)
+```
+
+> 控制器必须在 `dispose()` 中 `controller.dispose()`，否则泄漏。
+
+`TextFormField` 是 `TextField` + 表单校验集成版，在 `Form` 内使用，详见 [表单与校验](/flutter/forms)。
+
+## 选择：Switch / Checkbox / Radio / Slider / DropdownMenu
+
+```dart
+Switch(value: enabled, onChanged: (v) => setState(() => enabled = v));
+Checkbox(value: checked, onChanged: (v) => setState(() => checked = v ?? false));
+
+Radio<int>(value: 1, groupValue: selected, onChanged: (v) => setState(() => selected = v!));
+RadioListTile<int>(
+  value: 1,
+  groupValue: selected,
+  title: const Text('Option 1'),
+  onChanged: (v) => setState(() => selected = v!),
+);
+
+Slider(value: v, onChanged: (n) => setState(() => v = n));
+
+DropdownMenu<String>(
+  initialSelection: 'A',
+  dropdownMenuEntries: const [
+    DropdownMenuEntry(value: 'A', label: 'Option A'),
+    DropdownMenuEntry(value: 'B', label: 'Option B'),
+  ],
+  onSelected: (v) {},
+);
+```
+
+`DropdownMenu` 是 M3 推荐的下拉，比旧 `DropdownButton` 视觉更好；`SegmentedButton` 适合 2-5 选 1：
+
+```dart
+SegmentedButton<int>(
+  segments: const [
+    ButtonSegment(value: 0, label: Text('Day')),
+    ButtonSegment(value: 1, label: Text('Week')),
+    ButtonSegment(value: 2, label: Text('Month')),
+  ],
+  selected: {0},
+  onSelectionChanged: (s) {},
+);
+```
+
+## 反馈：SnackBar / Dialog / BottomSheet / Banner
+
+### SnackBar
+
+```dart
+ScaffoldMessenger.of(context).showSnackBar(
+  SnackBar(
+    content: const Text('Saved'),
+    action: SnackBarAction(label: 'Undo', onPressed: () {}),
+    behavior: SnackBarBehavior.floating,         // M3 推荐 floating
+  ),
+);
+```
+
+> 注意：必须用 `ScaffoldMessenger.of(context)` 而不是旧的 `Scaffold.of`。
+
+### Dialog
+
+```dart
+final result = await showDialog<bool>(
+  context: context,
+  builder: (ctx) => AlertDialog(
+    title: const Text('Delete?'),
+    content: const Text('This cannot be undone.'),
+    actions: [
+      TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+      FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
+    ],
+  ),
+);
+if (result == true) { /* ... */ }
+```
+
+`showDialog` 返回一个 Future，resolve 时机为关闭对话框。`Navigator.pop(ctx, value)` 把返回值带回。
+
+### BottomSheet
+
+```dart
+showModalBottomSheet<void>(
+  context: context,
+  showDragHandle: true,
+  isScrollControlled: true,
+  builder: (ctx) => Padding(
+    padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
+    child: const SizedBox(height: 400, child: Center(child: Text('Sheet'))),
+  ),
+);
+```
+
+`isScrollControlled: true` 让 sheet 可以全屏；底部 `viewInsets` padding 让键盘弹起时内容上移。
+
+### MaterialBanner（通知条）
+
+```dart
+ScaffoldMessenger.of(context).showMaterialBanner(
+  MaterialBanner(
+    content: const Text('You are offline'),
+    leading: const Icon(Icons.cloud_off),
+    actions: [
+      TextButton(
+        onPressed: () => ScaffoldMessenger.of(context).hideCurrentMaterialBanner(),
+        child: const Text('Dismiss'),
+      ),
+    ],
+  ),
+);
+```
+
+## 进度与骨架
+
+```dart
+// 圆形 / 线性进度
+const CircularProgressIndicator();
+const LinearProgressIndicator();
+LinearProgressIndicator(value: 0.42);          // 0-1 已知进度
+
+// 骨架屏：用 shimmer 包，或 M3 的 `Skeletonizer`（来自 skeletonizer 包）
+```
+
+## Cupertino：iOS 风格组件
+
+需要 iOS 原生即视感时切到 Cupertino。常用组件名以 `Cupertino` 前缀：
+
+| Material | Cupertino |
+| -------- | --------- |
+| `MaterialApp` | `CupertinoApp` |
+| `Scaffold` | `CupertinoPageScaffold` |
+| `AppBar` | `CupertinoNavigationBar` |
+| `ElevatedButton` | `CupertinoButton.filled` |
+| `TextButton` | `CupertinoButton` |
+| `TextField` | `CupertinoTextField` |
+| `Switch` | `CupertinoSwitch` |
+| `Slider` | `CupertinoSlider` |
+| `AlertDialog` | `CupertinoAlertDialog` |
+| `BottomSheet` | `CupertinoActionSheet` |
+| `BottomNavigationBar` | `CupertinoTabBar` |
+| 进度 | `CupertinoActivityIndicator` |
+
+完整 iOS 风格的 app：
+
+```dart
+CupertinoApp(
+  theme: const CupertinoThemeData(brightness: Brightness.light),
+  home: CupertinoTabScaffold(
+    tabBar: CupertinoTabBar(items: const [
+      BottomNavigationBarItem(icon: Icon(CupertinoIcons.home), label: 'Home'),
+      BottomNavigationBarItem(icon: Icon(CupertinoIcons.person), label: 'Me'),
+    ]),
+    tabBuilder: (_, i) => CupertinoPageScaffold(
+      navigationBar: CupertinoNavigationBar(middle: Text('Tab $i')),
+      child: const Center(child: Text('content')),
+    ),
+  ),
+);
+```
+
+### 自适应：单代码两风格
+
+`Switch.adaptive` / `CircularProgressIndicator.adaptive` / `Slider.adaptive` 等会**根据平台自动选择 Material 或 Cupertino 外观**：
+
+```dart
+const CircularProgressIndicator.adaptive();   // iOS 上是 Cupertino 风，其他平台是 Material 风
+```
+
+不是所有 Material 组件都有 `.adaptive`。需要更细粒度的"按平台分发"用 `Theme.of(context).platform` 或 `defaultTargetPlatform` + 条件构造，详见 [平台集成](/flutter/platform-integration)。
+
+### 何时该用 Cupertino？
+
+实战经验：
+
+- **完全 iOS-only 应用**：直接 CupertinoApp 主导；
+- **跨平台主流应用**：以 Material 3 为主，少量关键交互（如 iOS 拨号风格的 Picker）用 Cupertino；
+- **强烈"一致风格"诉求**：全 Material 不混 Cupertino，简单直接。
+
+## 主题化最佳实践
+
+### 一处定义，处处引用
+
+```dart
+// ✗ 硬编码
+Container(color: Colors.indigo)
+
+// ✓ 引用 colorScheme
+Container(color: Theme.of(context).colorScheme.primary)
+```
+
+### 自定义组件主题
+
+ThemeData 里几乎每个 widget 都有专属主题字段：`appBarTheme` / `cardTheme` / `elevatedButtonTheme` / `inputDecorationTheme` / `textTheme` 等。**集中定义比每处单独传 style 好维护**：
+
+```dart
+ThemeData(
+  useMaterial3: true,
+  colorSchemeSeed: Colors.indigo,
+  appBarTheme: const AppBarTheme(centerTitle: false, scrolledUnderElevation: 1),
+  inputDecorationTheme: const InputDecorationTheme(
+    border: OutlineInputBorder(),
+    filled: true,
+  ),
+  cardTheme: const CardTheme(
+    elevation: 0,
+    margin: EdgeInsets.zero,
+  ),
+  filledButtonTheme: FilledButtonThemeData(
+    style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+  ),
+);
+```
+
+### 扩展自定义颜色（M3 自定义角色）
+
+`ColorScheme` 字段是固定的。要加 brand 专属色（如 `success` / `warning`）用 ThemeExtension：
+
+```dart
+@immutable
+class AppColors extends ThemeExtension<AppColors> {
+  const AppColors({required this.success, required this.warning});
+
+  final Color success;
+  final Color warning;
+
+  @override
+  AppColors copyWith({Color? success, Color? warning}) =>
+      AppColors(success: success ?? this.success, warning: warning ?? this.warning);
+
+  @override
+  AppColors lerp(ThemeExtension<AppColors>? other, double t) {
+    if (other is! AppColors) return this;
+    return AppColors(
+      success: Color.lerp(success, other.success, t)!,
+      warning: Color.lerp(warning, other.warning, t)!,
+    );
+  }
+}
+
+// 注册
+ThemeData(
+  useMaterial3: true,
+  colorSchemeSeed: Colors.indigo,
+  extensions: const [
+    AppColors(success: Color(0xFF2E7D32), warning: Color(0xFFEF6C00)),
+  ],
+);
+
+// 使用
+final colors = Theme.of(context).extension<AppColors>()!;
+Container(color: colors.success);
+```
+
+## 一个综合页面
+
+把本章主要 widget 拼成一个看起来像样的 settings 页：
+
+```dart filename="lib/screens/settings_page.dart"
+import 'package:flutter/material.dart';
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  bool notif = true;
+  String theme = 'system';
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          ListTile(
+            leading: CircleAvatar(
+              backgroundColor: cs.primaryContainer,
+              child: Icon(Icons.person, color: cs.onPrimaryContainer),
+            ),
+            title: const Text('Alice'),
+            subtitle: const Text('alice@example.com'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {},
+          ),
+          const Divider(),
+          SwitchListTile(
+            title: const Text('Notifications'),
+            value: notif,
+            onChanged: (v) => setState(() => notif = v),
+          ),
+          ListTile(
+            title: const Text('Theme'),
+            subtitle: Text(theme),
+            onTap: () async {
+              final picked = await showModalBottomSheet<String>(
+                context: context,
+                showDragHandle: true,
+                builder: (ctx) => Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final t in ['system', 'light', 'dark'])
+                      RadioListTile<String>(
+                        value: t,
+                        groupValue: theme,
+                        title: Text(t),
+                        onChanged: (v) => Navigator.pop(ctx, v),
+                      ),
+                  ],
+                ),
+              );
+              if (picked != null) setState(() => theme = picked);
+            },
+          ),
+          const Divider(),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: FilledButton.tonal(
+              onPressed: () async {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Sign out?'),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                      FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Sign out')),
+                    ],
+                  ),
+                );
+                if (ok == true && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Signed out')),
+                  );
+                }
+              },
+              child: const SizedBox(height: 48, child: Center(child: Text('Sign out'))),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+## Material 3 与 Cupertino 心智模型清单
+
+1. **`useMaterial3: true` + `colorSchemeSeed`** 是 M3 应用的最简启动姿势。
+2. **永远从 `Theme.of(context).colorScheme` 取色**，不硬编码 `Colors.xxx`；这是支持多主题的前提。
+3. **背景色用 `surface*` 一族**，`background` 已废弃。
+4. **每个 page 一个 Scaffold**，AppBar / 底栏 / FAB 全靠它统一管理。
+5. **按钮 5 兄弟按视觉强度选**：FilledButton（主 CTA）→ tonal → Elevated → Outlined → Text。
+6. **`onPressed: null` 自动 disabled**——别自己写 if 切样式。
+7. **SnackBar 用 `ScaffoldMessenger.of(context)`**；旧 `Scaffold.of` 仅用于 BottomSheet / Drawer。
+8. **`DropdownMenu` / `SegmentedButton` / `NavigationBar`** 是 M3 替代旧 widget 的新成员。
+9. **`.adaptive` 工厂**让一些组件按平台自动选 Material / Cupertino 风。
+10. **ThemeExtension** 是 M3 颜色之外的扩展机制，为 brand 色 / 自定义角色服务。
+
+## 自查问题
+
+1. M3 的 `surface` 与已废弃的 `background` 是什么关系？新代码该用哪个？
+2. 何时用 `FilledButton`、何时用 `ElevatedButton`、何时用 `TextButton`？
+3. `ScaffoldMessenger.of` 与 `Scaffold.of` 各自负责什么？为什么 SnackBar 走前者？
+4. `AppBar` 与 `SliverAppBar` 何时该用哪个？
+5. `Switch.adaptive` 与 `Switch` 的区别？什么场景该用 `.adaptive`？
+6. 一个组件需要"primary 色之上的前景色"——你应该用 ColorScheme 的哪个字段？
+7. 如果整个 app 的 Card 都需要圆角 + 无阴影，你会改哪里、避免哪种做法？
+8. 怎样为 ColorScheme 之外的"success"色定义一个跨主题平滑过渡的颜色？

@@ -1,0 +1,527 @@
+---
+title: 埋点与监控
+description: 事件模型设计、Firebase Analytics/GA4、Segment 中间层、Mixpanel、Crashlytics 工程化、Sentry breadcrumb/source map、性能监控、合规(隐私清单/ATT/GDPR/PIPL)
+---
+
+# 埋点与监控
+
+线上版本之后,你需要回答两类问题:
+
+1. **用户在干什么?** —— 哪些功能被用、被用多少、漏斗哪一步流失最多。
+2. **用户遇到了什么?** —— 崩溃 / 卡顿 / 网络异常 / 业务异常的发生率与影响面。
+
+第一类用 **Analytics + Funnel** 工具(Firebase Analytics / Mixpanel / Amplitude),第二类用 **Crashlytics + Sentry + Performance Monitoring**。本章按"埋点 → 崩溃 → 性能 → 合规"展开。
+
+## 埋点模型:三件事
+
+任何埋点系统都建立在三类数据上:
+
+| 名称 | 频率 | 例子 |
+| ---- | ---- | ---- |
+| **事件(event)** | 高 | `screen_view`、`button_click`、`purchase` |
+| **事件参数(event params)** | 跟事件 | `purchase` 的 `amount` / `currency` / `item_id` |
+| **用户属性(user properties)** | 低,跟用户走 | `signup_date` / `subscription_tier` / `country` / `app_version` |
+
+**事件**回答"做了什么",**事件参数**回答"针对什么 / 多少",**用户属性**回答"是谁"。
+
+### 事件命名公约
+
+```text
+✅ 命名:snake_case,动词 + 对象,语义稳定
+   sign_in_started / sign_in_succeeded / sign_in_failed
+   article_viewed / article_shared
+   purchase_initiated / purchase_completed
+
+❌ 反例
+   click_button1                  ← 哪个 button?
+   home_action                    ← 太宽
+   user_did_something_finally     ← 不要带情绪
+```
+
+#### 事件参数命名
+
+```text
+purchase_completed
+  amount:    9.99            (number,不要 string)
+  currency:  "USD"
+  item_id:   "premium_monthly"
+  source:    "paywall_v2"    (从哪个页面发起)
+```
+
+GA4 / Firebase Analytics 默认参数名有规范(`value` / `currency` / `item_id` 等),命中规范的可以参与"营收事件"自动统计——抄它的命名习惯准没错。
+
+### 数据字典
+
+埋点最容易腐化——一年后谁也说不清 `home_click` 到底是哪个按钮。第一天起就维护**数据字典**(团队共享的电子表格 / Notion):
+
+```text
+| 事件名             | 触发位置        | 必填参数            | 备注       |
+| ------------------ | --------------- | ------------------- | ---------- |
+| article_viewed     | 详情页 onShow   | article_id, source  | source ∈ { feed, search, share } |
+| purchase_initiated | 付费墙 CTA      | item_id, source     |            |
+| purchase_completed | 支付回调成功    | item_id, amount     |            |
+```
+
+**任何新埋点先进字典再写代码**。否则三个月后你看到 `purchase_done` 和 `purchase_completed` 同时存在,一辈子洗不清。
+
+## Firebase Analytics(GA4 后端)
+
+接入最简、与 Firebase 生态(Crashlytics / Remote Config)互通最好。
+
+```yaml filename="pubspec.yaml"
+dependencies:
+  firebase_core: ^3.6.0
+  firebase_analytics: ^11.3.0
+```
+
+```dart filename="lib/analytics/analytics_service.dart"
+import 'package:firebase_analytics/firebase_analytics.dart';
+
+class AnalyticsService {
+  final _fa = FirebaseAnalytics.instance;
+
+  Future<void> setUserProperties({required String? uid, required String tier}) async {
+    await _fa.setUserId(id: uid);
+    await _fa.setUserProperty(name: 'subscription_tier', value: tier);
+  }
+
+  Future<void> logScreenView(String name) =>
+      _fa.logScreenView(screenName: name);
+
+  Future<void> logArticleViewed({required String id, required String source}) =>
+      _fa.logEvent(name: 'article_viewed', parameters: {
+        'article_id': id,
+        'source': source,
+      });
+
+  Future<void> logPurchaseCompleted({required String itemId, required double amount, String currency = 'USD'}) =>
+      _fa.logPurchase(value: amount, currency: currency, items: [
+        AnalyticsEventItem(itemId: itemId),
+      ]);
+}
+```
+
+### 与 Riverpod 集成
+
+```dart filename="lib/analytics/analytics_provider.dart"
+@Riverpod(keepAlive: true)
+AnalyticsService analytics(AnalyticsRef ref) => AnalyticsService();
+```
+
+```dart
+ref.read(analyticsProvider).logArticleViewed(id: id, source: 'feed');
+```
+
+### go_router 自动 screen_view
+
+```dart filename="lib/router/router.dart"
+GoRouter(
+  observers: [FirebaseAnalyticsObserver(analytics: FirebaseAnalytics.instance)],
+  // ...
+);
+```
+
+GA4 后台几小时后能看到事件;Debug View 可以**实时**(在控制台开 debug 模式 + adb shell 命令调试):
+
+```bash
+adb shell setprop debug.firebase.analytics.app com.example.myapp
+```
+
+iOS:Xcode → Edit Scheme → Run → Arguments → Add `-FIRDebugEnabled`。
+
+## Segment:中间层(为什么需要)
+
+```text
+   App  ──→  Segment  ──fan-out──→  GA4 / Mixpanel / Amplitude / 数仓 / ...
+```
+
+Segment 把"事件分发"集中到一个 SDK + 配置面板。好处:
+
+- **不用集成 5 个埋点 SDK**(每加一个对接耗时 + 包大小膨胀)。
+- **运营换分析平台不需要发版**——Segment 后台改路由即可。
+- **统一数据 schema**:不同平台的事件格式自动转换。
+
+代价:成本高(超过免费额度后按事件数计费),小项目不划算。
+
+实践:**MAU > 10 万 + 多个分析下游 + 数据团队** 时引入,否则 Firebase Analytics 直连足够。
+
+## Mixpanel / Amplitude
+
+Firebase Analytics(GA4)的短板:
+
+- **样本聚合**(超 10 万事件的项目会"采样"显示,不精确)。
+- **funnel / cohort 自由度低**(只能看"系统给你算好的")。
+- **不能按"用户"看具体路径**(GA4 把用户行为聚合成统计,不让你逐人看历史)。
+
+[Mixpanel](https://pub.dev/packages/mixpanel_flutter) / [Amplitude](https://pub.dev/packages/amplitude_flutter) 主打"产品分析"——任意维度切片、retention / funnel / 任意路径分析、按用户看完整行为流。MAU 收费,小项目可用免费档。
+
+```dart
+import 'package:mixpanel_flutter/mixpanel_flutter.dart';
+
+final mp = await Mixpanel.init('YOUR_TOKEN', trackAutomaticEvents: true);
+await mp.track('article_viewed', properties: {'article_id': id, 'source': source});
+await mp.identify(uid);
+await mp.getPeople().set('subscription_tier', 'pro');
+```
+
+实战常见组合:**Firebase Analytics(免费、与 Crashlytics / Remote Config 互通)+ Mixpanel(产品深度分析)双发**,通过抽象的 `AnalyticsService` 同时调两个 SDK。
+
+## Crashlytics(回到第 17 章 + 工程化)
+
+第 17 章已经讲过基础。这里聚焦**工程化要点**——上线之前补全。
+
+### 自定义键 / 用户标识 / 日志
+
+```dart filename="lib/main.dart"
+await FirebaseCrashlytics.instance.setUserIdentifier(uid);
+await FirebaseCrashlytics.instance.setCustomKey('app_section', 'checkout');
+await FirebaseCrashlytics.instance.setCustomKey('subscription_tier', 'pro');
+FirebaseCrashlytics.instance.log('user tapped pay button');     // breadcrumb
+```
+
+崩溃报告会附带这些上下文——同一个 NPE 在不同 `app_section` 下的发生率,马上能在 console 切片。
+
+### Mapping / dSYM 上传(必做)
+
+release 包做了 `--obfuscate`,堆栈是混淆过的字符串。Crashlytics 后台显示 "deobfuscation needed"——你必须上传 mapping。
+
+#### Android
+
+`build/app/outputs/mapping/release/mapping.txt` 上传。Gradle 插件可自动:
+
+```kotlin filename="android/app/build.gradle.kts"
+plugins {
+    id("com.google.gms.google-services")
+    id("com.google.firebase.crashlytics")             // ★ Crashlytics 插件
+}
+
+// 自动上传 mapping(release build 后)
+android {
+    buildTypes {
+        release {
+            firebaseCrashlytics {
+                mappingFileUploadEnabled = true
+            }
+        }
+    }
+}
+```
+
+#### iOS
+
+Flutter `--split-debug-info=build/symbols` 产出 dSYM 等价物,需手动上传:
+
+```bash
+firebase crashlytics:symbols:upload \
+  --app=$IOS_FIREBASE_APP_ID \
+  build/symbols/
+```
+
+CI 里跑这条。
+
+### Native 崩溃 vs Dart 崩溃
+
+Crashlytics 同时抓:
+
+- **Dart 异常**(通过 `FlutterError.onError` / `PlatformDispatcher.onError`)。
+- **Native 崩溃**(SIGSEGV、ANR、iOS 内存被杀)——SDK 自动处理。
+
+**两套堆栈的 deobfuscation 是分开的**:Dart 用 `*.symbols`,Android 用 `mapping.txt` + NDK symbol,iOS 用 dSYM。任一缺失,对应栈就显示成乱码。
+
+### 关键性能指标:Crash-Free Users
+
+Crashlytics 主面板的 **"Crash-Free users %"**:
+
+- **新版本上线 24h 内 < 99.5%** → 紧急排查。
+- **稳定版本应保持 > 99.9%**。
+- **个别版本骤降** → Remote Config 立刻关掉新功能 / 提交修复版本走灰度发布。
+
+## Sentry
+
+[Sentry](https://pub.dev/packages/sentry_flutter) 与 Crashlytics 类似,优势:
+
+- **更细的 breadcrumb**(自动抓 navigation、HTTP、console log)。
+- **Source map / dSYM 处理**更顺(尤其 Web)。
+- **跨平台一致**(同一个面板看前端 + 后端 + iOS + Android)。
+- **issue 分组算法更精准**(Crashlytics 偶尔把不同 bug 归一组)。
+
+```yaml
+dependencies:
+  sentry_flutter: ^8.10.0
+```
+
+```dart filename="lib/main.dart"
+await SentryFlutter.init(
+  (options) {
+    options.dsn = 'https://your-dsn@sentry.io/...';
+    options.tracesSampleRate = 0.2;             // 性能采样,0~1
+    options.profilesSampleRate = 0.2;           // CPU profiling 采样
+    options.environment = Env.current.name;
+    options.release = '${packageInfo.version}+${packageInfo.buildNumber}';
+  },
+  appRunner: () => runApp(const ProviderScope(child: MyApp())),
+);
+```
+
+### 自动 dio / go_router 集成
+
+```dart
+// dio
+dio.interceptors.add(SentryDioClientAdapter());
+
+// go_router
+GoRouter(observers: [SentryNavigatorObserver()]);
+```
+
+### Source map(Web)
+
+Web 上 release 是 minified JS,Sentry 必须有 source map:
+
+```bash
+flutter build web --release --source-maps
+sentry-cli releases files $RELEASE upload-sourcemaps build/web
+```
+
+### Crashlytics vs Sentry 选型
+
+| 维度 | Crashlytics | Sentry |
+| ---- | ---- | ---- |
+| 价格 | 免费(无额度限制) | 免费档 5k 事件/月,超额收费 |
+| Native 崩溃 | 一手数据,与 Firebase 无缝 | 也支持但配置复杂 |
+| breadcrumb 精细度 | 一般 | 强 |
+| 跨平台聚合 | Firebase 各 app 分开 | 同一面板看全栈 |
+| 与已有 Firebase 项目整合 | 顺 | 独立账户 |
+
+**实战**:已经在 Firebase 生态 → Crashlytics 主线;有自家后端、Web 多端 → Sentry 更顺。**两者并跑也常见**(Crashlytics 抓底层崩溃 + Sentry 抓详细业务异常)。
+
+## Firebase Performance Monitoring
+
+```yaml
+dependencies:
+  firebase_performance: ^0.10.0
+```
+
+自动抓:
+
+- **App start time** (cold / warm)
+- **Screen rendering**(slow frames / frozen frames 比例)
+- **HTTP requests**(自动 hook,统计响应时间 / 失败率,无需手写)
+
+手动 trace:
+
+```dart
+final trace = FirebasePerformance.instance.newTrace('image_processing');
+await trace.start();
+// ... do work
+trace.putAttribute('source', 'gallery');
+trace.setMetric('processed_bytes', bytes);
+await trace.stop();
+```
+
+适合监控"业务上的关键耗时操作"(支付链路、图片上传、大列表加载)。
+
+## 合规:必须做对的几件事
+
+### iOS Privacy Manifest(隐私清单)
+
+iOS 17+ **强制要求**:app + 每个使用敏感 API 的第三方 SDK 都要附带 `PrivacyInfo.xcprivacy`。从 2024 年 5 月起,App Store 提交时缺失 / 不合规会被 reject。
+
+```xml filename="ios/Runner/PrivacyInfo.xcprivacy"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSPrivacyCollectedDataTypes</key>
+  <array>
+    <dict>
+      <key>NSPrivacyCollectedDataType</key>
+      <string>NSPrivacyCollectedDataTypeEmailAddress</string>
+      <key>NSPrivacyCollectedDataTypeLinked</key><true/>
+      <key>NSPrivacyCollectedDataTypeTracking</key><false/>
+      <key>NSPrivacyCollectedDataTypePurposes</key>
+      <array><string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string></array>
+    </dict>
+  </array>
+  <key>NSPrivacyAccessedAPITypes</key>
+  <array>
+    <dict>
+      <key>NSPrivacyAccessedAPIType</key>
+      <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+      <key>NSPrivacyAccessedAPITypeReasons</key>
+      <array><string>CA92.1</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>
+```
+
+> 主流第三方 SDK(Firebase / Sentry / Mixpanel)都已自带 `PrivacyInfo.xcprivacy`,**升到最新版本即可**。app 自身的清单需要按使用情况手填。
+
+### App Tracking Transparency(ATT)
+
+iOS 14.5+,app **必须**在尝试用 IDFA(广告标识符)前请求 ATT 授权:
+
+```yaml
+dependencies:
+  app_tracking_transparency: ^2.0.0
+```
+
+```xml filename="ios/Runner/Info.plist"
+<key>NSUserTrackingUsageDescription</key>
+<string>用于个性化广告与跨应用归因</string>
+```
+
+```dart
+import 'package:app_tracking_transparency/app_tracking_transparency.dart';
+
+final status = await AppTrackingTransparency.requestTrackingAuthorization();
+if (status == TrackingStatus.authorized) {
+  final idfa = await AppTrackingTransparency.getAdvertisingIdentifier();
+  // 可用作广告归因
+}
+```
+
+> 拒绝率行业平均 80%——ATT 之后 IDFA 几乎没用。靠广告归因的产品要靠 SKAdNetwork / postback 替代。
+
+### Android: Google Advertising ID(GAID)
+
+Android 13+ 想用 GAID 必须在 manifest 声明权限:
+
+```xml filename="android/app/src/main/AndroidManifest.xml"
+<uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
+```
+
+用户可在系统设置里清除/禁用 GAID,你的代码必须容忍 `null`。
+
+### GDPR / CCPA(欧美隐私)
+
+要点:
+
+- **同意默认是 No**——欧盟用户必须主动 opt-in 才能埋点。
+- **必须给"撤回同意"的入口**(在设置页一键关闭)。
+- **必须能"导出全部数据"和"彻底删除账号"**(Right to access / Right to erasure)。
+- **未成年人(< 16)需家长同意**(GDPR-K)。
+
+实施:
+
+```dart
+final consented = await showConsentDialog();    // 首启时弹
+if (consented) {
+  await FirebaseAnalytics.instance.setAnalyticsCollectionEnabled(true);
+  await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
+}
+// 设置页提供"关闭"入口
+```
+
+第三方专门 SDK(`@didomi/mobile-flutter` / `@iubenda/iubenda-flutter`)封装了完整 CMP(Consent Management Platform),欧美正式上线推荐用。
+
+### 中国《个人信息保护法》/ 工信部要求
+
+国内主要合规点:
+
+- **首次启动必须弹隐私协议**——用户同意后才能初始化任何采集 SDK。
+- **协议外不得收集**:你列出来的数据类型必须与实际一致。
+- **第三方 SDK 列表公示**(在隐私政策里逐个写出名称、用途、数据类型)。
+- **未成年人模式**(2024 起强制要求大型应用提供)。
+
+```dart filename="lib/main.dart"
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 仅初始化"必要服务"(本地路由、不联网的功能)
+  final consented = await PrivacyPrefs.hasConsented;
+  if (!consented) {
+    runApp(const PrivacyDialogApp());                   // 先只跑同意弹窗的最小 app
+    return;
+  }
+
+  // 同意后再初始化所有 SDK
+  await Firebase.initializeApp(...);
+  await initFcm();
+  await initAnalytics();
+  runApp(const ProviderScope(child: MyApp()));
+}
+```
+
+> 提示:**Firebase / Sentry 等海外服务在中国大陆受限**。国内项目通常用阿里云 / 友盟 + / 神策 / 火山引擎等替代。
+
+## AnalyticsService 抽象:同时接多个后端
+
+为了"换分析平台不动业务代码",抽个接口:
+
+```dart filename="lib/analytics/i_analytics.dart"
+abstract interface class IAnalytics {
+  Future<void> setUser(String? uid);
+  Future<void> setUserProperty(String key, String? value);
+  Future<void> logEvent(String name, [Map<String, Object?>? params]);
+}
+```
+
+```dart filename="lib/analytics/composite_analytics.dart"
+class CompositeAnalytics implements IAnalytics {
+  CompositeAnalytics(this._impls);
+  final List<IAnalytics> _impls;
+
+  @override
+  Future<void> setUser(String? uid) async {
+    for (final i in _impls) { await i.setUser(uid); }
+  }
+
+  @override
+  Future<void> setUserProperty(String key, String? value) async {
+    for (final i in _impls) { await i.setUserProperty(key, value); }
+  }
+
+  @override
+  Future<void> logEvent(String name, [Map<String, Object?>? params]) async {
+    for (final i in _impls) { await i.logEvent(name, params); }
+  }
+}
+```
+
+业务代码永远只调 `IAnalytics`,在 main 里组装:
+
+```dart
+final analytics = CompositeAnalytics([
+  FirebaseAnalyticsAdapter(),
+  MixpanelAnalyticsAdapter(),
+  // 上线后想加 Amplitude?加一行就行
+]);
+```
+
+测试时换成 `_FakeAnalytics`,断言"调用了什么事件"。
+
+## 心智模型清单
+
+1. **埋点三要素**:event(做了什么)/ params(针对什么)/ user properties(是谁)。
+2. **事件命名 snake_case + 动词 + 对象**;先入数据字典再写代码。
+3. **Firebase Analytics 接入最便宜**;命中 GA4 标准事件名才能用自动统计。
+4. **Segment 在 MAU > 10 万 + 多个下游时才划算**;否则直连即可。
+5. **Mixpanel / Amplitude 适合"产品分析",GA4 适合"流量统计"**;常并跑。
+6. **Crashlytics 必上 mapping / dSYM 上传**;没 mapping 的栈是乱码。
+7. **Crash-Free Users 是首要指标**;新版本 24h 内骤降立即灰度回滚。
+8. **Sentry 在跨端 / 详细 breadcrumb 场景更顺**;Crashlytics 在 Firebase 项目里更顺。
+9. **iOS 17+ Privacy Manifest 强制**;主流 SDK 升到最新版自带,app 自身要手填。
+10. **ATT 授权率低,IDFA 几乎没用**;考虑 SKAdNetwork。
+11. **GDPR 默认 opt-out**;必须能"撤回同意 + 导出数据 + 删除账号"。
+12. **国内首启弹隐私协议**,同意前**不得初始化任何采集 SDK**;用 `if(consented)` 守门。
+13. **`IAnalytics` 抽象 + `CompositeAnalytics` 组合**:换平台 / 加 SDK 不动业务代码。
+14. **测性能用 Firebase Performance Monitoring**;关键操作手动 `Trace`。
+
+## 自查问题
+
+- 一个埋点叫 `home_click`,你为什么应该把它改名?改成什么?
+- "事件参数" vs "用户属性" 的差别?各举两例。
+- 你想看"点付费墙的人最终多少完成支付",GA4 里要建什么?
+- Segment 解决了什么具体问题?为什么小项目不划算?
+- Crashlytics 的"Crash-Free Users %"如果从 99.9% 掉到 99.0%,你应该立刻做什么?
+- release 包做了 `--obfuscate`,Crashlytics 后台显示乱码堆栈——你忘了什么操作?Android / iOS 各自怎么补?
+- Crashlytics 与 Sentry 的核心差异是什么?同一项目两者并跑的场景是?
+- iOS 17+ 你的 app 上传后被 reject 提示 "missing privacy manifest"——可能的原因有哪些?
+- ATT 弹窗在什么时候必须弹?用户拒绝后,你的代码做什么 fallback?
+- 写一个国内合规的启动流程:先弹隐私协议,同意后才初始化 Firebase / 友盟。
+- 用 `IAnalytics` 抽象同时接 Firebase + Mixpanel 两套埋点,给出 `CompositeAnalytics` 的核心代码。
+- 你想测试"购买完成后是否调了 `purchase_completed` 事件",用 mocktail 写完整代码。
+- 用户在欧盟,要求"导出我所有的数据并删除账号"——你的产品流程上需要支持哪些能力?
+
+下一章 [平台集成](/flutter/platform-integration):走完整个工程化栈,最后一公里——和原生平台说话。

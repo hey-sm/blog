@@ -1,0 +1,544 @@
+---
+title: 工具链
+description: Flutter SDK 安装、CLI、FVM 多版本、IDE 配置、pub 包管理、项目结构、flavors
+---
+
+# 工具链
+
+本章把"开始写 Flutter 之前"的所有工程准备一次过完：SDK 安装、CLI 命令、IDE 配置、依赖管理、项目目录约定、多环境 flavors。读完之后你应该能够：
+
+- 在新机器上从零搭好 Flutter 环境；
+- 看懂任意 Flutter 项目的目录与 `pubspec.yaml`；
+- 在多个 Flutter 版本间无痛切换；
+- 跑起 dev / staging / prod 三套构建。
+
+## SDK 安装与首次配置
+
+### 三种安装方式
+
+| 方式 | 适用 | 优势 |
+| ---- | ---- | ---- |
+| **官方安装包** | 个人开发机 | 简单直接 |
+| **FVM**（Flutter Version Management） | 多项目 / 多版本协作 | **强烈推荐** |
+| **包管理器**（`brew install --cask flutter` / `winget install` / Linux snap） | 偶尔用 | 一键，但版本切换麻烦 |
+
+### FVM：你应当默认用它
+
+不同项目锁定不同 Flutter 版本是工程常态。手动在 `PATH` 里切换很痛苦——FVM（[fvm.app](https://fvm.app)）做这件事。
+
+```bash
+# 安装 FVM（只需一次）
+dart pub global activate fvm
+# 或：
+brew tap leoafarias/fvm && brew install fvm
+
+# 在某个项目目录，绑定一个 Flutter 版本
+fvm use 3.24.0           # 不存在则自动下载
+fvm use stable           # 跟踪 stable channel
+
+# 用 FVM 包装的 flutter 命令
+fvm flutter run
+fvm flutter pub get
+```
+
+绑定后 FVM 会在项目根目录生成 `.fvmrc`：
+
+```json filename=".fvmrc"
+{ "flutter": "3.24.0" }
+```
+
+提交到 git 后，**任何同事 clone 后 `fvm install` 即可同版本**。`fvm flutter` 与原生 `flutter` 命令完全等价，仅多一层版本路由。
+
+可选：把 `fvm flutter` 设成默认（用 alias）：
+
+```bash
+alias flutter='fvm flutter'
+alias dart='fvm dart'
+```
+
+之后所有教程里的 `flutter xxx` 都能直接跑。
+
+### 验证：`flutter doctor`
+
+```bash
+flutter doctor
+# 或诊断详细：
+flutter doctor -v
+```
+
+它会列出每个目标平台所需的依赖与缺失项：
+
+- Android：JDK、Android SDK、命令行工具、license 同意
+- iOS：Xcode、CocoaPods、Apple ID（真机调试需要）
+- Web：默认随 SDK 自带，无需额外
+- Desktop：Visual Studio（Windows）、CMake（Linux）、Xcode（macOS）
+
+每个红叉它都会给修复指引，**逐条解决到全绿再开始写代码**——晚处理的依赖问题最终都会变成奇怪的构建错误。
+
+## Flutter CLI 速查
+
+```bash
+# 项目生命周期
+flutter create my_app                           # 新建
+flutter create --org com.example --platforms=ios,android,web my_app
+flutter create -t plugin my_plugin              # 新建插件
+flutter create -t package my_pkg                # 新建纯 Dart 包
+
+# 依赖
+flutter pub get                                 # 拉取依赖
+flutter pub upgrade                             # 升级到 pubspec 范围内的最新
+flutter pub upgrade --major-versions            # 越过 major 升级（同时改 pubspec）
+flutter pub outdated                            # 列出过时
+flutter pub deps                                # 树状依赖图
+flutter pub add http                            # 添加依赖
+flutter pub add --dev mocktail                  # 添加 dev 依赖
+flutter pub remove http
+
+# 运行
+flutter run                                     # 默认连的设备
+flutter run -d chrome                           # Web
+flutter run -d windows                          # Desktop
+flutter run --flavor staging -t lib/main_staging.dart   # 多 flavor
+flutter run --release                           # release 模式（慢启动，无 Hot Reload）
+flutter run --profile                           # profile 模式（性能分析）
+
+# 构建产物
+flutter build apk --release
+flutter build appbundle --release               # Play Store 推荐
+flutter build ipa                               # iOS
+flutter build web --release
+flutter build windows --release
+flutter build macos --release
+flutter build linux --release
+
+# 测试
+flutter test                                    # 单元 / widget 测试
+flutter test --coverage
+flutter test integration_test                   # 集成测试
+
+# 格式 / 静态分析
+dart format .                                   # 格式化
+dart fix --apply                                # 自动应用 lint 建议
+flutter analyze                                 # 静态分析
+
+# 设备
+flutter devices
+flutter emulators
+flutter emulators --launch <id>
+flutter logs                                    # 看连接设备的日志
+
+# 清理
+flutter clean                                   # 删 build/ 目录与缓存
+flutter pub cache clean
+
+# 升级 Flutter 自身
+flutter upgrade                                 # 当前 channel 升到最新
+flutter channel stable && flutter upgrade
+```
+
+### Hot Reload vs Hot Restart
+
+`flutter run` 在 debug 模式下，终端里：
+
+| 按键 | 行为 | 状态保留？ |
+| ---- | ---- | --------- |
+| `r` | **Hot Reload** —— 推送 dart 改动，重新执行 `build`，**保留 app state** | ✓ |
+| `R` | **Hot Restart** —— 重启 app，state 全丢 | ✗ |
+| `q` | 退出 | — |
+| `o` | 切换平台模拟（iOS / Android 渲染） | — |
+| `p` | 显示性能 overlay | — |
+
+**Hot Reload 是 Flutter 的关键生产力**——改一行代码，毫秒级看到结果，state 不丢。但有几类改动 **必须 hot restart**：
+
+- 修改 `main()` / `runApp` / 全局变量的初始化；
+- 修改 enum；
+- 修改类的字段/层级（增加新字段、改 mixin 顺序）；
+- `late final` 字段已经被赋值后再改；
+- 修改原生（iOS/Android）代码——需要重新 build。
+
+## IDE 选型
+
+### VS Code
+
+最轻量、跨平台体验最一致。需要装两个扩展：
+
+- `Dart`（Dart-Code.dart-code）
+- `Flutter`（Dart-Code.flutter）
+
+常用快捷键（Mac / Windows）：
+
+| 快捷键 | 行为 |
+| ------ | ---- |
+| `⌘.` / `Ctrl+.` | Quick Fix（提取 widget、加 const、加 keyword） |
+| `F5` | 启动调试 |
+| `⌘R` / `Ctrl+R`（在终端） | Hot Reload |
+| `⇧⌘R` / `Ctrl+Shift+R` | Hot Restart |
+| `⌘P` / `Ctrl+P` | 跳到文件 |
+| `F12` | 跳到定义 |
+| `⇧F12` | 查找引用 |
+
+`settings.json` 推荐：
+
+```json filename=".vscode/settings.json"
+{
+  "dart.previewFlutterUiGuides": true,
+  "dart.previewFlutterUiGuidesCustomTracking": true,
+  "dart.lineLength": 100,
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": { "source.fixAll": "explicit" },
+  "[dart]": { "editor.defaultFormatter": "Dart-Code.dart-code" }
+}
+```
+
+### Android Studio / IntelliJ IDEA
+
+功能最全（自带 Layout Inspector、Profile、Device Manager），重量级。`Settings → Plugins` 装 `Flutter` 插件即可。
+
+适合：
+
+- 多原生代码改动（iOS/Android 调试同时进行）；
+- 深度性能分析；
+- 复杂 refactor。
+
+### 选哪个
+
+新手与日常开发用 **VS Code 足矣**。需要"原生 + Flutter 同窗口调试"时切到 Android Studio。两者并存毫无冲突。
+
+## `pubspec.yaml`：项目的元数据 + 依赖清单
+
+每个 Flutter 项目根目录都有这个文件，它定义了项目名、版本、依赖、资源、字体。完整模板：
+
+```yaml filename="pubspec.yaml"
+name: my_app
+description: A new Flutter project.
+publish_to: 'none'                    # 'none' = 不发布到 pub.dev
+version: 1.2.3+45                     # 1.2.3 是 user-visible 版本，45 是 build number
+
+environment:
+  sdk: ^3.5.0                         # Dart SDK 范围
+  flutter: ^3.24.0                    # Flutter SDK 范围
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  http: ^1.2.2
+  go_router: ^14.0.0
+  flutter_riverpod: ^2.5.1
+
+  # 来自 git
+  some_pkg:
+    git:
+      url: https://github.com/x/some_pkg
+      ref: main
+
+  # 本地路径
+  shared_models:
+    path: ../shared_models
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.10
+  json_serializable: ^6.8.0
+  mocktail: ^1.0.4
+
+dependency_overrides:                 # 覆写传递依赖（兜底用，慎用）
+  meta: ^1.16.0
+
+flutter:
+  uses-material-design: true
+  generate: true                      # 生成 ARB → l10n.dart
+
+  assets:
+    - assets/images/
+    - assets/data/seed.json
+
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+        - asset: assets/fonts/Inter-Bold.ttf
+          weight: 700
+```
+
+### 版本约束语法
+
+```yaml
+http: ^1.2.2     # 最常见：>=1.2.2 <2.0.0   "兼容 1.x"
+http: ~1.2.2     # >=1.2.2 <1.3.0           "兼容 1.2.x"
+http: 1.2.2      # 精确锁
+http: '>=1.2.2 <2.0.0'   # 显式范围
+http: any                 # 任意（强烈不推荐）
+```
+
+`^` 是默认推荐的——既允许 patch / minor 升级，又防止 major 破坏性变更。
+
+### `pubspec.lock`：必须提交
+
+`pub get` 会根据 `pubspec.yaml` 解析出每个依赖的精确版本，写入 `pubspec.lock`。**这个文件必须 git 提交**——保证团队成员、CI 拿到完全一致的依赖图。
+
+应用项目（`publish_to: 'none'`）：lock 一定提交。
+库项目（要发布到 pub.dev）：传统建议**不**提交 lock，让用户自己解析。Dart 团队近年也开始建议库项目提交 lock 用于自身 CI 复现，不影响用户解析。
+
+## 项目目录约定
+
+`flutter create` 生成的目录：
+
+```text
+my_app/
+├── android/                       # Android 原生工程
+├── ios/                           # iOS 原生工程
+├── web/                           # Web 入口（index.html、icons）
+├── windows/ macos/ linux/         # Desktop 原生工程
+├── lib/                           # ★ 你的 Dart 代码全在这
+│   └── main.dart                  # 入口
+├── test/                          # 单元 / widget 测试
+├── integration_test/              # 集成测试
+├── assets/                        # 静态资源（自定义目录，需在 pubspec 注册）
+├── pubspec.yaml                   # 项目元数据 + 依赖
+├── pubspec.lock                   # 解析后的依赖锁
+├── analysis_options.yaml          # 静态分析规则
+└── README.md
+```
+
+### `lib/` 内部约定（社区主流）
+
+零规范，但 99% 的项目按"feature-first"或"layer-first"组织：
+
+```text
+# layer-first（小项目）
+lib/
+├── main.dart
+├── models/
+├── repositories/
+├── services/
+├── screens/
+├── widgets/
+└── utils/
+
+# feature-first（推荐，规模可扩展）
+lib/
+├── main.dart
+├── app/                           # 路由、主题、入口装配
+├── core/                          # 跨 feature 的工具与类型
+│   ├── http/
+│   ├── error/
+│   └── di/
+├── features/
+│   ├── auth/
+│   │   ├── data/                  # API / 本地源
+│   │   ├── domain/                # entity / use case
+│   │   └── presentation/          # widget / state
+│   ├── feed/
+│   └── profile/
+└── l10n/
+```
+
+详细架构讨论在 [设计原则与架构](/flutter/design-principles)。这里只需建立"项目长什么样"的印象。
+
+## `analysis_options.yaml`：把 lint 拧紧
+
+```yaml filename="analysis_options.yaml"
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    invalid_annotation_target: ignore
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+
+linter:
+  rules:
+    avoid_print: true
+    prefer_const_constructors: true
+    prefer_const_literals_to_create_immutables: true
+    prefer_final_fields: true
+    require_trailing_commas: true
+    use_super_parameters: true
+    unawaited_futures: true
+    cancel_subscriptions: true
+    close_sinks: true
+```
+
+**`prefer_const_constructors`** 是性能关键——配合 IDE 的 quick fix 自动加 `const`，能显著减少 widget 重建开销。
+
+更激进的整套规则用 `very_good_analysis`（[来自 VeryGoodVentures](https://pub.dev/packages/very_good_analysis)）：
+
+```yaml
+include: package:very_good_analysis/analysis_options.yaml
+```
+
+## Flavors：dev / staging / prod 三套构建
+
+实战项目至少需要：
+
+- **dev**：连后端 dev 环境、bundle id 后缀 `.dev`、可被同设备并行安装；
+- **staging**：连 staging 后端、可发 TestFlight / Internal Track；
+- **prod**：连生产、上架。
+
+Flutter 的 flavor 由原生工程承载，加上一个 Dart 入口文件区分。
+
+### Dart 侧
+
+```dart filename="lib/main_dev.dart"
+import 'app.dart';
+import 'env.dart';
+
+void main() => runApp(const MyApp(env: Env.dev));
+```
+
+```dart filename="lib/main_prod.dart"
+void main() => runApp(const MyApp(env: Env.prod));
+```
+
+```dart filename="lib/env.dart"
+enum Env { dev, staging, prod }
+
+extension EnvX on Env {
+  String get apiBase => switch (this) {
+    Env.dev     => 'https://dev.api.example.com',
+    Env.staging => 'https://stg.api.example.com',
+    Env.prod    => 'https://api.example.com',
+  };
+}
+```
+
+### Android 侧
+
+`android/app/build.gradle.kts`：
+
+```kotlin
+android {
+    flavorDimensions += "env"
+    productFlavors {
+        create("dev") {
+            dimension = "env"
+            applicationIdSuffix = ".dev"
+            resValue("string", "app_name", "MyApp Dev")
+        }
+        create("staging") {
+            dimension = "env"
+            applicationIdSuffix = ".stg"
+            resValue("string", "app_name", "MyApp Staging")
+        }
+        create("prod") {
+            dimension = "env"
+            resValue("string", "app_name", "MyApp")
+        }
+    }
+}
+```
+
+### iOS 侧
+
+Xcode → 复制 schemes 为 `Runner-dev` / `Runner-staging` / `Runner-prod`，每个对应一个 configuration（Debug/Release 之上再分），不同 bundle id、不同 Info.plist。这一步 GUI 操作较多，参考 [官方 flavor 指南](https://docs.flutter.dev/deployment/flavors)。
+
+### 运行某个 flavor
+
+```bash
+flutter run --flavor dev -t lib/main_dev.dart
+flutter build appbundle --flavor prod -t lib/main_prod.dart --release
+```
+
+VS Code 的 `launch.json`：
+
+```json filename=".vscode/launch.json"
+{
+  "configurations": [
+    { "name": "Dev",     "request": "launch", "type": "dart", "args": ["--flavor", "dev",     "-t", "lib/main_dev.dart"] },
+    { "name": "Staging", "request": "launch", "type": "dart", "args": ["--flavor", "staging", "-t", "lib/main_staging.dart"] },
+    { "name": "Prod",    "request": "launch", "type": "dart", "args": ["--flavor", "prod",    "-t", "lib/main_prod.dart"] }
+  ]
+}
+```
+
+## 环境变量与编译期注入
+
+`String.fromEnvironment` / `int.fromEnvironment` / `bool.fromEnvironment` 读取 **编译期** 注入的常量：
+
+```dart
+const apiKey = String.fromEnvironment('API_KEY', defaultValue: '');
+```
+
+```bash
+flutter run --dart-define=API_KEY=secret-123
+```
+
+或写在 `--dart-define-from-file`：
+
+```json filename="env/dev.json"
+{ "API_KEY": "dev-xxx", "ENABLE_LOGS": "true" }
+```
+
+```bash
+flutter run --dart-define-from-file=env/dev.json
+```
+
+> **重要**：`--dart-define` 注入的值会**编译进 release 包**——任何能反编译 dart_aot 的人都能拿到。**真正的密钥不要这样存**，而要从后端动态下发或用专门的密钥保管方案（详见 [持久化](/flutter/storage) 与 [Firebase 与 BaaS](/flutter/firebase)）。
+
+## pub.dev：包搜索与质量评判
+
+[pub.dev](https://pub.dev) 是 Dart 官方包索引。每个包页面有几个关键指标：
+
+- **Pub Points**：自动评分（0-160），衡量文档、代码质量、平台支持等；
+- **Likes**：用户主动赞数；
+- **Popularity**：基于下载量的相对热度；
+- **Publisher**：发布者，认证发布者（如 `flutter.dev`、`dart.dev`、`google.dev`、知名公司）的可信度更高；
+- **维护活跃度**：最近 commit、issue 响应。
+
+实操经验：
+
+- 优先选 **Publisher 是 flutter.dev / dart.dev / 知名公司** 的包；
+- 看 README、example、test 是否齐全；
+- 看 issue 是否大量未回复；
+- 看依赖深度（`flutter pub deps -s compact`）——一个包带 30 个传递依赖时要警惕；
+- 维护停滞超过 1 年 + 不兼容最新 SDK 的包要果断换。
+
+## 常用包速查（按主题）
+
+后续章节会逐个深入。这里给一份"标配清单"作为参考：
+
+| 主题 | 推荐 |
+| ---- | ---- |
+| HTTP | `http`、`dio` |
+| 状态管理 | `flutter_riverpod`、`flutter_bloc`、`provider` |
+| 路由 | `go_router`、`auto_route` |
+| JSON 模型 | `freezed` + `json_serializable`（生成型）、`dart_mappable` |
+| 本地存储 | `shared_preferences`、`drift`、`hive` / `hive_ce`、`isar` |
+| 安全存储 | `flutter_secure_storage` |
+| 国际化 | `intl`、`slang` |
+| 图片缓存 | `cached_network_image` |
+| 动画 | `flutter_animate`、`lottie`、`rive` |
+| 工具 | `collection`、`equatable`、`logger`、`get_it` |
+| 测试 | `mocktail`、`bloc_test`、`golden_toolkit`、`patrol` |
+
+## 工具链心智模型清单
+
+1. **FVM 是默认选择**，让每个项目锁定独立 Flutter 版本，团队同步无痛。
+2. **`flutter doctor` 不全绿不写代码**——晚处理的依赖问题会变成奇怪的错误。
+3. **Hot Reload 是开发主力**，但改 main / enum / 字段层级要 Hot Restart。
+4. **`pubspec.lock` 必须提交**（应用项目）。
+5. **flavors 由原生工程承载 + Dart 多入口文件**，CLI 用 `--flavor` + `-t` 启动。
+6. **`--dart-define` 注入的不是秘密**——能反编译就能看到。
+7. **`analysis_options.yaml` 启用更严的 lint** 是低成本高收益，`prefer_const_constructors` 是性能关键。
+8. **VS Code 日常 + Android Studio 复杂场景** 的组合覆盖 99% 工作。
+9. **依赖选型看 publisher / pub points / 维护活跃度**——pub.dev 上能用不等于值得用。
+10. **新建文件 / 重构 widget 优先用 IDE Quick Fix**，速度比手写快得多。
+
+## 自查问题
+
+1. 在新机器上接手一个老项目，第一步该做什么、第二步呢？
+2. Hot Reload 与 Hot Restart 各自保留 / 丢失什么？哪些改动必须 Restart？
+3. 添加一个依赖到生产环境与添加到 dev 环境分别怎么写？
+4. 同一个 repo 要支持 dev / staging / prod 三套构建，最少需要改动哪些地方？
+5. 用 `--dart-define=API_KEY=...` 注入密钥安全吗？为什么？
+6. `^1.2.3` 与 `~1.2.3` 与 `1.2.3` 的版本约束差别在哪里？
+7. `pubspec.lock` 在应用项目和库项目中的处理建议有什么不同？
+8. 你的项目要选一个状态管理库，你会从 pub.dev 上看哪几个指标做决定？

@@ -1,0 +1,613 @@
+---
+title: 表单与校验
+description: TextField/TextEditingController、Form/FormField/TextFormField、validator、autovalidateMode、focus 链、InputFormatters、键盘 inset、formz、reactive_forms、Riverpod 表单
+---
+
+# 表单与校验
+
+表单是看似简单实则陷阱密布的部分。每一个真实表单都要解决:
+
+- 字段值在哪儿存?
+- 焦点怎么跳转?
+- 何时校验?(实时 / 提交 / 失焦)
+- 软键盘弹出会不会挡住输入框?
+- 提交时按钮 loading + 禁用 + 错误展示如何串起来?
+- 与状态管理(Riverpod)如何分工?
+
+本章按"轻 → 重"过完三套方案:**setState → Form/FormField → formz / reactive_forms**,主线落在 **Form + Riverpod + freezed 值对象**——绝大多数业务这一组就够用。
+
+## 最简方案:`TextField` + setState
+
+```dart filename="lib/screens/simple_input.dart"
+class _SimpleInputState extends State<SimpleInput> {
+  String _name = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        TextField(
+          decoration: const InputDecoration(labelText: 'Name'),
+          onChanged: (v) => setState(() => _name = v),
+        ),
+        Text('Hello, $_name'),
+      ],
+    );
+  }
+}
+```
+
+适合"只读取一次的快速原型"。每次按键 `setState` 触发整个 widget rebuild,字段一多就会有性能问题——所以实战很少这样写。
+
+## `TextEditingController`:文本字段的标准持有方式
+
+```dart filename="lib/screens/controller_input.dart"
+class _ControllerInputState extends State<ControllerInput> {
+  final _ctrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();                       // ★ 必须 dispose,否则泄漏
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        TextField(controller: _ctrl),
+        ElevatedButton(
+          onPressed: () => debugPrint(_ctrl.text),
+          child: const Text('Submit'),
+        ),
+      ],
+    );
+  }
+}
+```
+
+要点:
+
+- `controller.text` 是同步的,任何时候都能读。
+- `controller.addListener(() {})` 监听变化,**不会触发 widget rebuild**——比 `onChanged` 适合"只想响应,不想 rebuild"的场景。
+- `TextEditingController(text: 'initial')` 设初值;运行期想改字段值,直接 `_ctrl.text = '...'`(光标会重置到末尾,要保留位置用 `_ctrl.value = TextEditingValue(text:..., selection:...)`)。
+- **必须在 `dispose` 里 cancel**,否则它持有的 widget 引用会泄漏。
+
+## `Form` / `FormField` / `TextFormField`
+
+`Form` 是 Flutter 内置的"表单容器",提供:
+
+1. **`GlobalKey<FormState>` 一键 validate / save / reset**;
+2. **统一的 `autovalidateMode`** 控制何时触发校验;
+3. **失焦自动校验**(`AutovalidateMode.onUserInteraction`)。
+
+```dart filename="lib/screens/login_form.dart"
+class LoginForm extends StatefulWidget {
+  const LoginForm({super.key});
+  @override
+  State<LoginForm> createState() => _LoginFormState();
+}
+
+class _LoginFormState extends State<LoginForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _emailCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
+  bool _submitting = false;
+
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _passwordCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _submitting = true);
+    try {
+      await api.login(_emailCtrl.text, _passwordCtrl.text);
+      if (!mounted) return;
+      context.go('/');
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: _formKey,
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextFormField(
+            controller: _emailCtrl,
+            decoration: const InputDecoration(labelText: 'Email', prefixIcon: Icon(Icons.email)),
+            keyboardType: TextInputType.emailAddress,
+            textInputAction: TextInputAction.next,
+            autofillHints: const [AutofillHints.email],
+            validator: (v) {
+              if (v == null || v.isEmpty) return 'Email required';
+              if (!RegExp(r'^[\w.\-+]+@[\w\-]+\.[\w.\-]+$').hasMatch(v)) {
+                return 'Invalid email';
+              }
+              return null;                 // ★ 通过校验返回 null
+            },
+          ),
+          const SizedBox(height: 16),
+          TextFormField(
+            controller: _passwordCtrl,
+            decoration: const InputDecoration(labelText: 'Password', prefixIcon: Icon(Icons.lock)),
+            obscureText: true,
+            textInputAction: TextInputAction.done,
+            autofillHints: const [AutofillHints.password],
+            onFieldSubmitted: (_) => _submit(),
+            validator: (v) {
+              if (v == null || v.length < 8) return 'Password must be at least 8 chars';
+              return null;
+            },
+          ),
+          const SizedBox(height: 24),
+          FilledButton(
+            onPressed: _submitting ? null : _submit,
+            child: _submitting
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+里面藏着 **8 个易错点**,逐一拆开。
+
+### 1. `validator` 返回 `null` 表示通过
+
+不是 `true / false`——返回 **错误文案** 表示失败,**`null`** 表示通过。这条全 Flutter 表单 API 一致。
+
+### 2. `autovalidateMode`
+
+| 模式 | 何时校验 |
+| ---- | ---- |
+| `disabled`(默认) | 仅显式 `validate()` 触发 |
+| `always` | 每次 build 都校验(不建议,体感差) |
+| `onUserInteraction` | 用户与字段交互过(改动 / 失焦)后才校验该字段 |
+| `onUnfocus` | 字段失焦时校验(Flutter 3.16+) |
+
+实战推荐 **`onUserInteraction`**——既不会"刚进页面满屏红字",也不会"打字时不报错,提交时才发现"。
+
+### 3. `textInputAction` + 焦点链
+
+```dart
+TextFormField(textInputAction: TextInputAction.next, ...);
+TextFormField(textInputAction: TextInputAction.done, onFieldSubmitted: (_) => _submit());
+```
+
+软键盘右下角的"返回"键会变成 "Next" / "Done",按 Next 自动跳到下一字段——Flutter 默认按 Form 内字段顺序跳。
+
+需要更精细控制(跨容器、跳过某些字段),用 `FocusNode`:
+
+```dart filename="lib/screens/focus_chain.dart"
+class _Form extends StatefulWidget {
+  @override
+  State<_Form> createState() => _FormState();
+}
+
+class _FormState extends State<_Form> {
+  final _emailFocus = FocusNode();
+  final _pwdFocus = FocusNode();
+
+  @override
+  void dispose() {
+    _emailFocus.dispose();
+    _pwdFocus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        TextFormField(
+          focusNode: _emailFocus,
+          textInputAction: TextInputAction.next,
+          onFieldSubmitted: (_) => _pwdFocus.requestFocus(),
+        ),
+        TextFormField(focusNode: _pwdFocus),
+      ],
+    );
+  }
+}
+```
+
+### 4. `autofillHints`:让系统填充密码
+
+iOS 钥匙串、Android Autofill、浏览器自动填充都会读这个 hint。常用:
+
+`AutofillHints.email` / `password` / `newPassword`(注册页用)/ `oneTimeCode`(验证码)/ `givenName` / `familyName` / `streetAddress`...
+
+**注册和登录用不同 hint**:`newPassword` 提示系统"你应该建议一个新强密码",`password` 是"用已存在的密码"。
+
+### 5. `keyboardType`:键盘类型
+
+| 类型 | 弹出键盘 |
+| ---- | ---- |
+| `text`(默认) | 标准 |
+| `emailAddress` | 带 `@` 和 `.` |
+| `number` | 数字 |
+| `phone` | 拨号键盘 |
+| `url` | 带 `/` 和 `.com` |
+| `multiline` | 带回车键 |
+| `visiblePassword` | 普通键盘但不联想 |
+
+### 6. `inputFormatters`:输入约束
+
+```dart
+TextFormField(
+  keyboardType: TextInputType.number,
+  inputFormatters: [
+    FilteringTextInputFormatter.digitsOnly,         // 只允许数字
+    LengthLimitingTextInputFormatter(11),           // 最长 11 位
+  ],
+);
+```
+
+注意:`keyboardType: number` **只是建议**,用户仍可粘贴非数字,**校验必须用 formatter 或 validator 兜底**。
+
+自定义格式器(身份证 / 手机号分组):
+
+```dart filename="lib/utils/phone_formatter.dart"
+class PhoneFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(TextEditingValue old, TextEditingValue next) {
+    final digits = next.text.replaceAll(RegExp(r'\D'), '');
+    final out = StringBuffer();
+    for (var i = 0; i < digits.length && i < 11; i++) {
+      if (i == 3 || i == 7) out.write(' ');
+      out.write(digits[i]);
+    }
+    return TextEditingValue(
+      text: out.toString(),
+      selection: TextSelection.collapsed(offset: out.length),
+    );
+  }
+}
+```
+
+### 7. 软键盘 inset 与遮挡
+
+弹键盘时屏幕"被压缩",如果 `Scaffold` 是默认的 `resizeToAvoidBottomInset: true`,内容区会被压;若内容**不在 `ListView` / `SingleChildScrollView`** 里,底部输入框会被键盘挡。
+
+修法 1:把整个表单包到 `SingleChildScrollView`:
+
+```dart
+Scaffold(
+  body: SafeArea(
+    child: SingleChildScrollView(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,    // 抵消键盘高度
+      ),
+      child: const LoginForm(),
+    ),
+  ),
+);
+```
+
+修法 2:用 `ListView`(本身就滚)。
+
+修法 3:用 `Scaffold(resizeToAvoidBottomInset: false)` + 手动给底部加 padding 等于键盘高度——少见。
+
+### 8. 提交时禁用按钮 + loading
+
+```dart
+FilledButton(
+  onPressed: _submitting ? null : _submit,            // null = 禁用
+  child: _submitting ? const _Spinner() : const Text('Sign in'),
+);
+```
+
+`onPressed: null` 才是禁用——不是 `enabled: false`(按钮没这个属性)。
+
+## 抽出 `FormField`:写自定义控件
+
+`TextFormField` 是 `FormField<String>` 的特化。要写"日期选择器"风格的 FormField:
+
+```dart filename="lib/widgets/date_form_field.dart"
+class DateFormField extends FormField<DateTime> {
+  DateFormField({
+    super.key,
+    super.initialValue,
+    super.onSaved,
+    super.validator,
+    super.autovalidateMode,
+    String? labelText,
+  }) : super(
+    builder: (state) {
+      return InputDecorator(
+        decoration: InputDecoration(
+          labelText: labelText,
+          errorText: state.errorText,
+        ),
+        child: InkWell(
+          onTap: () async {
+            final picked = await showDatePicker(
+              context: state.context,
+              firstDate: DateTime(2000),
+              lastDate: DateTime(2100),
+              initialDate: state.value ?? DateTime.now(),
+            );
+            if (picked != null) state.didChange(picked);    // ★ 通知 FormField 状态更新
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Text(state.value?.toIso8601String().substring(0, 10) ?? 'Pick a date'),
+          ),
+        ),
+      );
+    },
+  );
+}
+```
+
+之后用法和 `TextFormField` 一致:
+
+```dart
+DateFormField(
+  labelText: 'Birthday',
+  validator: (v) => v == null ? 'Required' : null,
+);
+```
+
+## formz:可重用的"值对象 + 校验"
+
+[formz](https://pub.dev/packages/formz) 把"字段值 + 校验状态"打包成可重用的不可变对象,从 widget 里抽走逻辑。常和 Bloc 配合,但 Riverpod 也能用。
+
+```yaml
+dependencies:
+  formz: ^0.7.0
+```
+
+```dart filename="lib/forms/email.dart"
+import 'package:formz/formz.dart';
+
+enum EmailError { empty, invalid }
+
+class Email extends FormzInput<String, EmailError> {
+  const Email.pure() : super.pure('');
+  const Email.dirty([super.value = '']) : super.dirty();
+
+  static final _re = RegExp(r'^[\w.\-+]+@[\w\-]+\.[\w.\-]+$');
+
+  @override
+  EmailError? validator(String value) {
+    if (value.isEmpty) return EmailError.empty;
+    if (!_re.hasMatch(value)) return EmailError.invalid;
+    return null;
+  }
+}
+```
+
+```dart filename="lib/forms/password.dart"
+enum PasswordError { tooShort }
+
+class Password extends FormzInput<String, PasswordError> {
+  const Password.pure() : super.pure('');
+  const Password.dirty([super.value = '']) : super.dirty();
+
+  @override
+  PasswordError? validator(String value) =>
+      value.length < 8 ? PasswordError.tooShort : null;
+}
+```
+
+`pure` = 用户还没碰过,**不要显示错误**;`dirty` = 改动过,要显示错误。`isPure` / `isValid` / `error` 都是公共字段。
+
+### Riverpod 集成
+
+```dart filename="lib/forms/login_state.dart"
+import 'package:freezed_annotation/freezed_annotation.dart';
+import 'package:formz/formz.dart';
+part 'login_state.freezed.dart';
+
+@freezed
+class LoginState with _$LoginState {
+  const LoginState._();
+  const factory LoginState({
+    @Default(Email.pure()) Email email,
+    @Default(Password.pure()) Password password,
+    @Default(false) bool submitting,
+    String? submitError,
+  }) = _LoginState;
+
+  bool get isValid => Formz.validate([email, password]);
+}
+```
+
+```dart filename="lib/forms/login_controller.dart"
+@riverpod
+class LoginController extends _$LoginController {
+  @override
+  LoginState build() => const LoginState();
+
+  void emailChanged(String v) => state = state.copyWith(email: Email.dirty(v));
+  void passwordChanged(String v) => state = state.copyWith(password: Password.dirty(v));
+
+  Future<void> submit() async {
+    if (!state.isValid) return;
+    state = state.copyWith(submitting: true, submitError: null);
+    try {
+      await ref.read(authRepoProvider).signIn(state.email.value, state.password.value);
+    } catch (e) {
+      state = state.copyWith(submitting: false, submitError: '$e');
+      return;
+    }
+    state = state.copyWith(submitting: false);
+  }
+}
+```
+
+UI:
+
+```dart filename="lib/screens/login_screen.dart"
+class LoginScreen extends ConsumerWidget {
+  const LoginScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(loginControllerProvider);
+    final c = ref.read(loginControllerProvider.notifier);
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          TextField(
+            onChanged: c.emailChanged,
+            decoration: InputDecoration(
+              labelText: 'Email',
+              errorText: switch (s.email.displayError) {
+                EmailError.empty => 'Email required',
+                EmailError.invalid => 'Invalid email',
+                null => null,
+              },
+            ),
+          ),
+          TextField(
+            onChanged: c.passwordChanged,
+            obscureText: true,
+            decoration: InputDecoration(
+              labelText: 'Password',
+              errorText: s.password.displayError == PasswordError.tooShort
+                  ? 'At least 8 chars' : null,
+            ),
+          ),
+          if (s.submitError != null)
+            Text(s.submitError!, style: const TextStyle(color: Colors.red)),
+          FilledButton(
+            onPressed: s.isValid && !s.submitting ? c.submit : null,
+            child: s.submitting ? const _Spinner() : const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+要点:
+
+- `displayError` 是 formz 的智能字段:`pure` 时为 `null`(不显示错误),`dirty` 时返回 `validator` 结果。一行解决"用户没动过别红"。
+- 整个登录流程的 state 是**不可变 freezed 对象**,所有变化都走 `copyWith` —— 测试容易、时序明确。
+- UI 几乎没有逻辑,只是 state 的反映 + 触发 controller 方法。
+
+> formz 是 Bloc 官方推荐的搭档,但和 Riverpod 同样配合得很好,**主线推荐 formz + Riverpod + freezed 三件套**——结构清晰、可测试、模板代码少。
+
+## reactive_forms:声明式表单(对照)
+
+[reactive_forms](https://pub.dev/packages/reactive_forms) 把表单做成"用 FormGroup 描述结构,UI 自动绑定"的风格,类似 Angular Forms:
+
+```yaml
+dependencies:
+  reactive_forms: ^17.0.0
+```
+
+```dart filename="lib/screens/reactive_login.dart"
+final form = FormGroup({
+  'email': FormControl<String>(validators: [Validators.required, Validators.email]),
+  'password': FormControl<String>(validators: [Validators.required, Validators.minLength(8)]),
+});
+
+@override
+Widget build(BuildContext context) {
+  return ReactiveForm(
+    formGroup: form,
+    child: Column(
+      children: [
+        ReactiveTextField<String>(
+          formControlName: 'email',
+          decoration: const InputDecoration(labelText: 'Email'),
+          validationMessages: {
+            'required': (_) => 'Required',
+            'email': (_) => 'Invalid email',
+          },
+        ),
+        ReactiveTextField<String>(
+          formControlName: 'password',
+          obscureText: true,
+          decoration: const InputDecoration(labelText: 'Password'),
+        ),
+        ReactiveFormConsumer(
+          builder: (context, form, _) => FilledButton(
+            onPressed: form.valid ? () => print(form.value) : null,
+            child: const Text('Sign in'),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+```
+
+优势:**字段定义集中,validation message 内置 i18n**,适合"几十个字段的复杂表单"。
+
+劣势:学习曲线陡(FormGroup / FormArray / Subject 一套自己的概念),与 Riverpod 不正交(状态在 form 里、又在 provider 里)。
+
+**新项目除非真的有大型表单(订单 / 配置面板),否则 formz + Riverpod 更简洁**。
+
+## 跨字段校验
+
+"密码 = 确认密码" 这类需要"看其他字段"的校验:
+
+### 用 FormState 集中校验
+
+```dart
+String? _confirmValidator(String? value) {
+  if (value != _passwordCtrl.text) return 'Passwords do not match';
+  return null;
+}
+```
+
+字段 a 改了 → 字段 b 的 validator 不会自动重跑——需要在 a 的 `onChanged` 里 `_formKey.currentState!.validate()` 触发全表单。
+
+### formz 风格:在 controller 里组合判断
+
+```dart
+bool get isValid =>
+    Formz.validate([email, password]) && password.value == confirmPassword.value;
+```
+
+更清晰,不依赖 widget 状态。
+
+## 心智模型清单
+
+1. **`TextEditingController` 必须 dispose**;它持有 widget 引用。
+2. **`Form` + `GlobalKey<FormState>` 一键 validate / save / reset**;`autovalidateMode: onUserInteraction` 是体验最佳默认。
+3. **`validator` 返回 `null` 表示通过**,返回字符串表示错误文案。
+4. **`textInputAction` + 多个 `FocusNode`** 实现键盘 Next/Done 跳焦;不要忘记 dispose focus node。
+5. **`autofillHints` 让系统帮你填**;注册用 `newPassword`,登录用 `password`。
+6. **`keyboardType` 是建议,`inputFormatters` 才是约束,`validator` 是兜底**——三层都要。
+7. **键盘遮挡用 `SingleChildScrollView` + `viewInsets.bottom`** 处理;`resizeToAvoidBottomInset` 默认就开。
+8. **submit 时按钮 `onPressed: null` 才是禁用**;放 spinner 替换 child。
+9. **复杂表单用 formz + Riverpod + freezed**;字段值 / 校验 / 提交状态都在不可变 state 对象里。
+10. **跨字段校验在 controller 层判断,别依赖 FormState**——更可测、更清晰。
+
+## 自查问题
+
+- 写一个表单,3 个字段:邮箱 / 密码 / 确认密码;按 Next 跳转下一字段,按 Done 提交;失焦校验。
+- `TextEditingController` 不 dispose 会发生什么?用什么工具能发现?
+- `FilteringTextInputFormatter.digitsOnly` 与 `keyboardType: TextInputType.number` 的差别;为什么单用后者不安全?
+- 写一个 5 位验证码输入框:5 个独立框,一位一个,按一位自动跳下一格,删除键回到上一格。
+- 用 formz 写一个手机号字段:必填 + 11 位数字 + 第 1 位是 1。
+- 用 Riverpod + formz + freezed 重写本章登录表单,把 controller 函数全部测试一遍(空邮箱、错邮箱、短密码、API 失败、API 成功)。
+- 软键盘弹起遮挡了"提交"按钮,有几种解决方法?分别在什么场景适用?
+- 一个注册表单"密码 = 确认密码"的校验,在 `TextFormField` 的 `validator` 里如何写?为什么改密码字段后,确认密码的 validator 不会自动重新跑?
+- `autofillHints` 在 iOS / Android 各自后端是什么?为什么注册要用 `newPassword`?
+- formz 与 reactive_forms 选型有何不同?给两个具体场景。
+
+下一章 [动画](/flutter/animation):静态表单填完了,看看怎么动起来。

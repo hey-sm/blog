@@ -1,0 +1,564 @@
+---
+title: 渲染机制
+description: Widget/Element/RenderObject 三棵树、build/layout/paint/composite 四阶段、RepaintBoundary、PipelineOwner、Impeller
+---
+
+# 渲染机制
+
+到目前为止我们一直在「写 Widget」。但 Widget 只是声明,最终把像素送到屏幕上的是另外两棵树。本章把这层引擎拆开:
+
+- 为什么 Flutter 要分 Widget / Element / RenderObject **三棵树**?
+- `setState` 之后到底发生了什么?
+- 为什么"加一个 `const`"或"包一层 `RepaintBoundary`"能让性能上去?
+- Impeller 是什么,跟旧的 Skia 有什么区别?
+
+> 学习这章不是为了写引擎,而是为了**写应用时能预测性能**。第 22 章「调试与性能」会反复回来引用本章的概念。
+
+## 为什么要三棵树
+
+回忆 Widget 的两个特征:
+
+1. **不可变**(`@immutable`)。每帧重建时,会创建一棵全新的 Widget 树。
+2. **可以频繁创建**——`build()` 一秒钟可能跑 60 次。
+
+不可变 + 频繁重建,意味着 Widget 不能持有"运行期状态"——比如滚动位置、动画进度、文本框光标位置。这些状态必须放在一个**生命周期跨越多次 build 的对象**里。
+
+那就让 `State` 对象来承担这个职责?可以,但 `StatelessWidget` 也需要"对应到一个长寿命的实体"——否则 `BuildContext`、`InheritedWidget` 的查找就无从挂载。
+
+于是 Flutter 引入了 **Element**:每个 Widget 在某次构建时**对应一个 Element 实例**,Element 是长寿命的;Widget 重建时,Element 决定要不要复用。
+
+接下来还有一层职责:**真正测量、绘制、命中测试的对象**。让 Element 直接做这些事会让它太复杂——所以又拆出 **RenderObject** 专门干这个。
+
+```text
+Widget          配置 / 蓝图     (不可变,每帧新建)
+  ↓ createElement()
+Element         实例 / 桥梁     (长寿命,跨帧复用)
+  ↓ createRenderObject()
+RenderObject    布局 / 绘制    (长寿命,真正干活)
+```
+
+不是所有 Widget 都对应一个 RenderObject——`Container`、`Padding`、`Row` 这种「复合 widget」其实是若干 RenderObject 的组合。能直接生产 RenderObject 的 widget 类型如下:
+
+| Widget 类型 | 对应 Element | 是否生产 RenderObject |
+| ---- | ---- | ---- |
+| `StatelessWidget` | `StatelessElement` | 否(委托给 build 出的子树) |
+| `StatefulWidget` | `StatefulElement` | 否 |
+| `InheritedWidget` | `InheritedElement` | 否 |
+| `RenderObjectWidget` 子类(如 `RawImage`、`Padding` 内核、`Flex` 内核) | `RenderObjectElement` 子类 | 是 |
+
+> 我们日常写的 99% widget 是前三类。`RenderObjectWidget` 通常隐藏在 framework 层,自定义渲染时才会直接接触。
+
+## Widget 树:不可变蓝图
+
+```dart filename="lib/main.dart"
+class CounterText extends StatelessWidget {
+  const CounterText({super.key, required this.value});
+  final int value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text('$value');
+  }
+}
+```
+
+`CounterText(value: 1)` 是一个 Widget 实例。它什么都"不知道",只有一份"我希望显示 `Text('1')`"的描述。
+
+每次 `setState` 触发重建,父 widget 都会**新建** `CounterText(value: 2)`、`CounterText(value: 3)`、……老的 widget 实例随即被 GC。
+
+## Element 树:状态与桥梁
+
+```dart
+abstract class Element implements BuildContext {
+  Widget? _widget;          // 当前持有的配置
+  Element? _parent;
+  // ...
+  void mount(Element? parent, Object? newSlot);
+  void update(covariant Widget newWidget);
+  void unmount();
+}
+```
+
+Element 的核心职责:
+
+1. **持有当前 widget**(`_widget` 字段,可在新 widget 到来时被替换)。
+2. **维护父子关系**(整棵 Element 树是 Flutter UI 的真实结构)。
+3. **承担 `BuildContext`**——你在 `build` 里拿到的 `context` 就是当前 Element 本身。
+4. **实现"复用还是重建"决策**(`Element.update` vs `inflateWidget`)。
+
+### Element 复用规则:`Widget.canUpdate`
+
+新一帧的 widget 树到来时,framework 拿"新 widget"和"老 Element 当前持有的 widget"作比较:
+
+```dart
+static bool canUpdate(Widget oldWidget, Widget newWidget) {
+  return oldWidget.runtimeType == newWidget.runtimeType
+      && oldWidget.key == newWidget.key;
+}
+```
+
+- **runtimeType 相同 + key 相同** → 复用 Element,只把 `_widget` 替换为新的(`Element.update`),Element 内部的 `State`、`RenderObject` 都保留。
+- **任一不同** → 卸载旧 Element(`unmount`),用新 widget 创建新 Element(`mount`),丢弃旧 `State`,创建新 `RenderObject`。
+
+这条规则解释了上一章我们提到的两件事:
+
+- **`StatefulWidget` 的 `State` 寿命跨多帧**:因为 Element 复用,而 `State` 挂在 Element 上。
+- **Key 决定列表条目能否被认出来**:`runtimeType` 相同时,Key 是唯一区分手段。
+
+### 一个能跑的小演示
+
+```dart filename="lib/main.dart"
+class _Demo extends StatefulWidget {
+  const _Demo();
+  @override
+  State<_Demo> createState() => _DemoState();
+}
+
+class _DemoState extends State<_Demo> {
+  int gen = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ElevatedButton(
+          onPressed: () => setState(() => gen++),
+          child: Text('Rebuild #$gen'),
+        ),
+        // 同 runtimeType + 无 key:Element 复用,_CounterState 保留
+        const _Counter(),
+        // 不同 key:Element 重建,计数清零
+        _Counter(key: ValueKey(gen)),
+      ],
+    );
+  }
+}
+
+class _Counter extends StatefulWidget {
+  const _Counter({super.key});
+  @override
+  State<_Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<_Counter> {
+  int n = 0;
+  @override
+  Widget build(BuildContext context) => OutlinedButton(
+        onPressed: () => setState(() => n++),
+        child: Text('Tap me: $n'),
+      );
+}
+```
+
+点几下两个 `_Counter`,然后点 `Rebuild`。第一个 Counter 数字保留,第二个清零——因为后者的 `Key` 改了,Element 被 unmount 重建。
+
+## RenderObject 树:真正干活的人
+
+`RenderObject` 完成三件事:
+
+1. **layout**:接受父级 `Constraints`,算出自己的 `size`,把约束往子级递。
+2. **paint**:在 `Canvas` 上画自己,递归子级。
+3. **hit-test**:接收手势事件,决定哪个对象应该响应。
+
+一个简单的 `Padding` 就对应 `RenderPadding`(继承自 `RenderShiftedBox`):
+
+```dart
+// flutter/src/rendering/proxy_box.dart 简化版
+class RenderPadding extends RenderShiftedBox {
+  EdgeInsets padding;
+
+  @override
+  void performLayout() {
+    final inner = constraints.deflate(padding);
+    child!.layout(inner, parentUsesSize: true);
+    size = constraints.constrain(Size(
+      child!.size.width  + padding.horizontal,
+      child!.size.height + padding.vertical,
+    ));
+    final BoxParentData data = child!.parentData! as BoxParentData;
+    data.offset = Offset(padding.left, padding.top);
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    if (child != null) {
+      final BoxParentData data = child!.parentData! as BoxParentData;
+      context.paintChild(child!, data.offset + offset);
+    }
+  }
+}
+```
+
+读这段的目的不是要你背下来,而是建立两个直觉:
+
+- 一个看似简单的 `Padding(...)`,在 RenderObject 层是真的有几行 layout / paint 代码。
+- 父对子说"你能用这块约束",子对父说"我用了这么大",父再说"你画在这儿",一切按上一章布局协议运作。
+
+## 一帧的生命周期
+
+到这里三棵树各就各位,接下来看一帧从触发到上屏的完整链路。
+
+```text
+                            ┌─ vsync 信号 ───────────────────────────┐
+                            │                                        │
+                            ▼                                        │
+   1. 调度    SchedulerBinding.handleBeginFrame                       │
+              ─→ animations 推进 (TickerProviders)                   │
+                                                                     │
+   2. build   BuildOwner.buildScope                                  │
+              ─→ 重建所有 dirty Element                              │
+                                                                     │
+   3. layout  PipelineOwner.flushLayout                              │
+              ─→ 调用所有 dirty RenderObject.performLayout           │
+                                                                     │
+   4. paint   PipelineOwner.flushPaint                               │
+              ─→ 把 RenderObject 画进 Layer 树                       │
+                                                                     │
+   5. compose Window.render(scene)                                   │
+              ─→ 把 Layer 树变成 Scene 提交给引擎,GPU 合成上屏      │
+                            │                                        │
+                            └─→ 等下一个 vsync ──────────────────────┘
+```
+
+每一帧都按这个流程走。每个步骤都可以**独立失效**:你只改了文字 → 只 build + paint;你只改了透明度 → 可能只 paint(layout 跳过)。
+
+### 触发重建:`State.setState`
+
+```dart
+void setState(VoidCallback fn) {
+  fn();
+  _element?.markNeedsBuild();
+}
+```
+
+- `markNeedsBuild()` 把当前 Element 标记为 dirty,塞进 `BuildOwner._dirtyElements`。
+- 下一次 vsync 来到时,`BuildOwner.buildScope` 把 dirty 列表按"在树中的深度"从浅到深排序,**对每个 dirty Element 重新调用 `build()` 一次**。
+
+> 注意:`setState` **不立刻** rebuild,它只是打了个标记。所以你在 `setState` 紧接着 `print(...)` 看不到重建后的值——`build` 要等到下一帧。
+
+### 触发布局:`markNeedsLayout`
+
+新 widget 替换老 widget 后,如果**对应的 RenderObject 的字段变了**(例如 `Padding` 的 `padding` 从 8 改到 16),framework 会调 `markNeedsLayout`,把这个 RenderObject 加入 `PipelineOwner._nodesNeedingLayout`。
+
+**关键优化:layout boundary**。如果一个 RenderObject 满足:
+
+> 它的 size **完全由父给的 constraints 决定**,与子无关(例如 `tight` 约束 + `RenderConstrainedBox`)
+
+那么它内部的 layout 变化**不会**外溢到父——`flushLayout` 时只重新 layout 这棵子树,父级跳过。`Container(width: 100, height: 100, child: ...)` 就常常构成一个 layout boundary。
+
+### 触发绘制:`markNeedsPaint`
+
+只有外观变化(颜色、文字、图片源)而没有尺寸变化时,只触发 `markNeedsPaint`,layout 阶段跳过——这正是性能优化里"颜色变化不引起 reflow"的来源。
+
+绘制的产物不是像素,而是一棵 **Layer 树**(下一节展开)。
+
+### 提交上屏:Scene
+
+```dart
+ui.SceneBuilder builder = ui.SceneBuilder();
+rootLayer.addToScene(builder);
+ui.Scene scene = builder.build();
+window.render(scene);     // 提交给 dart:ui 引擎,引擎转给 GPU 合成
+```
+
+到这里 framework 的工作结束,接下来是 C++ 引擎的事。
+
+## Layer 树与合成
+
+绘制阶段不直接画到屏幕,而是产出一棵 Layer 树:
+
+```text
+                      RootLayer
+                      /        \
+          OffsetLayer            OffsetLayer
+                |                    |
+       PictureLayer (一张静态文字)   ClipRectLayer
+                                     |
+                              PictureLayer (滚动列表内容)
+```
+
+PictureLayer 内部缓存了这一片区域的"绘制命令",**只要它的子树没改,下一帧就直接复用,不需要重画**。
+
+合成的本质是:**GPU 把若干个 PictureLayer + 若干个变换(平移、裁剪、透明度)拼到一张 framebuffer 上**——这一步快到几乎免费。
+
+这也是 Flutter 性能的关键:**「重画一小片」比「重画整张屏」便宜两个数量级**。
+
+### `RepaintBoundary`:把这块独立成 Layer
+
+默认情况下,父子 RenderObject 共享一个 PictureLayer。意味着:
+
+> 子改了一行字,这块整个 PictureLayer 失效,父也得跟着重画。
+
+`RepaintBoundary` 强制把这棵子树**封装成独立的 PictureLayer**:子重画时,父的 Layer 不动,只把"子那块缓存"换掉,合成出新画面即可。
+
+```dart
+RepaintBoundary(
+  child: AnimatedContainer(
+    duration: const Duration(milliseconds: 300),
+    color: highlight ? Colors.amber : Colors.transparent,
+    child: const Text('hello'),
+  ),
+);
+```
+
+什么时候手动加?
+
+- 一棵**子树频繁重绘**(动画、自绘、高频更新)而**周围静止**——加,可以隔离重绘。
+- 一棵子树**画起来很贵**(复杂的 `CustomPaint`、滤镜),但**几乎不变**——加,把它的输出 cache 下来。
+- 一棵子树**几乎不重绘但兄弟会变**——可以不加,framework 已经会按需 invalidate。
+
+陷阱:**滥用 RepaintBoundary 会让内存占用上去**(每个 boundary 都是一张 GPU 纹理),而且增加合成步骤。先用 DevTools 的 *Performance* 面板观察,再决定加。
+
+### 已知会"自动"插入 RepaintBoundary 的地方
+
+- `ListView` / `GridView` 的每个子项(框架内部已包了 `RepaintBoundary`)
+- `Hero` 动画飞行中的目标
+- `Scaffold` 主体下方的 `BottomNavigationBar` / `AppBar` 等独立区
+- `OverlayEntry`
+
+知道这一点的好处:**不用再重复加**,加了反而是浪费。
+
+## SchedulerBinding 与帧调度
+
+```text
+SchedulerPhase 状态机:
+
+  idle ──vsync─→ transientCallbacks ──→ midFrameMicrotasks ──→ persistentCallbacks ──→ postFrameCallbacks ──→ idle
+                       ▲                                              ▲                          ▲
+                       │                                              │                          │
+                       └─ Ticker / animation                          └─ build/layout/paint      └─ WidgetsBinding.addPostFrameCallback
+```
+
+需要记的几个时机:
+
+- `Ticker.tick(elapsed)`:在 `transientCallbacks` 阶段调用,推进所有 `AnimationController`。
+- **build / layout / paint**:在 `persistentCallbacks` 阶段。
+- `WidgetsBinding.instance.addPostFrameCallback((_) { ... })`:**这一帧画完之后**执行,常用于"我得在 layout 完之后才知道某个尺寸"的场景:
+
+```dart filename="lib/widgets/needs_size.dart"
+final _key = GlobalKey();
+
+@override
+void initState() {
+  super.initState();
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    final box = _key.currentContext!.findRenderObject() as RenderBox;
+    debugPrint('first frame size = ${box.size}');
+  });
+}
+```
+
+> 在 `build` 期间立刻 `findRenderObject` 是错的——那时候这棵子树还没 layout 完。
+
+## Impeller vs Skia
+
+Flutter 引擎层经历过两代渲染后端:
+
+| 维度 | Skia(旧) | Impeller(新) |
+| ---- | ----------- | --------------- |
+| 着色器编译 | 运行时即时编译,首次出现的形状会**卡一下** | 全部预编译,无运行时编译卡顿 |
+| 后端 | OpenGL ES / Metal / Vulkan(经 Skia 封装) | 直接对接 Metal(iOS)、Vulkan(Android、Linux)、Direct3D(Windows 实验) |
+| 默认状态(2026 年 Flutter 3.x) | 仍可用 `--no-enable-impeller` 切回 | iOS / Android 默认 Impeller |
+| 调优手段 | `flutter build --bundle-sksl-path` 预热 | 不需要预热(这是 Impeller 的卖点) |
+
+> 业务侧不需要为 Impeller 做特殊适配——只是首次启动 / 切换页面时**不再有"shader compilation jank"**。如果你在老资料里见到 `gen_snapshot.skp` / `flutter run --cache-sksl` 之类的预热流程,放心忽略,Impeller 上不需要。
+
+可以在 `Info.plist`(iOS)或 `AndroidManifest.xml` 中显式开关:
+
+```xml filename="ios/Runner/Info.plist"
+<key>FLTEnableImpeller</key>
+<true/>
+```
+
+```xml filename="android/app/src/main/AndroidManifest.xml"
+<meta-data
+    android:name="io.flutter.embedding.android.EnableImpeller"
+    android:value="true" />
+```
+
+## `BuildContext` 究竟是什么
+
+我们在很多地方用过 `Theme.of(context)`、`MediaQuery.of(context)`、`Navigator.of(context)`。`context` 到底是什么?
+
+> **`BuildContext` 就是当前 Widget 对应的那个 Element 实例本身**(Element 实现了 `BuildContext` 接口)。
+
+所以 `Theme.of(context)` 实际上就是"沿着 Element 树往上找,找到第一个 `_InheritedTheme` 类型的 Element,问它要 `ThemeData`"。
+
+这解释了几个常见陷阱:
+
+### 陷阱 1:用错位置的 context 弹 Snackbar
+
+```dart filename="lib/screens/wrong.dart"
+@override
+Widget build(BuildContext context) {
+  return Scaffold(
+    body: Center(
+      child: ElevatedButton(
+        onPressed: () {
+          // ❌ 这个 context 在 Scaffold 之上(就是 build 入参的 context),
+          //   往上找不到 ScaffoldMessenger 的 Element
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('hi')),
+          );
+        },
+        child: const Text('show'),
+      ),
+    ),
+  );
+}
+```
+
+修法 1:用 `Builder` 制造一个**位于 Scaffold 之下**的新 context:
+
+```dart
+body: Builder(
+  builder: (context) => Center(
+    child: ElevatedButton(
+      onPressed: () => ScaffoldMessenger.of(context).showSnackBar(...),
+      ...
+    ),
+  ),
+);
+```
+
+修法 2:把 `Scaffold` 抽成单独的 widget,那么它的 `build` 入参 context 就在 Scaffold 之内。
+
+### 陷阱 2:async gap 后用旧 context
+
+```dart
+onPressed: () async {
+  final result = await api.fetch();         // 这一刻可能用户已经返回上一个页面
+  Navigator.of(context).push(...);          // ❌ 可能页面已被销毁
+};
+```
+
+修法:async 之后先检查 `if (!mounted) return;`(只有 `State` 才有 `mounted`,`StatelessWidget` 用 `context.mounted` —— Flutter 3.7+ 提供):
+
+```dart
+onPressed: () async {
+  final result = await api.fetch();
+  if (!context.mounted) return;
+  Navigator.of(context).push(...);
+};
+```
+
+## InheritedWidget 复盘:为什么"沿着树查"很快
+
+`InheritedWidget` 是 Flutter 内置的"向下广播"机制(我们在第 7 章简单介绍过)。
+
+```dart filename="lib/inherited/theme_color.dart"
+class ThemeColor extends InheritedWidget {
+  const ThemeColor({super.key, required this.color, required super.child});
+  final Color color;
+
+  static ThemeColor of(BuildContext context) {
+    final result = context.dependOnInheritedWidgetOfExactType<ThemeColor>();
+    assert(result != null, 'No ThemeColor in tree');
+    return result!;
+  }
+
+  @override
+  bool updateShouldNotify(ThemeColor oldWidget) => oldWidget.color != color;
+}
+```
+
+`dependOnInheritedWidgetOfExactType` 在内部做两件事:
+
+1. **沿当前 Element 向上找**第一个相同类型的 `InheritedElement`,直接返回它的 widget。这是 O(深度) 的指针跳转,实践中很快。
+2. **登记订阅**:把当前 Element 加入这个 `InheritedElement` 的依赖集合。下次 `ThemeColor` 重建并且 `updateShouldNotify` 返回 `true` 时,所有订阅者都被 `markNeedsBuild`。
+
+这条机制是后续 Provider、Riverpod 的底层。
+
+## GlobalKey 的代价
+
+`GlobalKey` 让一个 Element 在重建时**跨树位置复用**——你把同一个带 GlobalKey 的 widget 从一棵子树挪到另一棵子树,它的 `State` 跟着走。
+
+代价:
+
+- framework 维护一张全局表,`GlobalKey -> Element`,会带来一定开销。
+- 如果你**忘了** GlobalKey 唯一性,把同一个 key 同时挂到两个位置,会抛 "Multiple widgets used the same GlobalKey"。
+- 一旦使用了 GlobalKey,framework 不再能做"同位置复用",每帧都要做一次跨树定位检查。
+
+实践:**默认用 `ValueKey` / `ObjectKey`,只有在确实需要"挪位置后保留状态"时才用 GlobalKey**。
+
+## 自定义 RenderObject:一个最小完整例子
+
+绝大多数业务用不到,但搞懂这个例子,你对三棵树的理解会上一层楼:画一个"宽度等于父级一半,高度固定 100,颜色由参数指定"的方块。
+
+```dart filename="lib/widgets/half_width_box.dart"
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+
+class HalfWidthBox extends LeafRenderObjectWidget {
+  const HalfWidthBox({super.key, required this.color});
+  final Color color;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderHalfWidthBox(color: color);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderHalfWidthBox renderObject) {
+    renderObject.color = color;       // ← 关键:把字段从 widget 同步到 RenderObject
+  }
+}
+
+class _RenderHalfWidthBox extends RenderBox {
+  _RenderHalfWidthBox({required Color color}) : _color = color;
+
+  Color _color;
+  Color get color => _color;
+  set color(Color value) {
+    if (_color == value) return;
+    _color = value;
+    markNeedsPaint();                  // 颜色变了,layout 不变,只需重绘
+  }
+
+  @override
+  void performLayout() {
+    size = Size(constraints.maxWidth / 2, 100);
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    final paint = Paint()..color = _color;
+    context.canvas.drawRect(offset & size, paint);
+  }
+}
+```
+
+读这段时注意三件事:
+
+1. **`updateRenderObject` 是 widget→RenderObject 的同步桥**。新 widget 来了,Element 复用,但 RenderObject 也得知道字段变了。
+2. **setter 内部决定调 `markNeedsLayout` 还是 `markNeedsPaint`**——这是性能的核心。颜色只影响绘制,所以只标 paint。
+3. `LeafRenderObjectWidget`:没有子的 RenderObjectWidget。还有 `SingleChildRenderObjectWidget`、`MultiChildRenderObjectWidget`。
+
+## 心智模型清单
+
+把下面 10 条记下来,90% 的渲染相关问题都能自己推一遍:
+
+1. **Widget 是不可变蓝图,Element 是长寿命实例,RenderObject 才真的画。**
+2. **Element 复用看 `runtimeType + key`,任一不同就重建。**
+3. **`State` 挂在 Element 上,所以 Element 复用 = State 保留。**
+4. **`setState` 不立刻 rebuild,只是把 Element 加入下次 vsync 的 dirty 列表。**
+5. **layout 阶段是「约束下、尺寸上、父决定位置」**——这条是上一章的核心,在 RenderObject 层真实执行。
+6. **layout boundary 让父子的 layout 失效互相隔离**,典型是 `tight` 约束的 `Container`。
+7. **paint 产物是 Layer 树,合成发生在 GPU,合成本身几乎免费。**
+8. **`RepaintBoundary` = 把这棵子树独立成 PictureLayer,自身画自己的,不连带父级**——动画/自绘场景常用。
+9. **`BuildContext` 就是 Element**;`of(context)` 就是沿 Element 树向上找。
+10. **Impeller 没有 shader 编译卡顿;不需要再做 SkSL 预热**。
+
+## 自查问题
+
+- 一个 widget `runtimeType` 和 `key` 都不变,但参数变了,Element 树会发生什么?RenderObject 会发生什么?
+- 为什么 `const Text('hi')` 比 `Text('hi')` 性能更好?(提示:`canUpdate` + `runtimeType` + identity)
+- 同一棵 List 的若干条目,`ValueKey(item.id)` 和不传 key,在新增/删除/重排时分别会发生什么?
+- `setState` 后 `print` 看到的是新值还是旧值?为什么?(假设 `setState(() { count = 1; }); print(count);`)
+- 一个动画使背景色周期变化,但前景的 1000 个文字静止——加 `RepaintBoundary` 应该加在哪里?
+- `Theme.of(context)` 是 O(1) 还是 O(深度)?为什么这个开销可以接受?
+- `ListView.builder` 内部是否需要给条目再包一层 `RepaintBoundary`?为什么?
+- async 操作之后访问 `context`,需要做什么前置检查?为什么 Flutter 一定要这层检查?
+- 如果你有一个 `CustomPaint` 每秒画 60 帧,但绘制内容**完全静态**,你怎么避免每帧都重画?(提示:Picture 缓存或 RepaintBoundary + 只标 paint 的子节点)
+- Impeller 解决了 Skia 时代的什么具体问题?业务侧需要为它做什么适配?
+
+下一章 [路由与导航](/flutter/navigation):把"画一棵 widget 树"扩展到"管理多棵页面树"。

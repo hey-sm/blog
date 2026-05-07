@@ -1,0 +1,759 @@
+---
+title: Widgets 基础
+description: Stateless / Stateful / Inherited Widget、生命周期、BuildContext、Keys
+---
+
+# Widgets 基础
+
+第 1 章建立了"一切皆 Widget"的心智，第 2-5 章过完了 Dart 语言。从本章起进入 Flutter 框架本体。本章只讲 widget 体系最核心的几件事——**任何 Flutter 业务代码 80% 的时间都在与这些机制打交道**：
+
+- 三类 widget：StatelessWidget / StatefulWidget / InheritedWidget
+- State 的生命周期
+- `BuildContext` 究竟是什么
+- Keys 的作用与三种典型场景
+- `build` 的契约与陷阱
+
+## 三类 widget 的角色分工
+
+```text
+StatelessWidget   ── 输入 → 输出，纯函数式，无内部可变状态
+StatefulWidget    ── 自身不可变，但绑定一个可变 State 对象
+InheritedWidget   ── 不直接出现在 UI 上，向后代提供数据；后代可以"反向定位"它
+```
+
+实际写 Flutter 时这三类各自占的比例：StatelessWidget ≈ 60%，StatefulWidget ≈ 30%，InheritedWidget ≈ 10%（且常常是隐藏在 `Theme.of` / `MediaQuery.of` / `Provider.of` 等 API 背后）。
+
+## StatelessWidget
+
+最简的 widget——输入完全由父级通过构造参数提供，输出由 `build` 返回。
+
+### 标准模板
+
+```dart
+class Greeting extends StatelessWidget {
+  const Greeting({super.key, required this.name, this.color = Colors.black});
+
+  final String name;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text('Hello, $name', style: TextStyle(color: color));
+  }
+}
+```
+
+记忆点：
+
+- **类必须 `extends StatelessWidget`**；
+- **构造函数应当 `const`**——所有字段都是 `final`，加 const 让 Flutter 在父级用 `const` 调用时**复用同一对象**；
+- **`build(BuildContext context)`** 是唯一必须实现的方法。
+
+### 何时用 StatelessWidget
+
+- 完全由 props 决定的纯展示组件（按钮样式、列表项、卡片）；
+- 接收回调但本身不持状态的组合容器；
+- 任何"我可以一眼把字段写完"的小 widget。
+
+### 拒绝在 build 里做这些事
+
+`build` **会被高频调用**——只要任意祖先重建、`MediaQuery` 变化、屏幕旋转、键盘弹出，build 都会被再调一次（甚至一秒内调几十次）。所以：
+
+```dart
+class Bad extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    fetchUserData();                                   // ✗ 副作用：每次 build 都发请求
+    final controller = TextEditingController();        // ✗ 创建有状态对象：泄漏 + 失忆
+    final timer = Timer.periodic(...);                 // ✗ 启动定时器：永不取消
+    return Text(DateTime.now().toIso8601String());     // ⚠️ 副作用边缘——展示当前时间，每次 build 时间都不同，可接受但要明确意图
+  }
+}
+```
+
+副作用与有状态资源的正确归属是 `StatefulWidget` 的 `initState` / `dispose`。
+
+## StatefulWidget
+
+带可变状态的 widget。它本身仍**不可变**，可变的部分被分到一个 `State` 子类里。
+
+### 标准模板
+
+```dart
+class Counter extends StatefulWidget {
+  const Counter({super.key, this.initial = 0});
+
+  final int initial;
+
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  late int count = widget.initial;          // 可在初始化里访问 widget
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      onPressed: () => setState(() => count++),
+      child: Text('Count: $count'),
+    );
+  }
+}
+```
+
+要点：
+
+- **两个类**：`Counter`（widget，不可变）和 `_CounterState`（state，可变）；
+- `createState()` 由框架在挂载时调用一次，返回一个 State 实例；
+- 在 State 内部 `widget` 字段始终指向"当前最新版本"的 widget——父级重建时框架会自动更新；
+- `setState(() { ... })` 标脏 + 安排重建；不调 `setState` 直接改字段，**界面不会更新**。
+
+### State 生命周期
+
+State 对象比 widget 活得久——只要 widget 在树上的位置（路径）不变、类型不变，State 就**跨重建持续存在**。完整生命周期：
+
+```text
+createState()                       ── 框架调用，得到 State 实例
+        │
+        ▼
+initState()                         ── ★ 一次性初始化（订阅 stream、控制器、动画）
+        │
+        ▼
+didChangeDependencies()             ── 依赖（祖先 InheritedWidget）变化时调用
+        │
+        ▼
+build(context)                      ── 返回 widget 树
+        │
+   ┌────┴────────────────────────┐
+   │                             │
+   ▼                             ▼
+父重建（widget 变了）           setState 标脏
+didUpdateWidget(oldWidget)
+        │                             │
+        ▼                             ▼
+build(context)                       build(context)
+        │
+        ▼（widget 从树上移除）
+deactivate()                        ── 暂时离开树（被移到别处时偶尔触发）
+        │
+        ▼
+dispose()                           ── ★ 一次性清理（取消订阅、释放控制器）
+```
+
+### 各回调的实战用途
+
+```dart
+class _MyState extends State<MyWidget> {
+  late final StreamSubscription _sub;
+  late final TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.initial);
+    _sub = widget.stream.listen(_onData);
+    // ✗ 这里不能 context.read / Theme.of —— 还没绑入树
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // ✓ 这里可以访问 InheritedWidget（Theme / MediaQuery / Provider）
+    final theme = Theme.of(context);
+    _ctrl.text = '${_ctrl.text} (${theme.brightness})';
+  }
+
+  @override
+  void didUpdateWidget(covariant MyWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.stream != widget.stream) {
+      _sub.cancel();
+      _sub = widget.stream.listen(_onData);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) { /* ... */ }
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onData(int v) => setState(() { /* 更新 state */ });
+}
+```
+
+记忆原则：
+
+- **构造期工作**（控制器创建、订阅）→ `initState`；
+- **依赖祖先变化**时的反应 → `didChangeDependencies`；
+- **父级传入参数变化**的反应 → `didUpdateWidget`；
+- **每帧的 UI 描述** → `build`；
+- **释放资源** → `dispose`。
+
+### `setState` 的细节
+
+```dart
+void setState(VoidCallback fn) {
+  // 1. 执行 fn（你修改字段）
+  // 2. 标记本 State 对应的 Element 为 dirty
+  // 3. 框架在下一帧调度该 Element 的 build
+}
+```
+
+陷阱 1：**`setState` 不是同步更新**——它结束后界面**还没重绘**。
+
+陷阱 2：**不要在 build / initState 里直接调 setState** 框架会报错。`initState` 完成时框架会自动调用一次 build，无需手动触发。
+
+陷阱 3：**`setState` 只能在挂载期（`mounted == true`）调**：
+
+```dart
+Future<void> _load() async {
+  final data = await api.fetch();
+  if (!mounted) return;             // ★ 异步回到时 widget 可能已被 dispose
+  setState(() => _data = data);
+}
+```
+
+陷阱 4：**不要把整个长任务塞进 `setState` 的回调**：
+
+```dart
+// ✗
+setState(() async {              // setState 不接受 async 回调
+  await loadData();
+  data = ...;
+});
+
+// ✓
+final next = await loadData();
+if (!mounted) return;
+setState(() => data = next);
+```
+
+## InheritedWidget
+
+InheritedWidget 是 Flutter "跨层传值"的官方机制——后代 widget 可以**直接定位到祖先**并取值，无需层层传 props。
+
+### 工作原理
+
+```dart
+class ThemeMode extends InheritedWidget {
+  const ThemeMode({
+    super.key,
+    required this.dark,
+    required super.child,
+  });
+
+  final bool dark;
+
+  static ThemeMode of(BuildContext context) {
+    final w = context.dependOnInheritedWidgetOfExactType<ThemeMode>();
+    assert(w != null, 'No ThemeMode found in context');
+    return w!;
+  }
+
+  @override
+  bool updateShouldNotify(ThemeMode old) => old.dark != dark;
+}
+```
+
+```dart
+// 用法
+class App extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return ThemeMode(
+      dark: true,
+      child: const HomePage(),
+    );
+  }
+}
+
+class _SomeDeepChild extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final mode = ThemeMode.of(context);
+    return Text('Dark? ${mode.dark}');
+  }
+}
+```
+
+要点：
+
+- 后代用 `context.dependOnInheritedWidgetOfExactType<T>()`（通常封装成静态 `T.of(context)`）获取；
+- **`dependOn...` 会建立"依赖关系"**——一旦祖先 InheritedWidget 重建且 `updateShouldNotify` 返回 `true`，所有依赖它的后代会自动 rebuild；
+- **`updateShouldNotify`** 决定"我变了，后代要不要重建"。永远比较新旧值，避免不必要重建。
+
+### `of(context)` vs `getInheritedWidgetOfExactType`
+
+```dart
+context.dependOnInheritedWidgetOfExactType<T>();   // 建立依赖：未来变化会触发 rebuild
+context.getInheritedWidgetOfExactType<T>();        // 只读取一次：不订阅
+```
+
+99% 情况用前者。后者用于"我只在 initState / 事件回调里读一次，不需要响应未来变化"。
+
+### 实战：你不必自己写 InheritedWidget
+
+Flutter / 第三方库已经把 InheritedWidget 包成各种优雅 API：
+
+- **Theme / MediaQuery / DefaultTextStyle**：Flutter 自带；
+- **Provider**：把任何对象放进 InheritedWidget；
+- **Riverpod / Bloc**：底层都是 InheritedWidget 的高级封装。
+
+业务代码里**很少手写 InheritedWidget**——但理解它的语义至关重要，因为所有状态管理库的"为什么 widget 会响应我变了" 都建立在它之上。详见 [状态管理](/flutter/state-management)。
+
+## `BuildContext`：到底是什么
+
+新手最容易把 `BuildContext` 当成"上下文对象"或"配置 bag"——错。
+
+> **`BuildContext` 是 widget 在 Element 树中的位置（handle），它本质上就是当前的 Element**。
+
+```dart
+abstract class BuildContext {
+  Widget get widget;
+  BuildContext? get visitChildElements(...);
+  T? dependOnInheritedWidgetOfExactType<T extends InheritedWidget>(...);
+  ...
+}
+
+abstract class Element implements BuildContext {  // Element 实现了 BuildContext
+  ...
+}
+```
+
+每个 widget 在 Element 树上都有一个对应的 Element 实例，**当框架调用 `build(BuildContext context)` 时，传进来的就是这个 widget 自身的 Element**。所以你能用它做：
+
+- **向上查找祖先**：`Theme.of(context)` 实际是从当前位置向上遍历到最近的 `_InheritedTheme` Element；
+- **拿到尺寸 / 渲染对象**：`context.size`、`context.findRenderObject()`；
+- **导航**：`Navigator.of(context).push(...)`；
+- **触发 rebuild**：`context as Element).markNeedsBuild()`（极少手动用）。
+
+### 何时用错 context
+
+```dart
+class _BadState extends State<Foo> {
+  void _showSnackbar() {
+    // 错 1：用 build 的 context 引用了 build 之外的位置
+    // ScaffoldMessenger.of(context) 会向上找 ScaffoldMessenger
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      onPressed: () {
+        ScaffoldMessenger.of(context).showSnackBar(...);   // ✓ 这里 context 在 ElevatedButton 的位置
+      },
+      child: const Text('hi'),
+    );
+  }
+}
+```
+
+最常见的"context 错位"错误：
+
+```dart
+class Page extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Builder(
+        builder: (context) {
+          return ElevatedButton(
+            onPressed: () {
+              // ✓ 这里的 context 在 Builder 之下，能找到 Scaffold
+              ScaffoldMessenger.of(context).showSnackBar(...);
+            },
+            child: const Text('show'),
+          );
+        },
+      ),
+    );
+  }
+}
+```
+
+如果直接用 `Page.build` 的 `context`，`ScaffoldMessenger.of` 会向上找——但 Scaffold 在**下面**，找不到。`Builder` 是把 context 下移一层的常见招数。
+
+### `mounted` 与异步陷阱
+
+```dart
+class _MyState extends State<...> {
+  Future<void> _save() async {
+    final ok = await api.save();
+    // 此时 widget 可能已经被 dispose 了
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(...);
+  }
+}
+```
+
+`State.mounted` 在 `dispose()` 后变 `false`。**所有 await 后再用 context 的地方都要先 `if (!mounted) return`**——Dart 3.2+ 起 `BuildContext` 自身也有 `context.mounted` getter，可在非 State 场景使用。
+
+## Keys：何时该传、传什么
+
+`Key` 是 widget 的可选参数。绝大多数情况下**不传也没问题**——框架在比对新旧 widget 时只看 `runtimeType`。但有几种场景**必须**传 key，否则会出 bug。
+
+### 框架的匹配规则
+
+每帧重建时，框架按"同位置同类型"复用 Element：
+
+```text
+旧 widget 树            新 widget 树            结果
+[A, B]                  [A, B]                  位置相同、类型相同 → 全复用
+[A, B]                  [B, A]                  位置 0 都是 A 类型？不！新 0 是 B → 全部不复用，全部销毁重建
+```
+
+这就是为什么"列表里项的顺序变化或前面插入新项"时，**有内部状态（StatefulWidget）的子项 state 会错乱**。
+
+### 三种典型场景
+
+#### 场景 1：列表中 reorder / insert，且子项是 Stateful
+
+```dart
+// ✗ 没 key：拖动重排后，TextField 内的输入会跟错
+ListView(children: items.map((it) => TaskTile(task: it)).toList());
+
+// ✓ 加 ValueKey：框架按 key 而不是位置匹配
+ListView(
+  children: items.map((it) => TaskTile(key: ValueKey(it.id), task: it)).toList(),
+);
+```
+
+#### 场景 2：同位置切换不同 widget，但希望保留 state
+
+```dart
+// 场景：同一位置在 LoginForm 与 RegisterForm 之间切换，希望各自的输入分别保留
+Widget build(BuildContext context) {
+  return showLogin
+      ? const LoginForm(key: ValueKey('login'))
+      : const RegisterForm(key: ValueKey('register'));
+}
+```
+
+不加 key 时它们都是某个 form widget，"位置相同、类型不同" → 框架销毁旧 state 创建新 state，输入丢失。加 key 后框架知道是两棵不同的子树。
+
+#### 场景 3：在树上"搬家"
+
+```dart
+// 同一个 ChildState 实例先在 ColumnA 里，后被移到 ColumnB 里
+// 框架默认会按位置销毁重建，加 GlobalKey 能保持 State 跨树移动
+final globalKey = GlobalKey<ChildState>();
+
+a.children = [Child(key: globalKey)];
+b.children = [Child(key: globalKey)];   // 切换后，state 同一个
+```
+
+`GlobalKey` 的代价很高（全局唯一、性能开销、误用易崩），**只在确实需要"保留 state 跨树移动"时使用**。`Form`、`Scaffold` 暴露的 `state` 也常通过 `GlobalKey<FormState>` / `GlobalKey<ScaffoldState>` 拿到，但近年很多 API 改为用 `Form.of(context)` 替代。
+
+### Key 的种类
+
+| 类型 | 用途 |
+| ---- | ---- |
+| `ValueKey<T>(value)` | 用某个值（id / name）作 key；最常用 |
+| `ObjectKey(obj)` | 用对象身份作 key（`identical`） |
+| `UniqueKey()` | 每次构造都是新 key；强制销毁重建 |
+| `PageStorageKey<T>` | 让 ScrollPosition / 表单等"页内状态"按 key 保存 |
+| `GlobalKey<T>` | 全局唯一，跨树查找 state；慎用 |
+
+经验法则：
+
+- 列表中元素：**永远传 `ValueKey(item.id)`**；
+- 同位置类型切换需保留 state：传 `ValueKey('唯一身份字符串')`；
+- 其余 99% 场景：不传 key，让框架默认行为生效。
+
+## `build` 的契约
+
+把这条契约背下来，会节省你大量调试时间：
+
+> **`build` 必须是纯函数**：相同 widget 字段 + 相同祖先依赖 = 相同输出，**且无副作用**。
+
+具体禁忌：
+
+1. 不发起网络请求 / 文件 IO；
+2. 不创建 controller / subscription / Timer（它们应在 `initState`）；
+3. 不直接调用 `setState` 或 `Provider.of` 通知性更新；
+4. 不依赖随机数 / 时间（除非展示当前时刻是有意为之）；
+5. 不修改任何外部可变状态（包括传入的 controller）。
+
+### 为什么这么严
+
+- `build` 在 hot reload、热重启、屏幕旋转、状态变化等多种场景都会跑；
+- 高频时一秒可能调几十次；
+- Concurrent 模式（未来）甚至可能"build 一遍丢弃再 build 一遍"。
+
+任何副作用乘以这种调用频次都会变成性能 / 资源问题。
+
+## 重建优化：四把斧子
+
+### 1. `const` 构造尽可能用
+
+```dart
+// ✗
+return Padding(padding: EdgeInsets.all(16), child: Text('hi'));
+
+// ✓
+return const Padding(padding: EdgeInsets.all(16), child: Text('hi'));
+```
+
+const 实例会被框架识别为"完全相同"，跳过整棵子树的 build。**`prefer_const_constructors` lint 会自动告诉你哪里能加**。
+
+### 2. 把变化局部化
+
+```dart
+// ✗ 整个 Page 持状态，每次 setState 整页 build
+class Page extends StatefulWidget {
+  @override
+  State<Page> createState() => _PageState();
+}
+
+class _PageState extends State<Page> {
+  int count = 0;
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const ExpensiveHeader(),
+        Text('$count'),
+        TextButton(onPressed: () => setState(() => count++), child: const Text('+')),
+      ],
+    );
+  }
+}
+
+// ✓ 把状态推到只关心它的子 widget 内
+class Page extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) => Column(
+    children: const [ExpensiveHeader(), Counter()],
+  );
+}
+
+class Counter extends StatefulWidget { ... }   // count 在这里
+```
+
+原则："**状态尽可能下移**"，让真正变化的子树最小。
+
+### 3. 抽出 `const` 子树或 `Builder` 隔离重建边界
+
+```dart
+// 用 Builder 提供新 context，不是直接关心重建优化，而是让某些 of 调用从更近的位置发起
+return Theme(
+  data: ThemeData.dark(),
+  child: Builder(
+    builder: (ctx) => Text('${Theme.of(ctx).brightness}'),
+  ),
+);
+```
+
+### 4. 利用 `RepaintBoundary` 切分图层（详见后续章节）
+
+```dart
+RepaintBoundary(child: ComplexAnimation())   // 让这棵子树独立 layer，重绘不波及外部
+```
+
+性能优化的完整手册见 [调试与性能](/flutter/devtools-perf)，本章先建立"build 是热路径"的意识。
+
+## widget 树太深怎么办
+
+新手常因深嵌套对代码可读性绝望。常用应对：
+
+### 抽方法 vs 抽 widget
+
+```dart
+// 抽方法（不推荐用于复杂场景）
+Widget _buildHeader() => Row(...);
+Widget _buildBody()   => Column(...);
+Widget _buildFooter() => Padding(...);
+
+@override
+Widget build(BuildContext context) {
+  return Column(children: [_buildHeader(), _buildBody(), _buildFooter()]);
+}
+
+// 抽 widget（推荐）
+class Header extends StatelessWidget { ... }
+class Body extends StatelessWidget   { ... }
+class Footer extends StatelessWidget { ... }
+
+@override
+Widget build(BuildContext context) {
+  return const Column(children: [Header(), Body(), Footer()]);
+}
+```
+
+抽方法和抽 widget 在功能上等价，但**抽 widget 更优**：
+
+- 子 widget 可以独立加 `const`，享受重建跳过；
+- 每个子 widget 是独立的 build 单元，重建范围可控；
+- 命名更清晰，IDE 跳转友好。
+
+唯一例外：**很短的、强耦合于父 state 的小段**——抽方法比抽 widget 启动成本低。
+
+### IDE 助力："Wrap with..." / "Extract widget"
+
+VS Code / Android Studio 在 widget 上 `⌘.` / `Ctrl+.` 都能：
+
+- Wrap with Padding / Center / Column / Container / Builder / ...
+- Extract Widget（自动提取一个 Stateless / StatefulWidget）
+- Extract Method
+- Add `const`
+
+这些操作让深嵌套 widget 树的重构成本降到几秒钟。
+
+## 一个综合示例
+
+把本章主要概念串起来——一个带搜索框、列表、收藏切换的页面：
+
+```dart filename="lib/screens/search_page.dart"
+import 'dart:async';
+import 'package:flutter/material.dart';
+
+class SearchPage extends StatefulWidget {
+  const SearchPage({super.key});
+
+  @override
+  State<SearchPage> createState() => _SearchPageState();
+}
+
+class _SearchPageState extends State<SearchPage> {
+  final _controller = TextEditingController();
+  Timer? _debounce;
+  List<String> _results = const [];
+  Set<String> _favs = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onChanged);
+  }
+
+  void _onChanged() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 300), () async {
+      final q = _controller.text;
+      final res = await _search(q);
+      if (!mounted) return;
+      setState(() => _results = res);
+    });
+  }
+
+  Future<List<String>> _search(String q) async {
+    await Future.delayed(const Duration(milliseconds: 200));
+    return q.isEmpty ? [] : ['$q-1', '$q-2', '$q-3'];
+  }
+
+  void _toggleFav(String item) {
+    setState(() {
+      if (_favs.contains(item)) {
+        _favs.remove(item);
+      } else {
+        _favs.add(item);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_onChanged);
+    _controller.dispose();
+    _debounce?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Search')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: TextField(
+              controller: _controller,
+              decoration: const InputDecoration(hintText: 'Type something'),
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: _results.length,
+              itemBuilder: (_, i) {
+                final item = _results[i];
+                return _ResultTile(
+                  key: ValueKey(item),
+                  text: item,
+                  isFav: _favs.contains(item),
+                  onToggle: () => _toggleFav(item),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResultTile extends StatelessWidget {
+  const _ResultTile({
+    super.key,
+    required this.text,
+    required this.isFav,
+    required this.onToggle,
+  });
+
+  final String text;
+  final bool isFav;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      title: Text(text),
+      trailing: IconButton(
+        icon: Icon(isFav ? Icons.star : Icons.star_border),
+        onPressed: onToggle,
+      ),
+    );
+  }
+}
+```
+
+它演示了本章全部要点：
+
+- `_SearchPageState.initState` 设置控制器监听；
+- 防抖 + 异步 + `mounted` 检查；
+- `setState` 仅在数据真到位时调；
+- `dispose` 释放控制器、取消防抖；
+- `_ResultTile` 是独立的 StatelessWidget（`const` 友好）；
+- `key: ValueKey(item)` 让列表项与数据绑定；
+- 状态归属：搜索关键字与结果归 SearchPage，单项的"是否收藏"作为参数下传。
+
+## Widgets 基础心智模型清单
+
+1. **Stateless 是纯函数，Stateful 是 widget 不可变 + State 可变**——把可变性正确归位。
+2. **State 比 widget 活得久**——只要位置 + 类型不变，State 跨重建持续。
+3. **生命周期五件事**：initState / didChangeDependencies / didUpdateWidget / build / dispose；各管各的。
+4. **`build` 是纯函数**：不开订阅、不发请求、不创建控制器；副作用归 initState。
+5. **`setState` 是异步标脏**，不是同步重绘；await 后调要先检查 `mounted`。
+6. **`BuildContext` 就是 Element**——它代表当前 widget 在树上的位置。
+7. **`InheritedWidget` 是跨层传值的官方机制**，状态管理库都建立在它之上。
+8. **Key 在"同位置类型切换"或"列表 reorder/insert"时是必需的**；其他时候不传。
+9. **抽出子 widget 优于抽方法**：const 友好、build 边界清晰。
+10. **状态尽可能下移**——让重建范围最小化是性能优化第一步。
+
+## 自查问题
+
+1. 一个 StatefulWidget 在哪些场景下 State 会被销毁重建？哪些场景下会被复用？
+2. `initState` 与 `didChangeDependencies` 的差别是什么？哪种场景下后者会被调用？
+3. 异步函数里 `setState` 之前为什么要 `if (!mounted) return`？
+4. `BuildContext` 与 `Element` 的关系是什么？
+5. 列表里子项是 StatefulWidget 时，为什么必须传 `Key`？不传会发生什么？
+6. `GlobalKey` 与 `ValueKey` 各自适合什么场景？为什么 GlobalKey 要慎用？
+7. 在 `build` 里 `final controller = TextEditingController()` 有什么后果？
+8. 为什么"抽出独立 widget"比"抽出 build 方法"更好？两者在性能上有何差异？

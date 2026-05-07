@@ -1,0 +1,651 @@
+---
+title: 设计原则与架构
+description: SOLID 在 Dart 中的体现、DI(get_it/Riverpod)、Clean Architecture 三层、Repository/UseCase、Either/Result 错误模型、feature-first vs layer-first、避免过度工程
+---
+
+# 设计原则与架构
+
+到这里我们已经掌握了语言层、状态层、数据层、UI 层。本章把它们组织成"可以让 5 人团队协作 18 个月"的工程结构,并给出选型原则——**避免过度工程**和"按教条照搬"是同样重要的。
+
+## 第一原则:架构是为了让代码可改
+
+写代码不是为了优雅,是为了**今后能以低成本改它**。任何"原则"或"架构模式"如果没有降低改动成本,就是负担。
+
+判断架构是否合理,问三个问题:
+
+1. **新增一个功能,要改几个文件?碰几层?** 越少越好,但**过度抽象会让"碰几层"变多**。
+2. **改某个外部依赖(换数据源、换鉴权方案),要改几处?** 一处最好,等于零抽象代价。
+3. **新加入的人多久能找到代码?** 一致的目录约定 + 命名 > 任何精巧的模式。
+
+第三条是被低估的——架构最大的收益往往是**沟通成本**而非性能。
+
+## SOLID 在 Dart 中的体现
+
+经典 SOLID 原则在 Dart / Flutter 里的具体形态:
+
+### S - Single Responsibility
+
+> 一个类只做一件事。
+
+```dart
+// ❌ 一个 class 干 4 件事
+class UserManager {
+  Future<User> fetchFromApi(String id) { ... }
+  Future<User> loadFromCache(String id) { ... }
+  String formatDisplayName(User u) { ... }
+  Widget buildAvatar(User u) { ... }
+}
+
+// ✅ 拆分
+class UserApi      { Future<User> fetch(String id) { ... } }
+class UserCache    { Future<User?> get(String id) { ... } }
+class UserFormatter{ String displayName(User u)   { ... } }
+// UI 用法直接写在 widget,不再有 "Manager" 包一切
+```
+
+> 提示:**类名带 `Manager` / `Helper` / `Util` 通常意味着违背 SRP**——它们没有边界,什么都能塞进来。
+
+### O - Open / Closed
+
+> 对扩展开放,对修改封闭。
+
+加新行为不改老代码,而是"新增一个实现"。Dart 里通常用 `abstract` 或 `sealed` class 表达:
+
+```dart
+abstract interface class PaymentMethod {
+  Future<PaymentResult> pay(int amount);
+}
+
+class AlipayMethod   implements PaymentMethod { ... }
+class WechatMethod   implements PaymentMethod { ... }
+class CreditCardMethod implements PaymentMethod { ... }
+
+// 业务代码:
+Future<void> checkout(PaymentMethod method, int amount) async {
+  await method.pay(amount);
+}
+```
+
+新增 PayPal? 加一个 `PaypalMethod`,业务代码不改。
+
+### L - Liskov Substitution
+
+> 子类必须能无意识地替代父类。
+
+实际反例:Dart 的 `List` API 里 `Iterable.first` 会在空时抛异常——所有"声称是 Iterable"的实现都得遵守这个契约。如果你写一个 `LazyList<T>` 在 `first` 时返回 `null`,代码就崩了。
+
+实践:**子类不要削弱父类的承诺**(更严的前置条件 / 更宽的后置条件 / 抛新异常类型)。
+
+### I - Interface Segregation
+
+> 客户端不应被迫依赖它用不到的方法。
+
+```dart
+// ❌ "上帝接口"
+abstract class IRepo {
+  Future<User> fetchUser();
+  Future<void> updateUser(User u);
+  Future<List<Post>> fetchPosts();
+  Stream<Notification> watchNotifications();
+}
+
+// ✅ 拆开
+abstract interface class UserRepo  { Future<User> fetch(String id); Future<void> update(User u); }
+abstract interface class PostRepo  { Future<List<Post>> list(); }
+abstract interface class NotifRepo { Stream<Notification> watch(); }
+```
+
+UI 想拿"用户"时只依赖 `UserRepo`,测试 mock 时只 mock 这一个接口。
+
+### D - Dependency Inversion
+
+> 高层模块不依赖低层模块,**两者都依赖抽象**。
+
+这是最重要的一条——是后续 Clean Architecture 的核心。
+
+```dart
+// ❌ ProfileScreen 直接 new dio,绑死实现
+class ProfileScreen {
+  final api = Dio();        // 这个 widget 永远绑在 dio 上
+}
+
+// ✅ 依赖抽象
+abstract interface class ProfileRepo {
+  Future<Profile> fetch(String id);
+}
+
+class ProfileScreen {
+  ProfileScreen(this.repo);
+  final ProfileRepo repo;
+}
+```
+
+`ProfileScreen` 永远不知道 dio 的存在。换 GraphQL、换 Mock、换离线数据,只需新增一个 `ProfileRepo` 实现。
+
+> Dart 3 的 `interface class` 修饰符正是为这种用法设计——保证"只能 implement,不能 extend"(详见第 3 章「Dart 类系统」)。
+
+## 依赖注入:把"实现"交给框架管
+
+DI 解决一个具体问题:**业务代码内部不要 `new` 它的依赖**——交给上层注入。三种主流做法:
+
+### 方案 A:构造函数注入(最朴素)
+
+```dart filename="lib/main.dart"
+final api = ApiClient.instance;
+final cache = UserCache();
+final repo = UserRepo(api: api, cache: cache);
+final controller = UserController(repo);
+
+runApp(App(controller: controller));
+```
+
+优点:零依赖,完全显式,代码可见。
+缺点:**依赖深时 main 函数会变成 100 行装配代码**;widget 构造函数参数链越来越长。
+
+适合:**库 / 极简 app**。
+
+### 方案 B:服务定位器(get_it / injectable)
+
+```yaml
+dependencies:
+  get_it: ^7.7.0
+  injectable: ^2.4.0
+dev_dependencies:
+  injectable_generator: ^2.6.0
+  build_runner: ^2.4.0
+```
+
+```dart filename="lib/di.dart"
+import 'package:get_it/get_it.dart';
+import 'package:injectable/injectable.dart';
+import 'di.config.dart';
+
+final getIt = GetIt.instance;
+
+@InjectableInit()
+void configureDependencies() => getIt.init();
+```
+
+```dart
+@lazySingleton
+class UserRepo {
+  UserRepo(this._api, this._cache);
+  final ApiClient _api;
+  final UserCache _cache;
+}
+```
+
+`dart run build_runner build`,`getIt<UserRepo>()` 即可拿到注入好实例。
+
+优点:**不用层层传参**,任何地方一行调用。
+缺点:**全局可变状态**,测试时要小心 `getIt.reset()`;依赖关系不显式(看不到一个类被谁注入)。
+
+适合:**已经习惯 Spring / Dagger 风格的团队**;Bloc 项目偏好 get_it。
+
+### 方案 C:Riverpod 同时承担 DI(本系列主线)
+
+第 13 章已经展示过,Riverpod 的 provider 本质就是 DI 容器:
+
+```dart filename="lib/providers/user.dart"
+@Riverpod(keepAlive: true)
+ApiClient apiClient(ApiClientRef ref) => ApiClient.instance;
+
+@Riverpod(keepAlive: true)
+UserCache userCache(UserCacheRef ref) => UserCache();
+
+@Riverpod(keepAlive: true)
+UserRepo userRepo(UserRepoRef ref) => UserRepo(
+  api: ref.read(apiClientProvider),
+  cache: ref.read(userCacheProvider),
+);
+```
+
+UI / 业务里 `ref.read(userRepoProvider)` 就拿到。
+
+优点:
+
+- **依赖关系类型安全**:`ref.read(userRepoProvider)` 返回类型确定,IDE 跳转可达。
+- **测试用 `overrides` 替换实现**(第 13 章已经讲过)。
+- **同一套 API 既做 DI 又做状态**——不需要再引入 get_it。
+- **依赖图自动维护**:provider 间 `ref.watch` 链式依赖,改了上游下游自动重算。
+
+缺点:依赖必须从 provider 入口拿,**纯 Dart 库(不依赖 Flutter / Riverpod)中用不了** —— 此时回到方案 A 构造函数注入。
+
+**主线建议:Flutter 业务用 Riverpod 同时承担 DI,纯 Dart 库用构造函数注入**。get_it 只在团队偏好或迁移已有项目时考虑。
+
+## Clean Architecture:三层
+
+Robert Martin 的 Clean Architecture 在 Flutter 里通常落到三层:
+
+```text
+┌──────────────────────────────────────────────┐
+│  presentation     widget / state / animation │  ← Flutter 相关
+├──────────────────────────────────────────────┤
+│  domain          entity / use case / repo   │  ← 纯 Dart,业务核心
+│                  abstract                   │
+├──────────────────────────────────────────────┤
+│  data            api / db / repo impl /     │  ← Flutter 相关 / 第三方库
+│                  dto                        │
+└──────────────────────────────────────────────┘
+        依赖方向永远朝上(domain 不依赖 data)
+```
+
+每层职责:
+
+| 层 | 类型 | 职责 |
+| -- | ---- | ---- |
+| **presentation** | Widget / `StateNotifier` / `Bloc` | 把 UI 反映成 state,把 state 反映回 UI |
+| **domain** | `Entity` / `UseCase` / `Repository`(抽象) | 描述"业务说什么",**不**关心数据怎么来 |
+| **data** | `DTO` / `Repository`(实现) / `ApiClient` / `Dao` | 与外部世界对接(REST / DB / Firebase) |
+
+### 关键:**domain 反向依赖**
+
+`Repository` 抽象写在 **domain** 层,实现写在 **data** 层。data 依赖 domain 的接口,而不是反过来。这就是"依赖倒置"在架构上的形态。
+
+### Entity vs Model vs DTO
+
+新手最常混淆的三个词:
+
+| 名字 | 谁定义 | 用途 |
+| ---- | ---- | ---- |
+| **Entity** | domain 层 | 业务核心对象,字段 = 业务关心的 |
+| **DTO**(Data Transfer Object) | data 层 | 对接外部 schema,与 API JSON 一一对应 |
+| **Model** | 含义因团队而异,常作为 "Entity 或 DTO 的统称" | — |
+
+```dart filename="lib/domain/entities/user.dart"
+@freezed
+class User with _$User {
+  const factory User({
+    required String id,
+    required String displayName,
+    required Uri? avatarUrl,
+    required bool isPremium,
+  }) = _User;
+}
+```
+
+```dart filename="lib/data/dtos/user_dto.dart"
+@freezed
+class UserDto with _$UserDto {
+  const factory UserDto({
+    required String id,
+    @JsonKey(name: 'display_name') required String displayName,
+    @JsonKey(name: 'avatar_url')   String? avatarUrl,
+    @JsonKey(name: 'subscription_level') int? subscriptionLevel,
+  }) = _UserDto;
+
+  const UserDto._();
+  factory UserDto.fromJson(Map<String, dynamic> json) => _$UserDtoFromJson(json);
+
+  User toEntity() => User(
+    id: id,
+    displayName: displayName,
+    avatarUrl: avatarUrl == null ? null : Uri.parse(avatarUrl!),
+    isPremium: (subscriptionLevel ?? 0) >= 2,         // ★ 业务语义在这里翻译
+  );
+}
+```
+
+> 业务代码看到的永远是 `User`(`isPremium: bool`),而 API 字段 `subscription_level: int` 改了不影响 UI。这就是 DTO 的隔离价值。
+
+#### 何时**不**分 Entity / DTO?
+
+**简单 app(单源数据 + 字段一对一)**——直接用 freezed 一个 class 既当 entity 又当 DTO。引入 DTO 的成本很大,**只有"业务语义和 API schema 经常分歧"时才值得**。
+
+### UseCase:小到只有一个 `call`
+
+UseCase 是"一段业务流程"的封装。强 DDD 派坚持每个用例一个 class;务实派只在"流程本身复杂(跨 Repo)"时才单独封装,简单 CRUD 直接调 Repo 即可。
+
+```dart filename="lib/domain/usecases/sign_in_usecase.dart"
+class SignInUseCase {
+  SignInUseCase(this._authRepo, this._analytics);
+  final AuthRepo _authRepo;
+  final AnalyticsRepo _analytics;
+
+  Future<Result<User, AuthFailure>> call(String email, String password) async {
+    final result = await _authRepo.signIn(email, password);
+    return result.map((user) {
+      _analytics.track('sign_in_success', {'method': 'email'});
+      return user;
+    });
+  }
+}
+```
+
+UseCase 价值:**把"调多个 Repo + 埋点 + 校验"这种"组合"逻辑从 UI 里抽出来**,UI 只调 `useCase.call(...)`。
+
+> 务实建议:**新项目不要一上来就给每个动作写 UseCase**。等"两个屏幕里出现重复业务流程"时再抽。
+
+## Repository:抽象与实现
+
+```dart filename="lib/domain/repositories/article_repo.dart"
+abstract interface class ArticleRepo {
+  Future<Result<Article, Failure>> fetchById(String id);
+  Stream<List<Article>> watchAll();
+  Future<Result<void, Failure>> create(Article a);
+}
+```
+
+```dart filename="lib/data/repositories/article_repo_impl.dart"
+class ArticleRepoImpl implements ArticleRepo {
+  ArticleRepoImpl(this._api, this._dao);
+  final ApiClient _api;
+  final ArticleDao _dao;
+
+  @override
+  Future<Result<Article, Failure>> fetchById(String id) async {
+    try {
+      final res = await _api.get<Map<String, dynamic>>('/articles/$id');
+      final dto = ArticleDto.fromJson(res.data!);
+      await _dao.upsert(dto.toEntity());           // 顺手缓存
+      return Result.ok(dto.toEntity());
+    } on DioException catch (e) {
+      final cached = await _dao.get(id);            // 网络失败用缓存
+      if (cached != null) return Result.ok(cached);
+      return Result.err(mapDioError(e));
+    }
+  }
+
+  @override
+  Stream<List<Article>> watchAll() => _dao.watchAll();
+
+  // ...
+}
+```
+
+要点:
+
+- **抽象在 domain 层,实现在 data 层**——presentation 只 import domain。
+- **缓存策略 / 网络重试 / DTO 映射 都在 Repo 实现内部**——上层不关心。
+- **抽象方法签名永远不暴露 dio / Drift 等基础设施类型**——把 `DioException` 翻译成 `Failure`。
+
+## 错误模型:`Result<T, E>` vs `Either<L, R>` vs 异常
+
+第 15 章「数据请求」已经引入了 `ApiResult`(用 freezed sealed)。这里给出三种主流做法的对照:
+
+### 方式 1:抛异常(Dart / Flutter 的"原生"做法)
+
+```dart
+Future<User> signIn(String email, String password) async {
+  // 失败抛 AuthFailure
+}
+
+try { final u = await signIn(...); }
+on UnauthorizedFailure { ... }
+on NetworkFailure { ... }
+```
+
+优点:简洁,与 Dart `async` 自然对接,Riverpod `AsyncValue` 帮你抓住。
+缺点:**调用方"忘记 catch"也能编译通过**——错误处理成"约定"而非编译保证。
+
+### 方式 2:`Result<T, E>`(Rust 风格)
+
+```dart filename="lib/utils/result.dart"
+@freezed
+sealed class Result<T, E> with _$Result<T, E> {
+  const factory Result.ok(T value)  = Ok<T, E>;
+  const factory Result.err(E error) = Err<T, E>;
+}
+
+extension ResultX<T, E> on Result<T, E> {
+  Result<R, E> map<R>(R Function(T) fn) => switch (this) {
+    Ok(:final value) => Result.ok(fn(value)),
+    Err(:final error) => Result.err(error),
+  };
+}
+```
+
+```dart
+Future<Result<User, AuthFailure>> signIn(String email, String password);
+
+final r = await signIn(...);
+switch (r) {
+  case Ok(:final value):  // ...
+  case Err(:final error): // ...
+}
+```
+
+优点:**调用方必须显式处理两种情况**(Dart 3 switch 漏一个分支编译报错)。
+缺点:每个 await 处都要解包;不能直接用 `await` 语义短路。
+
+### 方式 3:`Either<L, R>`(dartz / fpdart)
+
+函数式风格,`Left = error / Right = success`。和 `Result` 几乎等价,只是命名取自范畴论。
+
+```dart
+Future<Either<AuthFailure, User>> signIn(...);
+final result = await signIn(...);
+result.fold((failure) { ... }, (user) { ... });
+```
+
+### 选型建议
+
+```text
+  纯 UI 层(throw 一抛 AsyncValue 自动接) → 抛异常
+  跨层 Repo / UseCase 接口            → Result<T, E>(本系列推荐)
+  团队偏函数式 / 已经在用 dartz       → Either<L, R>
+```
+
+> **不要在同一项目里混用三种**——选一种贯穿。
+
+## 目录组织:feature-first vs layer-first
+
+### Layer-first(按层)
+
+```text
+lib/
+├── data/
+│   ├── apis/
+│   ├── daos/
+│   └── repositories/
+├── domain/
+│   ├── entities/
+│   ├── usecases/
+│   └── repositories/
+└── presentation/
+    ├── screens/
+    ├── widgets/
+    └── controllers/
+```
+
+每层一个目录,所有 feature 的代码混在一层里。
+
+优点:跟 Clean Architecture 教科书一致,初期看着整齐。
+缺点:**做一个新功能要打开 6 个目录**;同一 feature 文件分散,新人难找;feature 删除困难。
+
+### Feature-first(按功能)
+
+```text
+lib/
+├── core/                      ← 全局共享(API 客户端、Result、Failure)
+│   ├── api/
+│   ├── error/
+│   └── widgets/
+├── features/
+│   ├── auth/
+│   │   ├── data/
+│   │   ├── domain/
+│   │   └── presentation/
+│   ├── articles/
+│   │   ├── data/
+│   │   ├── domain/
+│   │   └── presentation/
+│   └── settings/
+│       ├── data/
+│       ├── domain/
+│       └── presentation/
+└── main.dart
+```
+
+按功能划分,每个 feature 内部再分层。
+
+优点:**改一个 feature 只在一个目录**;feature 可以独立开发 / 删除 / 模块化。
+缺点:跨 feature 复用要走 `core/` 或显式依赖。
+
+**实战推荐 feature-first**:Flutter 项目通常 feature 维度的变更频率远高于 layer 维度,目录组织应该跟变更模式对齐。
+
+## 范式速查:MVVM / MVC / Bloc / Riverpod 风格
+
+| 范式 | 视图 ↔ 中间层 ↔ 数据 |
+| ---- | ---- |
+| **MVC** | View → Controller → Model;controller 直接持有 model |
+| **MVVM** | View ↔ ViewModel(双向绑定)→ Model |
+| **MVP** | View ↔ Presenter →Model;view 是被动的 |
+| **Bloc** | Widget → Event → Bloc → State → Widget(单向数据流) |
+| **Redux** | Widget → Action → Reducer → Store → Widget |
+| **Riverpod** | Widget → ref.read(notifier).method() → Notifier → state → ref.watch → Widget |
+
+Flutter 社区主流是 **Bloc 风格(单向)** 与 **Riverpod 风格(单向 + DI 一体)**。MVVM 在 Xamarin / WPF 流行,Flutter 偶尔可见,但单向数据流在 widget 重建模型下更顺。
+
+## 反模式与陷阱
+
+### 反模式 1:Service 类持有 BuildContext
+
+```dart
+// ❌
+class NavigationService {
+  BuildContext context;
+  NavigationService(this.context);
+  void goHome() => Navigator.of(context).pushNamed('/home');
+}
+```
+
+context 一旦失效(页面销毁),Service 持有的就是悬空引用。
+
+修法:用 `GlobalKey<NavigatorState>` 或 go_router 的全局 router。
+
+### 反模式 2:Singleton 满天飞
+
+每个 Repo / Service 都 `static final instance = ...`,等于全局可变状态。
+
+后果:测试时无法替换;app 重启(hot restart)状态不清空导致 bug。
+
+修法:Riverpod 的 `keepAlive` provider —— 同样是单例,但生命周期由框架管理,测试时可 override。
+
+### 反模式 3:UseCase 成为"调一个 Repo 方法"的薄壳
+
+```dart
+class GetUserUseCase {
+  GetUserUseCase(this._repo);
+  final UserRepo _repo;
+  Future<User> call(String id) => _repo.fetch(id);     // 没有任何业务逻辑
+}
+```
+
+这层是纯负担。UseCase 应该有"组合 / 协调"价值。
+
+修法:UI 直接调 Repo,等真有组合逻辑时再抽 UseCase。
+
+### 反模式 4:Repository 接口 = 实现的 1:1 抽象
+
+```dart
+abstract class UserRepo {
+  Future<User> fetchFromDio(String id);
+  Future<User> fetchFromHive(String id);
+}
+```
+
+抽象漏了实现细节(`Dio` / `Hive`),换实现等于改接口。
+
+修法:接口只描述"业务行为"(`fetch(id, {bool forceRefresh})`),不暴露实现选择。
+
+### 反模式 5:遵循"原则"到丢失意图
+
+```dart
+// "为了符合 SRP 拆类"
+class UserNameStringConverter { ... }
+class UserAvatarUrlValidator { ... }
+class UserBirthdayDateFormatter { ... }
+```
+
+拆得太细等于把内聚的逻辑炸成 N 个文件,反而难维护。**SRP 是"职责"单一,不是"行数"单一**。
+
+## 实战:一个 feature 的完整骨架
+
+把上面所有概念落到一个 articles feature:
+
+```text
+lib/features/articles/
+├── data/
+│   ├── article_api.dart           ← dio 调用,返回 Map
+│   ├── article_dao.dart           ← Drift DAO
+│   ├── article_dto.dart           ← @freezed,带 fromJson + toEntity()
+│   └── article_repo_impl.dart     ← implements ArticleRepo
+├── domain/
+│   ├── article.dart               ← @freezed,纯业务 entity
+│   ├── article_repo.dart          ← abstract interface
+│   └── failure.dart               ← @freezed sealed,业务失败类型
+└── presentation/
+    ├── article_providers.dart     ← Riverpod:绑定 impl 到 abstract
+    ├── article_list_screen.dart
+    ├── article_detail_screen.dart
+    └── widgets/
+        ├── article_card.dart
+        └── error_view.dart
+```
+
+`article_providers.dart` 是 presentation 与 data 的接驳点:
+
+```dart filename="lib/features/articles/presentation/article_providers.dart"
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+import '../data/article_repo_impl.dart';
+import '../domain/article.dart';
+import '../domain/article_repo.dart';
+import '../../../core/providers.dart';      // apiClient / appDb 等
+
+part 'article_providers.g.dart';
+
+@Riverpod(keepAlive: true)
+ArticleRepo articleRepo(ArticleRepoRef ref) => ArticleRepoImpl(
+  ref.read(apiClientProvider),
+  ref.read(appDbProvider).articleDao,
+);
+
+@riverpod
+Future<Article> article(ArticleRef ref, String id) async {
+  final cancel = CancelToken();
+  ref.onDispose(cancel.cancel);
+  final result = await ref.read(articleRepoProvider).fetchById(id);
+  return switch (result) {
+    Ok(:final value)   => value,
+    Err(:final error)  => throw error,
+  };
+}
+
+@riverpod
+Stream<List<Article>> watchArticles(WatchArticlesRef ref) =>
+    ref.read(articleRepoProvider).watchAll();
+```
+
+UI 完全不知道 `dio` / `Drift` / `freezed` 存在,只看到 `Article` entity 和 `articleProvider(id)`。
+
+## 心智模型清单
+
+1. **架构是为了让代码可改**;每条原则都要看是否降低改动成本。
+2. **类名带 `Manager` / `Util` 通常是 SRP 反模式信号**——拆!
+3. **依赖倒置(D)是 SOLID 里唯一真正"建筑级别"的原则**;接口在 domain,实现在 data。
+4. **DI 三选一**:构造函数(库)/ get_it(传统)/ Riverpod(主线一体化)。
+5. **Clean Architecture 三层**:presentation → domain ← data;依赖方向永远朝 domain。
+6. **Entity 是业务,DTO 是协议**;只有"协议变化频繁"才需要分。
+7. **简单 CRUD 不要写 UseCase**;有"组合多个 Repo + 副作用"时才抽。
+8. **Repository 接口只描述行为,不暴露实现技术**(没有 `fetchFromDio` 这种命名)。
+9. **错误模型选一种**:抛异常 / `Result<T, E>` / `Either`;不要混用。
+10. **Feature-first 目录** 比 layer-first 更适合 Flutter 项目变更模式。
+11. **避免反模式**:context 持有 / Singleton 全家桶 / 薄壳 UseCase / 实现耦合的接口 / SRP 拆过头。
+12. **架构是工具不是教条**;在简单场景敢于"少一层抽象"是成熟的标志。
+
+## 自查问题
+
+- 你怎么解释"架构的根本目的"?给出三个不能忘记的判断问题。
+- 找出你目前项目里一个名字带 `Manager` / `Util` 的类,说出它实际承担了几件事,分别该拆到哪。
+- 一个 widget 直接 `new Dio()` 违反了 SOLID 哪条?改写后业务代码、测试代码各自获得什么?
+- 比较构造函数注入 / get_it / Riverpod 三种 DI:在"测试时 mock 所有依赖"的难度上,哪种最低?
+- domain 层为什么不能 import data 层?如果不小心 import 了,后果是什么?
+- Entity 与 DTO 为什么要分?给一个"分了能省事"的具体改动场景。
+- 什么时候**不**应该写 UseCase?给两个具体例子。
+- 用 `Result<T, E>` 替代抛异常,在调用方代码上具体多了什么?少了什么?
+- Feature-first 比 layer-first 强在哪?给一个"删除一个废弃 feature"的具体对比。
+- 写一个新 feature `notifications` 的目录结构,完整列出 data / domain / presentation 各自要哪些文件。
+- 给出本章 5 个反模式中你**最容易违反**的一个,并说出避免它的具体办法。
+
+下一章 [测试](/flutter/testing):有了架构,现在让它经得起改。
