@@ -11,25 +11,12 @@ description: Reconciler、Lists 与 Key、Refs、合成事件、HOC 与 Render P
 
 每一次 render 都经历两个阶段：
 
-```text
-┌─────────────────────────────────────────────────────┐
-│                  Render Phase                        │
-│   (Pure, can be paused / restarted / abandoned)      │
-│                                                      │
-│   • 调用组件函数 → 得到新的 React Element 树         │
-│   • 与上一次的 Fiber 树 diff，标记需要变更的节点      │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│                  Commit Phase                        │
-│   (Sync, can NOT be interrupted)                     │
-│                                                      │
-│   • 将 DOM 变更应用到真实 DOM                         │
-│   • 运行 useLayoutEffect (sync)                      │
-│   • 浏览器 Paint                                     │
-│   • 运行 useEffect (async, after paint)              │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    R0(["Render Phase · 纯函数，可中断"]) --> R1["调用组件函数<br/>→ 生成新的 React Element 树"] --> R2["与上一次 Fiber 树 diff<br/>标记需要变更的节点"]
+    R2 -.->|"被高优先级更新打断：暂停 / 丢弃重来"| R0
+    R2 ==>|"diff 完成 → 提交变更"| C0(["Commit Phase · 同步执行，不可中断"])
+    C0 --> C1["将变更应用到真实 DOM"] --> C2["运行 useLayoutEffect<br/>（同步，Paint 前）"] --> C3["浏览器 Paint 绘制"] --> C4["运行 useEffect<br/>（异步，Paint 后）"]
 ```
 
 #### 触发渲染的方式

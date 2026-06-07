@@ -1,0 +1,7 @@
+interface:
+  display_name: "技术知识库写作"
+  short_description: "为指定技术栈编写系统化中文知识库。"
+  default_prompt: "使用 $tech-knowledge-base-writer 帮我为 Vue 3 设计一套系统化实战知识库目录，并编写第一篇入门文档。"
+
+policy:
+  allow_implicit_invocation: true

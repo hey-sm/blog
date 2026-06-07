@@ -1,8 +1,74 @@
-# PDF 在线场景实现要点（关键代码版）
+# PDF 
 
 **约束**：PDF 来源只有远程 URL，无本地上传、无 IndexedDB 文档缓存。
 **覆盖**：在线解析 / 高清渲染 / 批注 / 签章 / 大文件优化 / 白屏卡顿 OOM。
-**依赖**：`pdfjs-dist` + `pdf-lib`（仅签章烧录用）+ `idb`（仅批注用）+ `zustand`。
+**依赖**：`pdfjs-dist` + `pdf-lib`（仅签章烧录用）+ `idb`（仅批注用）+ `zustand`；可选引入 `@tanstack/react-query` 与 `@tanstack/react-virtual` 替代手写虚拟化与缓存。
+
+---
+
+## 端到端流水线 & 库选型（导读）
+
+整条链路按时间顺序划分为五个阶段：**入库 → 请求 → 渲染 → 交互 → 产出**。每个阶段挑一件让上下游"少做事"的事，这就是"优雅"的来源——线性化让客户端少下载、Range 让客户端少解析、虚拟化让浏览器少渲染、Worker 让主线程少阻塞、后端 Job 让浏览器少烧录、IDB Outbox 让网络少阻塞 UI。
+
+### 链路图
+
+```
+[入库期]                 [请求期]                 [渲染期]                  [交互期]                  [产出期]
+PDF 原始字节             浏览器                   浏览器                    浏览器                    后端
+   │                        │                        │                        │                         │
+   ├ qpdf --linearize       ├ HTTP Range chunk       ├ Worker 解析            ├ SVG 批注层(viewBox=PDF) ├ Job 队列 BullMQ
+   ├ 元信息入 DB            │  disableAutoFetch      │  pdfjs.getDocument     ├ RAF 节流手绘           ├ pdf-lib 写字节
+   ├ 上传 CDN / OSS         │  Accept-Ranges: bytes  ├ Canvas + textLayer     ├ IDB Outbox 写直达       ├ 上传 signed URL
+   │                        │  302 → CDN             ├ 三明治三层共享 viewport├ 增量同步 since=ts       ├ 客户端轮询 jobId
+   │                        │                        ├ 虚拟滚动 IO/tanstack   │                         │
+   │                        │                        └ 内存三件套             │                         │
+   │                        │                          cancel/cleanup/w=0     │                         │
+```
+
+### 库选型（全部为活跃维护、生态主流）
+
+| 阶段 | 推荐库 | 角色 | 备注 / 替代 |
+|---|---|---|---|
+| **服务端线性化** | `qpdf --linearize` | 入库预处理，启用 Fast Web View | Ghostscript / `mutool clean -l` |
+| **客户端加载/渲染** | **`pdfjs-dist`** | Range 拉取、Worker 解析、Canvas 光栅化、textLayer | MuPDF-WASM（渲染快 2-5x，WASM 体积大） |
+| **异步缓存与取消** | **`@tanstack/react-query`** | 页 meta / 缩略图 / 高清三级缓存，`signal` 自动 cancel | SWR；不引入则手写 useEffect + AbortController |
+| **虚拟滚动** | **`@tanstack/react-virtual`** | 动态高度长列表，`measureElement` 自动校正 | `react-window`（更轻、固定高度场景）|
+| **全局状态** | **`zustand`** | tool / zoom / 印章 偏好 + `persist` 跨会话 | jotai |
+| **本地存储** | **`idb`** | 批注 / 印章 / outbox 持久化 | Dexie.js（更高层 API） |
+| **字节写入** | **`pdf-lib`**（前后端同库） | 批注/印章烧录 | PyMuPDF（后端最快，C 实现）/ Apache PDFBox（JVM） |
+| **后端 Job 队列** | **BullMQ** / Inngest / Trigger.dev | 烧录异步、重试、并发限流 | SQS（纯 AWS 场景） |
+| **协作（可选）** | **Yjs** / Liveblocks | 多端批注 CRDT 自动合并 | Automerge |
+| **数字签名（合规）** | e签宝 / DocuSign（SaaS） | PKCS#7 + TSA + LTV 长期归档 | 自研代价是视觉签章 5–10 倍 |
+
+### 五阶段优雅模式速查
+
+| 阶段 | 优雅 = | 关键模式 | 展开 |
+|---|---|---|---|
+| **入库** | 让客户端少下载 | `qpdf --linearize` + 元信息（页数/尺寸）入 DB | §0 |
+| **请求** | 让客户端少解析 | `disableAutoFetch:true` + `rangeChunkSize:64KB` + 302 直连 CDN | §2 §10 |
+| **渲染** | 让浏览器少画 | 三明治分层 + 虚拟滚动 + Worker + 内存三件套 + dpr ≤ 2 | §4 §5 §6 |
+| **交互** | 让 UI 少阻塞 | 批注坐标存 PDF 系 + RAF 节流 + IDB Outbox + 滚动时隐藏 textLayer | §7 §12.4 |
+| **产出** | 让浏览器零负担 | 烧录后端化 + Job 幂等缓存 + signed URL 短期过期 | §8 §12.7 |
+
+### 内存管理纵向贯穿（横切关注点）
+
+不属于某个阶段，而是每个阶段都要做：
+
+| 来源 | 风险 | 释放点 |
+|---|---|---|
+| pdfjs 内部缓存 | 翻完书 heap 不降 | `page.cleanup()` + `pdfDocument.cleanup()` |
+| Canvas GPU 像素 | 仅 `removeChild` 不释放显存 | `canvas.width = canvas.height = 0` |
+| RenderTask 残留 | 卸载后仍写已销毁 canvas | `task.cancel()` |
+| 高清位图缓存 | Query gcTime 过长 → 显存涨 | react-query 短 gcTime（30s）+ `QueryCache` `removed` 事件里 `ImageBitmap.close()` |
+| pdfjs 后台预取 | 整份 500MB 文档静默下载 | `disableAutoFetch: true` |
+| 长会话累积 | 内部对象图缓慢膨胀 | 30 min 周期性 `destroy() + reload()`，保留 scrollTop |
+| dpr=3 屏 4K 模式 | 单页像素 9× | `Math.min(devicePixelRatio, 2)` |
+
+### 三件最容易翻车的事（按惨烈程度倒序）
+
+1. **客户端在用户不知情下预取整份 PDF** → 必开 `disableAutoFetch: true`（§2）
+2. **快速滚动时旧 RenderTask 未取消** → Query `signal` 串到 `task.cancel()`（§5）
+3. **批注存了屏幕坐标** → SVG `viewBox` 用 PDF 原始尺寸，所有数据按 PDF 坐标存（§7）
 
 ---
 
