@@ -1,0 +1,121 @@
+:root {
+  --mermaid-mindmap-root: #d7c6ec;
+  --mermaid-mindmap-root-text: #2e1065;
+  --mermaid-mindmap-1: #c4b5fd;
+  --mermaid-mindmap-2: #fcd34d;
+  --mermaid-mindmap-3: #bef264;
+  --mermaid-mindmap-4: #ffb86a;
+  --mermaid-mindmap-5: #7ccf00;
+  --mermaid-mindmap-6: #8ec5ff;
+  --mermaid-mindmap-7: #bef264;
+  --mermaid-mindmap-8: #f0abfc;
+  --mermaid-mindmap-label: #111827;
+  --mermaid-mindmap-edge: #94a3b8;
+}
+
+.dark {
+  --mermaid-mindmap-root: #d7c6ec;
+  --mermaid-mindmap-root-text: #2e1065;
+  --mermaid-mindmap-label: #111827;
+  --mermaid-mindmap-edge: #64748b;
+}
+
+svg .mindmap-node.section-root rect,
+svg .mindmap-node.section-root path,
+svg .mindmap-node.section-root circle,
+svg .mindmap-node.section-root polygon {
+  fill: var(--mermaid-mindmap-root) !important;
+  stroke: var(--mermaid-mindmap-root) !important;
+}
+
+svg .mindmap-node.section-root text,
+svg .mindmap-node.section-root span,
+svg .mindmap-node.section-root .text-inner-tspan {
+  color: var(--mermaid-mindmap-root-text) !important;
+  fill: var(--mermaid-mindmap-root-text) !important;
+}
+
+svg .mindmap-node.section-0 rect,
+svg .mindmap-node.section-0 path,
+svg .mindmap-node.section-0 circle,
+svg .mindmap-node.section-0 polygon,
+svg .mindmap-node.section-8 rect,
+svg .mindmap-node.section-8 path,
+svg .mindmap-node.section-8 circle,
+svg .mindmap-node.section-8 polygon {
+  fill: var(--mermaid-mindmap-1) !important;
+  stroke: var(--mermaid-mindmap-1) !important;
+}
+
+svg .mindmap-node.section-1 rect,
+svg .mindmap-node.section-1 path,
+svg .mindmap-node.section-1 circle,
+svg .mindmap-node.section-1 polygon {
+  fill: var(--mermaid-mindmap-2) !important;
+  stroke: var(--mermaid-mindmap-2) !important;
+}
+
+svg .mindmap-node.section-2 rect,
+svg .mindmap-node.section-2 path,
+svg .mindmap-node.section-2 circle,
+svg .mindmap-node.section-2 polygon {
+  fill: var(--mermaid-mindmap-3) !important;
+  stroke: var(--mermaid-mindmap-3) !important;
+}
+
+svg .mindmap-node.section-3 rect,
+svg .mindmap-node.section-3 path,
+svg .mindmap-node.section-3 circle,
+svg .mindmap-node.section-3 polygon {
+  fill: var(--mermaid-mindmap-4) !important;
+  stroke: var(--mermaid-mindmap-4) !important;
+}
+
+svg .mindmap-node.section-4 rect,
+svg .mindmap-node.section-4 path,
+svg .mindmap-node.section-4 circle,
+svg .mindmap-node.section-4 polygon {
+  fill: var(--mermaid-mindmap-5) !important;
+  stroke: var(--mermaid-mindmap-5) !important;
+}
+
+svg .mindmap-node.section-5 rect,
+svg .mindmap-node.section-5 path,
+svg .mindmap-node.section-5 circle,
+svg .mindmap-node.section-5 polygon {
+  fill: var(--mermaid-mindmap-6) !important;
+  stroke: var(--mermaid-mindmap-6) !important;
+}
+
+svg .mindmap-node.section-6 rect,
+svg .mindmap-node.section-6 path,
+svg .mindmap-node.section-6 circle,
+svg .mindmap-node.section-6 polygon {
+  fill: var(--mermaid-mindmap-7) !important;
+  stroke: var(--mermaid-mindmap-7) !important;
+}
+
+svg .mindmap-node.section-7 rect,
+svg .mindmap-node.section-7 path,
+svg .mindmap-node.section-7 circle,
+svg .mindmap-node.section-7 polygon {
+  fill: var(--mermaid-mindmap-8) !important;
+  stroke: var(--mermaid-mindmap-8) !important;
+}
+
+svg .mindmap-node[class*='section-'] text,
+svg .mindmap-node[class*='section-'] span,
+svg .mindmap-node[class*='section-'] .text-inner-tspan {
+  color: var(--mermaid-mindmap-label) !important;
+  fill: var(--mermaid-mindmap-label) !important;
+}
+
+svg [class*='section-edge-'],
+svg [class*='edge-depth-'] {
+  stroke: var(--mermaid-mindmap-edge) !important;
+}
+
+svg .mindmap-node line {
+  stroke: transparent !important;
+  stroke-width: 0 !important;
+}

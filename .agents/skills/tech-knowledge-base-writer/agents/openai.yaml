@@ -1,7 +1,7 @@
 interface:
   display_name: "技术知识库写作"
-  short_description: "为指定技术栈编写系统化中文知识库。"
-  default_prompt: "使用 $tech-knowledge-base-writer 帮我为 Vue 3 设计一套系统化实战知识库目录，并编写第一篇入门文档。"
+  short_description: "为指定技术构建零基础友好的图文知识体系。"
+  default_prompt: "使用 $tech-knowledge-base-writer 帮我为 React 设计一套面向 0 基础读者的完整知识体系，包含学习路线、知识库目录、实战项目和 Mermaid 图解建议。"
 
 policy:
   allow_implicit_invocation: true

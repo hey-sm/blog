@@ -27,50 +27,65 @@ Next.js 同时支持两套路由系统。**新项目默认使用 App Router**，
 
 ## 目录结构对比
 
-```text
-Pages Router                        App Router
-────────────                        ──────────
-pages/                              app/
-├── _app.tsx        (全局外壳)       ├── layout.tsx     (根布局)
-├── _document.tsx   (HTML 骨架)     ├── page.tsx       (首页 /)
-├── index.tsx       (首页 /)        ├── about/
-├── about.tsx       (/about)        │   ├── layout.tsx (about 共享布局)
-├── api/                            │   └── page.tsx   (/about)
-│   └── posts.ts    (/api/posts)    ├── blog/
-│                                   │   └── [slug]/
-│                                   │       └── page.tsx (/blog/:slug)
-│                                   └── api/
-│                                       └── posts/
-│                                           └── route.ts (/api/posts)
+```mermaid
+flowchart LR
+  subgraph PagesRouter[Pages Router]
+    P0[pages/]
+    P1[_app.tsx<br/>全局外壳]
+    P2[_document.tsx<br/>HTML 骨架]
+    P3[index.tsx<br/>/]
+    P4[about.tsx<br/>/about]
+    P5[api/posts.ts<br/>/api/posts]
+    P0 --> P1
+    P0 --> P2
+    P0 --> P3
+    P0 --> P4
+    P0 --> P5
+  end
+
+  subgraph AppRouter[App Router]
+    A0[app/]
+    A1[layout.tsx<br/>根布局]
+    A2[page.tsx<br/>/]
+    A3[about/layout.tsx<br/>about 共享布局]
+    A4[about/page.tsx<br/>/about]
+    A5[blog/&lbrack;slug&rbrack;/page.tsx<br/>/blog/:slug]
+    A6[api/posts/route.ts<br/>/api/posts]
+    A0 --> A1
+    A0 --> A2
+    A0 --> A3 --> A4
+    A0 --> A5
+    A0 --> A6
+  end
 ```
 
 ## 渲染模型详解
 
 ### Pages Router: "全部组件在客户端运行"
 
-```text
-┌─────────────────────────────────────────┐
-│  服务器: 执行组件函数 → 生成 HTML        │
-│  客户端: 下载 HTML + JS bundle          │
-│          执行组件函数 (hydrate)          │
-│          绑定事件                        │
-│                                          │
-│  结果: 页面的 JS 全部发送到浏览器        │
-└─────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+  participant S as 服务器
+  participant B as 浏览器
+  S->>S: 执行组件函数
+  S-->>B: 返回 HTML
+  B->>B: 下载 JS bundle
+  B->>B: 再次执行组件函数 hydrate
+  B->>B: 绑定事件
+  Note over B: 页面的 JS 全部发送到浏览器
 ```
 
 ### App Router: "默认是 Server，按需 Client"
 
-```text
-┌─────────────────────────────────────────┐
-│  服务器: 执行 Server Components          │
-│          生成 RSC Payload (序列化结果)   │
-│                                          │
-│  客户端: 下载 HTML + RSC Payload         │
-│          仅在 'use client' 节点 hydrate  │
-│                                          │
-│  结果: Server Components 的 JS 不发送    │
-└─────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+  participant S as 服务器
+  participant B as 浏览器
+  S->>S: 执行 Server Components
+  S->>S: 生成 RSC Payload
+  S-->>B: 返回 HTML + RSC Payload
+  B->>B: 仅 hydrate 'use client' 节点
+  Note over S,B: Server Components 的 JS 不发送到浏览器
 ```
 
 这意味着 App Router 中：
@@ -84,14 +99,18 @@ pages/                              app/
 
 两个路由系统可以**共存**在同一个项目：
 
-```text
-my-app/
-├── app/           # 新功能用 App Router
-│   ├── layout.tsx
-│   └── page.tsx
-└── pages/         # 旧功能保留 Pages Router
-    ├── _app.tsx
-    └── index.tsx
+```mermaid
+flowchart TD
+  A[my-app] --> B[app/<br/>新功能用 App Router]
+  A --> C[pages/<br/>旧功能保留 Pages Router]
+  B --> B1[layout.tsx]
+  B --> B2[page.tsx]
+  C --> C1[_app.tsx]
+  C --> C2[index.tsx]
+
+  R[请求进入 Next.js] --> M{app/ 是否匹配}
+  M -->|是| B
+  M -->|否| C
 ```
 
 Next.js 的路由匹配顺序：

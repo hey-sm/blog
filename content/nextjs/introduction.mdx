@@ -30,17 +30,38 @@ React 只关心"组件如何渲染与更新"；Next.js 在此基础上接管：�
 
 Next.js 13.4+ 的 **App Router** 是一次范式升级，核心转变：
 
-```text
-Pages Router (旧)              App Router (新)
-─────────────────────          ─────────────────────
-pages/                         app/
-  index.tsx        →             page.tsx        (路由页面)
-  _app.tsx         →             layout.tsx      (共享布局)
-  _document.tsx    →             RSC 原生          (HTML 骨架)
-  getServerSideProps →           async 函数体      (服务端数据)
-  getStaticProps   →             generateStaticParams
-  API Routes       →             route.ts        (Route Handlers)
-  无               →             Server Actions    (表单/副作用)
+```mermaid
+flowchart LR
+  subgraph PagesRouter[Pages Router 旧]
+    P0[pages/]
+    P1[index.tsx]
+    P2[_app.tsx]
+    P3[_document.tsx]
+    P4[getServerSideProps]
+    P5[getStaticProps]
+    P6[API Routes]
+    P7[无 Server Actions]
+  end
+
+  subgraph AppRouter[App Router 新]
+    A0[app/]
+    A1[page.tsx<br/>路由页面]
+    A2[layout.tsx<br/>共享布局]
+    A3[RSC 原生<br/>HTML 骨架]
+    A4[async 函数体<br/>服务端数据]
+    A5[generateStaticParams]
+    A6[route.ts<br/>Route Handlers]
+    A7[Server Actions<br/>表单 / 副作用]
+  end
+
+  P0 --> A0
+  P1 --> A1
+  P2 --> A2
+  P3 --> A3
+  P4 --> A4
+  P5 --> A5
+  P6 --> A6
+  P7 --> A7
 ```
 
 关键差异在**渲染模型**：
@@ -48,20 +69,25 @@ pages/                         app/
 - **Pages Router**: 所有组件都是客户端组件，SSR 是"在服务器跑一次 render → HTML → 客户端再跑一次 hydration"
 - **App Router**: 默认一切是 **Server Components**，仅在需要交互时加 `'use client'`
 
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│                     App Router 渲染边界                            │
-│                                                                   │
-│  ┌─────────────────────────────┐                                  │
-│  │     Server Components        │  ← 默认，可直查 DB、读文件     │
-│  │   (no JS shipped to client)  │                                  │
-│  │                              │                                  │
-│  │   ┌──────────────────────┐   │                                  │
-│  │   │  'use client'        │   │  ← 交互边界：hooks、事件、状态  │
-│  │   │  (hydrated in browser)│   │                                  │
-│  │   └──────────────────────┘   │                                  │
-│  └─────────────────────────────┘                                  │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph Boundary[App Router 渲染边界]
+    subgraph Server[Server Components 默认]
+      S1[可直查 DB]
+      S2[可读文件]
+      S3[JS 不发送到浏览器]
+      subgraph Client[use client 交互边界]
+        C1[hooks]
+        C2[事件]
+        C3[状态]
+        C4[浏览器中 hydrate]
+      end
+    end
+  end
+
+  S1 --> Client
+  S2 --> Client
+  S3 --> Client
 ```
 
 详见 [服务端与客户端组件](/nextjs/server-client-components)。
