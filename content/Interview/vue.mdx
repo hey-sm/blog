@@ -1,0 +1,399 @@
+
+### Vue 响应式原理
+
+Vue 响应式是通过数据劫持 + 观察者模式实现的，数据变化时自动更新视图。
+
+**Vue 2（Object.defineProperty）**：
+- 通过 `Object.defineProperty` 劫持对象属性的 getter/setter
+- 读取数据时收集依赖（Watcher），修改数据时触发更新
+- 缺陷：无法监听数组索引和对象新增属性，需要 `Vue.set` / `$set`
+
+**Vue 3（Proxy）**：
+- 使用 `Proxy` 代理整个对象，拦截所有操作（get/set/has/deleteProperty 等）
+- 支持数组索引、对象新增/删除属性、Map/Set 等
+- 性能更好：按需代理，只有访问时才递归响应式化
+
+**核心流程**：
+1. 初始化时，将 data 转为响应式对象
+2. 模板编译时，读取数据触发 getter，收集依赖（Watcher）
+3. 数据修改时触发 setter，通知所有 Watcher 更新
+4. Watcher 将更新推入异步队列，nextTick 后批量更新 DOM
+
+---
+
+### Vue 2 与 Vue 3 的区别
+
+| 对比项 | Vue 2 | Vue 3 |
+|--------|-------|-------|
+| 响应式实现 | Object.defineProperty | Proxy |
+| API 风格 | Options API | Composition API（支持 Options API） |
+| 生命周期 | beforeCreate、created 等 | setup 替代，新增 onMounted 等钩子 |
+| TypeScript | 支持较弱 | 原生 TypeScript 重写，类型推断更强 |
+| 性能 | 初始化时递归响应式化所有属性 | 按需响应式，性能提升 1.3-2 倍 |
+| 体积 | 运行时 ~30KB | Tree-shaking 优化，最小 ~13KB |
+| 多根节点 | 必须单根节点 | 支持 Fragment（多根节点） |
+| Teleport | 不支持 | 支持（组件渲染到 DOM 其他位置） |
+| Suspense | 不支持 | 支持（异步组件加载状态） |
+
+**核心优势**：
+- Composition API：逻辑复用更灵活，代码组织更清晰
+- 性能：编译优化、响应式优化、Tree-shaking
+- TypeScript：类型推断、IDE 支持更好
+
+---
+
+### Vue 3 组件通信方式
+
+**父子通信**：
+- **Props**：父传子，单向数据流
+- **Emits**：子传父，`defineEmits` 定义事件，`emit` 触发
+- **v-model**：语法糖，父子双向绑定（`:modelValue` + `@update:modelValue`）
+- **Ref**：父组件通过 `ref` 直接访问子组件实例
+
+**跨层级通信**：
+- **Provide / Inject**：祖先组件提供数据，后代组件注入（支持响应式）
+- **Pinia / Vuex**：全局状态管理，任意组件访问
+- **Event Bus**（不推荐）：全局事件总线，Vue 3 移除 `$on`/`$off`，可用 mitt 库
+
+**兄弟组件通信**：
+- 通过共同父组件中转（props + emits）
+- 使用 Pinia 共享状态
+- Provide / Inject（父组件提供，兄弟组件注入）
+
+**特殊场景**：
+- **Attrs / Slots**：父组件传递属性和插槽内容
+- **Teleport**：组件渲染到 DOM 其他位置，保持通信能力
+
+---
+
+### nextTick
+
+`nextTick` 是在 DOM 更新完成后执行回调的 API，用于获取更新后的 DOM 状态。
+
+**原理**：
+- Vue 的 DOM 更新是异步的，数据变化后会将更新推入队列
+- 在同一事件循环中，所有数据变化只会触发一次 DOM 更新
+- `nextTick` 将回调推入微任务队列，在 DOM 更新后、浏览器渲染前执行
+
+**使用场景**：
+- 修改数据后立即操作 DOM（获取更新后的尺寸、位置）
+- 确保 DOM 渲染完成后执行第三方库（如图表初始化）
+- 表单验证：输入框失焦后校验，需等 DOM 更新
+
+**实现原理**：
+- 优先使用 `Promise.then`（微任务）
+- 降级方案：`MutationObserver` → `setImmediate` → `setTimeout`
+- Vue 3 简化为 `Promise.then`
+
+**示例**：
+```js
+data.value = 'new value'
+nextTick(() => {
+  // 此时 DOM 已更新
+  console.log(el.textContent) // 'new value'
+})
+```
+
+---
+
+### watch、watchEffect、computed 的区别
+
+| 对比项 | computed | watch | watchEffect |
+|--------|----------|-------|-------------|
+| 用途 | 计算派生值 | 监听数据变化执行副作用 | 自动追踪依赖执行副作用 |
+| 返回值 | 必须返回值 | 不返回值 | 不返回值 |
+| 缓存 | 有缓存，依赖不变不重新计算 | 无缓存，每次变化都执行 | 无缓存，依赖变化立即执行 |
+| 依赖 | 自动收集依赖 | 手动指定监听目标 | 自动收集依赖 |
+| 异步 | 不支持异步 | 支持异步操作 | 支持异步操作 |
+| 执行时机 | 访问时惰性执行 | 数据变化时执行 | 立即执行 + 依赖变化时执行 |
+| 初次执行 | 不执行（访问时才执行） | 默认不执行（需 `immediate: true`） | 立即执行 |
+| 访问新旧值 | 不可访问 | 可访问 `(newVal, oldVal)` | 不可访问旧值 |
+| 使用场景 | 模板中展示计算结果 | 明确知道监听谁，需要新旧值对比 | 依赖不确定，只关心副作用 |
+| 典型示例 | 全名 = 姓 + 名<br/>购物车总价<br/>数据过滤排序 | 搜索词变化发请求<br/>路由变化记录日志<br/>表单验证（需对比新旧值） | 自动保存草稿<br/>日志追踪<br/>响应式副作用（不需旧值） |
+
+**记忆口诀**：
+- **computed**：一个值依赖多个值，**算出来**（用于模板展示）
+- **watch**：明确监听谁，**做事情**（需要新旧值对比）
+- **watchEffect**：自动追踪依赖，**做事情**（不关心旧值，立即执行）
+
+**代码示例**：
+```js
+// computed：计算派生值
+const fullName = computed(() => `${firstName.value} ${lastName.value}`)
+
+// watch：监听特定数据，可访问新旧值
+watch(searchText, (newVal, oldVal) => {
+  if (newVal !== oldVal) {
+    fetchResults(newVal)
+  }
+})
+
+// watchEffect：自动追踪依赖，立即执行
+watchEffect(() => {
+  // 自动追踪 userId 和 postId
+  console.log(`User ${userId.value} viewing post ${postId.value}`)
+})
+```
+
+---
+
+### Vue 中的 Key 的作用
+
+`key` 是 Vue diff 算法的唯一标识，用于高效复用和更新节点。
+
+**核心作用**：
+- **唯一标识**：告诉 Vue 哪些节点是相同的，避免错误复用
+- **优化 diff**：通过 key 快速定位节点，减少 DOM 操作
+- **维护状态**：有 key 时，节点移动会保留组件状态和 DOM 元素
+
+**有 key vs 无 key**：
+
+| 场景 | 无 key（或 index 作 key） | 有唯一 key |
+|------|---------------------------|-----------|
+| 列表顺序变化 | 就地复用，可能导致状态错乱 | 正确移动节点，保持状态 |
+| diff 效率 | 逐个对比，O(n) | 通过 key 快速定位，O(1) |
+| 适用场景 | 静态列表、纯展示 | 动态列表、有输入状态 |
+
+**反例**：
+```js
+// ❌ 用 index 作 key，删除第一项后，所有 key 变化，导致全部重新渲染
+list.map((item, index) => <Item key={index} />)
+
+// ✅ 用唯一 id 作 key，删除第一项只移除对应节点
+list.map(item => <Item key={item.id} />)
+```
+
+---
+
+### Vue 3 生命周期
+
+Vue 3 生命周期分为 **Options API**（兼容 Vue 2）和 **Composition API**（setup 内使用）。
+
+**Composition API 生命周期钩子**：
+
+| Options API | Composition API | 执行时机 | 适合做什么 |
+|------------|-----------------|---------|-----------|
+| beforeCreate | setup() | 组件实例创建前（setup 替代） | 初始化响应式数据、注册生命周期钩子 |
+| created | setup() | 组件实例创建后（setup 替代） | 发起 API 请求、初始化非 DOM 依赖的数据 |
+| beforeMount | onBeforeMount | DOM 挂载前 | 访问/修改响应式数据（较少使用） |
+| mounted | onMounted | DOM 挂载后（可访问 DOM） | 操作 DOM、初始化第三方库、添加事件监听 |
+| beforeUpdate | onBeforeUpdate | 数据更新、DOM 重新渲染前 | 访问更新前的 DOM 状态（较少使用） |
+| updated | onUpdated | DOM 重新渲染后 | 执行依赖更新后 DOM 的操作（慎用） |
+| beforeUnmount | onBeforeUnmount | 组件卸载前（清理定时器、监听器） | 清理定时器、移除监听器、取消请求 |
+| unmounted | onUnmounted | 组件卸载后 | 最终清理工作（较少使用） |
+| activated | onActivated | keep-alive 组件激活时 | 恢复数据、重新订阅、刷新内容 |
+| deactivated | onDeactivated | keep-alive 组件停用时 | 暂停定时器、取消订阅 |
+| errorCaptured | onErrorCaptured | 捕获子组件错误 | 错误上报、降级处理、显示错误 UI |
+
+**执行顺序**：
+```
+父 setup → 父 onBeforeMount 
+→ 子 setup → 子 onBeforeMount → 子 onMounted 
+→ 父 onMounted
+```
+
+**常见使用场景**：
+
+**onMounted**：
+- 发起 API 请求获取数据
+- 初始化第三方库（图表、编辑器）
+- 访问 DOM 元素（ref）
+- 添加事件监听器
+
+**onBeforeUnmount**：
+- 清理定时器（clearInterval、clearTimeout）
+- 移除事件监听器（removeEventListener）
+- 取消未完成的请求
+- 清理第三方库实例
+
+**onUpdated**：
+- 需要在 DOM 更新后执行操作（如获取更新后的尺寸）
+- 谨慎使用，避免在此修改响应式数据（可能导致死循环）
+
+**示例**：
+```js
+import { onMounted, onBeforeUnmount } from 'vue'
+
+setup() {
+  const timer = ref(null)
+  
+  onMounted(() => {
+    // 初始化
+    timer.value = setInterval(() => {
+      console.log('tick')
+    }, 1000)
+  })
+  
+  onBeforeUnmount(() => {
+    // 清理
+    if (timer.value) clearInterval(timer.value)
+  })
+}
+```
+
+---
+
+### keep-alive
+
+`keep-alive` 是 Vue 内置组件，用于缓存动态组件或路由组件，避免重复渲染，保留组件状态。
+
+**核心作用**：
+- **缓存组件实例**：切换时不销毁，保留状态和 DOM
+- **性能优化**：避免重复创建/销毁组件，减少渲染开销
+- **保持状态**：表单输入、滚动位置、数据等在切换后保留
+
+**Props**：
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `include` | string \| RegExp \| Array | 只缓存匹配的组件（组件 name） |
+| `exclude` | string \| RegExp \| Array | 不缓存匹配的组件 |
+| `max` | number | 最多缓存实例数，超出则销毁最久未使用的 |
+
+**生命周期钩子**：
+- `onActivated`：组件激活时触发（从缓存中恢复）
+- `onDeactivated`：组件停用时触发（缓存到内存中）
+
+**使用场景**：
+- **Tab 切换**：多个 Tab 页内容，切换后保留状态
+- **列表 ↔ 详情**：从列表进详情，返回时保留列表滚动位置和筛选条件
+- **表单页面**：填写中途切换路由，返回后保留已填内容
+- **高频切换组件**：减少重复渲染，提升性能
+
+**示例**：
+
+```vue
+<!-- 缓存动态组件 -->
+<keep-alive :include="['ComponentA', 'ComponentB']" :max="10">
+  <component :is="currentComponent" />
+</keep-alive>
+
+<!-- 缓存路由组件 -->
+<router-view v-slot="{ Component }">
+  <keep-alive :exclude="['NoCache']">
+    <component :is="Component" />
+  </keep-alive>
+</router-view>
+```
+
+```js
+// 在 keep-alive 组件中使用生命周期
+import { onActivated, onDeactivated } from 'vue'
+
+setup() {
+  onActivated(() => {
+    console.log('组件激活，可刷新数据')
+    fetchLatestData()
+  })
+  
+  onDeactivated(() => {
+    console.log('组件停用，可暂停定时器')
+    clearInterval(timer.value)
+  })
+}
+```
+
+**实现原理**：
+- 使用 `Map` 缓存组件实例（key = 组件 name，value = VNode）
+- 匹配 `include/exclude`，决定是否缓存
+- 使用 LRU（最近最少使用）算法，超出 `max` 时淘汰最久未用的
+- 缓存的组件不触发 `unmounted`，而是触发 `deactivated`
+
+**注意事项**：
+- 缓存的是**组件实例**，不是 HTML 字符串
+- 组件必须有 `name` 属性才能被 `include/exclude` 匹配
+- `onActivated` 每次激活都触发，适合刷新数据
+- 慎用 `max`，过大会占用内存，过小会频繁创建销毁
+
+---
+
+### 异步组件
+
+异步组件是按需加载的组件，用于代码分割和性能优化，只在需要时才加载组件代码。
+
+**定义方式**：
+
+**Vue 3**：
+```js
+import { defineAsyncComponent } from 'vue'
+
+// 基础用法
+const AsyncComp = defineAsyncComponent(() =>
+  import('./components/MyComponent.vue')
+)
+
+// 高级配置
+const AsyncComp = defineAsyncComponent({
+  loader: () => import('./components/MyComponent.vue'),
+  loadingComponent: LoadingSpinner,  // 加载中显示的组件
+  errorComponent: ErrorDisplay,      // 加载失败显示的组件
+  delay: 200,                        // 延迟 200ms 再显示 loading（避免闪烁）
+  timeout: 3000,                     // 超时时间
+  suspensible: false,                // 是否被 Suspense 控制
+  onError(error, retry, fail, attempts) {
+    if (attempts <= 3) {
+      retry()  // 重试
+    } else {
+      fail()   // 失败
+    }
+  }
+})
+```
+
+**Vue 2**：
+```js
+// 工厂函数
+const AsyncComp = () => import('./components/MyComponent.vue')
+
+// 高级配置
+const AsyncComp = () => ({
+  component: import('./components/MyComponent.vue'),
+  loading: LoadingSpinner,
+  error: ErrorDisplay,
+  delay: 200,
+  timeout: 3000
+})
+```
+
+**使用场景**：
+
+| 场景 | 说明 | 示例 |
+|------|------|------|
+| 路由懒加载 | 路由组件按需加载，减少首屏体积 | `component: () => import('@/views/About.vue')` |
+| 条件渲染组件 | 弹窗、抽屉、Modal 等低频组件 | `<AsyncModal v-if="showModal" />` |
+| Tab 切换 | Tab 内容按需加载 | 切换到某个 Tab 才加载对应组件 |
+| 大型组件 | 富文本编辑器、图表库等体积大的组件 | 延迟加载 Echarts、Quill 等 |
+| 权限控制 | 根据权限动态加载模块 | 管理员才加载后台管理组件 |
+
+**配合 Suspense 使用（Vue 3）**：
+
+```vue
+<Suspense>
+  <template #default>
+    <AsyncComp />
+  </template>
+  <template #fallback>
+    <LoadingSpinner />
+  </template>
+</Suspense>
+```
+
+**实现原理**：
+- 返回一个 Promise，动态 `import()` 触发 Webpack/Vite 代码分割
+- 加载中时渲染 `loadingComponent`，加载完成后替换为实际组件
+- 加载失败时渲染 `errorComponent`
+- Vue 内部管理组件的加载状态和缓存
+
+**优势**：
+- **减少首屏体积**：首屏只加载必要组件，其他按需加载
+- **加快首屏速度**：减少初始 bundle 大小，提升加载速度
+- **代码分割**：自动生成独立 chunk，利于缓存
+- **用户体验**：提供加载中、错误状态的反馈
+
+**注意事项**：
+- 异步组件不能使用同步 `import`，必须用动态 `import()`
+- 配合路由懒加载时，相同路径的组件会复用同一个 chunk
+- `delay` 避免快速加载时 loading 闪烁
+- 配合 `keep-alive` 使用时，组件缓存后不会重新加载
+
+---

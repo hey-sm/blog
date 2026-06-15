@@ -1,0 +1,1387 @@
+
+
+### 组件封装
+
+组件封装是将通用功能抽取为独立、可复用的组件，核心是明确职责、设计接口、保持灵活性。
+
+**封装原则**：
+- **单一职责**：一个组件只做一件事，功能内聚
+- **高内聚低耦合**：组件内部逻辑完整，对外依赖最小
+- **可配置性**：通过 props 控制行为和样式，而非硬编码
+- **可扩展性**：提供插槽（slot）、事件、插件机制支持扩展
+
+**封装层次**：
+
+**基础组件**（UI 层）：
+- 纯展示组件，无业务逻辑
+- 通过 props 接收数据，通过 emit 触发事件
+- 例：Button、Input、Modal、Table
+
+**业务组件**（业务层）：
+- 包含特定业务逻辑
+- 组合多个基础组件
+- 例：UserCard、OrderList、ProductFilter
+
+**容器组件**（容器层）：
+- 管理数据和状态
+- 处理数据请求和业务逻辑
+- 将数据传递给展示组件
+
+**接口设计**：
+- **Props**：数据输入，用 TypeScript 定义类型和默认值
+- **Emits**：事件输出，用 `defineEmits` 声明事件类型
+- **Slots**：内容扩展，提供默认插槽和具名插槽
+- **Expose**：暴露方法，用 `defineExpose` 控制对外 API
+
+**最佳实践**：
+- Props 单向数据流：子组件不直接修改 props，通过 emit 通知父组件
+- 使用 v-model 简化双向绑定（`:modelValue` + `@update:modelValue`）
+- 插槽提供默认内容，增强易用性
+- 复杂组件拆分为子组件，避免单文件过大
+- 使用 TypeScript 增强类型安全和 IDE 提示
+
+**通用组件示例**：
+```js
+// Button 组件
+defineProps<{
+  type?: 'primary' | 'default' | 'danger'
+  size?: 'small' | 'medium' | 'large'
+  disabled?: boolean
+  loading?: boolean
+}>()
+
+const emit = defineEmits<{
+  click: [event: MouseEvent]
+}>()
+```
+
+---
+
+### Upload SDK 开发（文件上传解决方案）
+
+从 0 到 1 开发通用文件上传 SDK，统一前端上传能力，核心是协议封装、分片上传、断点续传、并发控制。
+
+**核心功能**：
+- **文件类型支持**：图片、视频、大文件（支持 GB 级别）
+- **分片上传**：大文件切片并发上传，提升速度和稳定性
+- **断点续传**：记录上传进度，网络中断后可续传
+- **秒传功能**：文件 MD5 校验，已存在文件直接返回 URL
+- **并发控制**：限制同时上传的分片数，避免浏览器并发限制
+
+**架构设计**：
+
+**协议层**：
+- 封装底层上传协议（HTTP / WebSocket）
+- 统一请求/响应格式，屏蔽后端差异
+- 支持多种存储服务（OSS / S3 / 自建）
+
+**工具层**：
+- 文件切片：Blob.slice 实现分片
+- MD5 计算：Web Worker 异步计算，避免阻塞主线程
+- 并发队列：Promise.all + 限流器控制并发数
+- 进度计算：单片进度 + 总进度聚合
+
+**组件层**：
+- Upload 组件：拖拽上传、点击上传、粘贴上传
+- UploadList：文件列表、进度展示、删除/重试
+- ImageCropper：图片裁剪预处理
+
+**设计模式（解耦与扩展）**：
+- **策略模式**：不同文件类型（图片/视频/文档）使用不同上传策略
+- **适配器模式**：适配不同存储服务（OSS/S3/自建），统一接口
+- **观察者模式**：上传进度、状态变化通过事件通知上层
+- **责任链模式**：文件校验链（大小 → 类型 → 格式 → 自定义规则）
+
+**技术难点与解决方案**：
+
+**1. 大文件上传稳定性**：
+- 分片大小动态调整（网速快用大片，慢用小片）
+- 失败分片自动重试（指数退避策略）
+- 断点续传（localStorage 记录已上传分片）
+
+**2. 文件唯一性保证**：
+- 文件内容 MD5 作为唯一标识
+- 前端计算 MD5 + 后端二次校验
+- 避免重复上传，实现秒传
+
+**3. 并发控制**：
+- 浏览器同域名并发限制（Chrome 6 个）
+- 实现并发池，控制同时上传分片数（如 3 个）
+- 队列管理：上传完一片自动补充下一片
+
+**4. 进度与取消**：
+- XMLHttpRequest.upload.onprogress 获取单片进度
+- 聚合所有分片进度计算总进度
+- AbortController 取消上传，清理资源
+
+**接口设计**：
+```js
+const uploader = new Uploader({
+  action: '/upload',           // 上传地址
+  chunkSize: 2 * 1024 * 1024, // 分片大小 2MB
+  concurrent: 3,               // 并发数
+  onProgress: (percent) => {}, // 进度回调
+  onSuccess: (url) => {},      // 成功回调
+  onError: (err) => {}         // 失败回调
+})
+
+uploader.upload(file)          // 开始上传
+uploader.pause()               // 暂停
+uploader.resume()              // 续传
+uploader.cancel()              // 取消
+```
+
+**性能优化**：
+- Web Worker 计算 MD5，不阻塞主线程
+- 虚拟列表展示大量文件，避免 DOM 过多
+- 图片压缩后上传，减少传输量
+- 预检请求优化：一次获取所有分片上传凭证
+
+**业务价值**：
+- 统一上传能力，减少重复开发（节省 30% 开发时间）
+- 提升用户体验：断点续传、秒传、实时进度
+- 保障稳定性：失败重试、并发控制、进度恢复
+
+---
+
+### 大数据量看板性能优化
+
+针对 10 万级数据实时渲染的看板场景，通过数据缓存、虚拟滚动、LCP 优化，将页面加载时间从 4s 降至 1.2s。
+
+**性能瓶颈分析**：
+- **数据量大**：10 万条数据，JSON 体积达 10-20MB，网络传输慢
+- **DOM 节点多**：全量渲染 DOM 节点过多，浏览器卡顿
+- **首屏慢**：大量数据处理和渲染阻塞首屏显示
+- **实时更新**：数据频繁更新，重复渲染消耗性能
+
+**优化方案**：
+
+**1. 数据缓存（减少网络请求）**：
+- **前端缓存**：localStorage / IndexedDB 缓存历史数据
+- **增量更新**：只请求变化的数据（时间戳 / 版本号），而非全量
+- **HTTP 缓存**：设置 Cache-Control，利用浏览器缓存
+- **接口合并**：多个请求合并为一个，减少请求次数
+
+**收益**：
+- 首次加载 4s，二次加载从缓存读取 < 500ms
+- 增量更新请求体积减少 80%
+
+**2. 虚拟滚动（减少 DOM 节点）**：
+- **按需渲染**：只渲染可视区域 + 缓冲区的数据（如显示 20 条，实际渲染 30 条）
+- **动态高度**：预估行高，滚动时动态计算实际高度
+- **滚动占位**：用空白 div 撑起总高度，保持滚动条正常
+
+**实现思路**：
+```js
+// 可视区域计算
+visibleStart = Math.floor(scrollTop / itemHeight)
+visibleEnd = Math.ceil((scrollTop + containerHeight) / itemHeight)
+renderList = dataList.slice(visibleStart - bufferSize, visibleEnd + bufferSize)
+```
+
+**收益**：
+- 10 万条数据只渲染 30 个 DOM 节点，内存占用减少 99%
+- 滚动帧率从 20fps 提升到 60fps
+
+**3. LCP 优化（加速首屏显示）**：
+- **骨架屏**：首屏立即展示骨架，避免白屏
+- **关键数据优先**：先请求首屏数据（如前 1000 条），其余数据异步加载
+- **代码分割**：路由懒加载、组件按需加载，减少首屏 JS 体积
+- **SSR / 预渲染**：服务端渲染首屏 HTML，加速 LCP
+
+**LCP 优化指标**：
+- LCP（Largest Contentful Paint）：最大内容绘制时间
+- 优化前：4s（阻塞在数据请求 + 全量渲染）
+- 优化后：1.2s（骨架屏 200ms + 首屏数据 1s）
+
+**4. 数据处理优化**：
+- **Web Worker**：大数据计算（排序、过滤、聚合）放到 Worker，不阻塞主线程
+- **分批处理**：数据分批渲染，用 requestIdleCallback 在浏览器空闲时处理
+- **数据结构优化**：用 Map 替代数组查找（O(1) vs O(n)），用索引加速过滤
+
+**5. 渲染优化**：
+- **防抖滚动**：滚动事件防抖（如 16ms），避免频繁计算
+- **memo / shouldUpdate**：避免无关组件重渲染
+- **CSS 替代 JS**：用 transform 替代 top，触发 GPU 加速
+
+**6. 实时更新优化**：
+- **WebSocket 增量推送**：后端只推送变化的数据，前端局部更新
+- **时间切片**：大量数据更新分多帧完成，避免长任务阻塞
+- **Diff 算法优化**：只更新变化的行，复用未变化的 DOM
+
+**技术栈**：
+- 虚拟滚动：`react-window` / `vue-virtual-scroller`
+- 数据缓存：IndexedDB + `localforage`
+- Web Worker：`comlink` 简化通信
+- 性能监控：Lighthouse + Web Vitals
+
+**优化效果对比**：
+
+| 指标 | 优化前 | 优化后 | 提升 |
+|------|--------|--------|------|
+| 首屏加载时间 | 4s | 1.2s | **70%** |
+| LCP | 4s | 1.2s | **70%** |
+| FPS（滚动） | 20fps | 60fps | **3 倍** |
+| 内存占用 | ~500MB | ~50MB | **90%** |
+| 二次加载 | 4s | 0.5s | **87.5%** |
+
+**业务价值**：
+- 用户体验提升：加载快、滚动流畅、无卡顿
+- 支持更大数据量：从 1 万到 10 万扩展能力
+- 降低服务器压力：缓存 + 增量更新减少请求
+
+---
+
+### 前端权限系统设计（RBAC）
+
+基于 RBAC（Role-Based Access Control）模型设计前端权限系统，实现路由、组件、按钮级权限配置化管理。
+
+**权限模型**：
+- **用户（User）**：具体的登录用户
+- **角色（Role）**：权限集合（如管理员、编辑、访客）
+- **权限（Permission）**：具体操作权限（如查看用户列表、删除文章）
+- **关系**：用户 → 角色 → 权限（用户绑定角色，角色绑定权限）
+
+**前端权限层级**：
+
+**1. 路由级权限**（页面访问控制）：
+- 根据用户角色动态生成路由表
+- 无权限的路由不注册，用户无法访问
+
+**实现方案**：
+```js
+// 1. 后端返回用户权限
+const userPermissions = ['user:list', 'article:view', 'article:edit']
+
+// 2. 路由配置带权限标识
+const routes = [
+  {
+    path: '/user',
+    component: UserList,
+    meta: { permission: 'user:list' }
+  },
+  {
+    path: '/article',
+    component: ArticleList,
+    meta: { permission: 'article:view' }
+  }
+]
+
+// 3. 过滤路由：只注册有权限的路由
+const accessibleRoutes = routes.filter(route => 
+  userPermissions.includes(route.meta.permission)
+)
+
+// 4. 动态添加路由（Vue Router）
+accessibleRoutes.forEach(route => router.addRoute(route))
+```
+
+**路由守卫**：
+```js
+router.beforeEach((to, from, next) => {
+  const permission = to.meta.permission
+  if (!permission || hasPermission(permission)) {
+    next()
+  } else {
+    next('/403')  // 无权限跳转 403 页面
+  }
+})
+```
+
+**2. 组件级权限**（组件显示/隐藏）：
+- 根据权限控制组件渲染
+
+**实现方案**：
+
+**指令方式**（推荐）：
+```js
+// 自定义指令 v-permission
+app.directive('permission', {
+  mounted(el, binding) {
+    const permission = binding.value
+    if (!hasPermission(permission)) {
+      el.parentNode?.removeChild(el)  // 无权限移除 DOM
+    }
+  }
+})
+
+// 使用
+<div v-permission="'article:delete'">删除按钮</div>
+```
+
+**组件方式**：
+```vue
+<Permission :value="'article:delete'">
+  <button>删除</button>
+</Permission>
+```
+
+**HOC 方式**（React）：
+```jsx
+const withPermission = (Component, permission) => {
+  return (props) => {
+    if (!hasPermission(permission)) return null
+    return <Component {...props} />
+  }
+}
+```
+
+**3. 按钮级权限**（操作控制）：
+- 细粒度控制具体操作（增删改查）
+
+**实现方案**：
+```vue
+<template>
+  <button v-permission="'article:edit'">编辑</button>
+  <button v-permission="'article:delete'">删除</button>
+  <button v-permission="'article:publish'">发布</button>
+</template>
+```
+
+**禁用而非隐藏**（某些场景）：
+```vue
+<button :disabled="!hasPermission('article:edit')">编辑</button>
+```
+
+**权限配置化**：
+
+**权限配置表**（后端维护）：
+```json
+{
+  "roles": {
+    "admin": {
+      "permissions": ["*"]  // 所有权限
+    },
+    "editor": {
+      "permissions": [
+        "article:view",
+        "article:edit",
+        "article:create"
+      ]
+    },
+    "viewer": {
+      "permissions": ["article:view"]
+    }
+  }
+}
+```
+
+**前端权限存储**：
+```js
+// 登录后存储用户权限
+const userInfo = {
+  username: 'zhangsan',
+  roles: ['editor'],
+  permissions: ['article:view', 'article:edit', 'article:create']
+}
+
+// 存储到 Store（Pinia / Vuex）
+store.commit('SET_USER_INFO', userInfo)
+```
+
+**权限判断工具函数**：
+```js
+// 单个权限判断
+export function hasPermission(permission: string): boolean {
+  const userPermissions = store.state.user.permissions
+  return userPermissions.includes('*') || userPermissions.includes(permission)
+}
+
+// 多个权限判断（满足任一）
+export function hasAnyPermission(permissions: string[]): boolean {
+  return permissions.some(p => hasPermission(p))
+}
+
+// 多个权限判断（全部满足）
+export function hasAllPermissions(permissions: string[]): boolean {
+  return permissions.every(p => hasPermission(p))
+}
+```
+
+**菜单权限**：
+```js
+// 菜单配置
+const menus = [
+  {
+    name: '用户管理',
+    path: '/user',
+    permission: 'user:list',
+    children: [
+      { name: '用户列表', path: '/user/list', permission: 'user:list' },
+      { name: '添加用户', path: '/user/add', permission: 'user:create' }
+    ]
+  }
+]
+
+// 过滤菜单：只显示有权限的菜单
+const accessibleMenus = filterMenusByPermission(menus, userPermissions)
+```
+
+**接口权限**：
+- 前端权限是辅助，**后端必须校验**
+- 前端隐藏按钮只是 UI 优化，用户仍可通过控制台调用接口
+- 接口返回 403 时前端统一处理（提示无权限）
+
+**权限更新**：
+```js
+// WebSocket 实时推送权限变更
+socket.on('permission:changed', (newPermissions) => {
+  store.commit('UPDATE_PERMISSIONS', newPermissions)
+  // 重新生成路由
+  regenerateRoutes()
+  // 刷新当前页面
+  router.replace(router.currentRoute.value.fullPath)
+})
+```
+
+**技术栈**：
+- 路由：Vue Router `addRoute` 动态路由
+- 状态管理：Pinia / Vuex 存储权限
+- 指令：自定义 `v-permission` 指令
+- 接口拦截：Axios 拦截器统一处理 403
+
+**最佳实践**：
+- 权限粒度：路由 + 按钮，组件按需控制
+- 权限标识规范：`模块:操作` 格式（如 `user:create`）
+- 超级管理员：用 `*` 表示所有权限，简化判断
+- 前后端分离：前端控制 UI 展示，后端强制校验安全
+- 缓存权限：登录后缓存到 localStorage，刷新页面自动恢复
+
+**安全注意**：
+- **前端权限不是安全措施**，只是 UI 优化
+- 敏感操作必须后端校验
+- 权限信息不要明文存储敏感字段
+- Token 过期后清空权限，重新登录
+
+---
+
+### 复杂表单状态管理（Schema 驱动）
+
+通过 hooks/store + Schema 配置管理复杂投放表单，解耦字段状态、联动规则、草稿缓存、参数拼装、提交状态和错误回显。
+
+**业务背景**：
+- 多平台投放表单（微信/抖音/百度/快手）
+- 字段多（50+ 字段）、联动复杂（字段间相互影响）
+- 动态表单（不同平台显示不同字段）
+- 需要草稿保存、断点续填、错误回显
+
+**核心痛点**：
+- 状态管理混乱：字段状态、校验、联动散落各处
+- 代码重复：每个平台写一套表单逻辑
+- 联动难维护：字段关系复杂，改一处影响多处
+- 提交逻辑复杂：参数拼装、格式转换、错误处理耦合
+
+**解决方案：Schema 驱动 + 状态解耦**
+
+**1. Schema 配置化（字段元数据）**：
+
+```ts
+// 表单 Schema 配置
+const formSchema = {
+  platform: {
+    type: 'select',
+    label: '投放平台',
+    options: ['微信', '抖音', '百度'],
+    rules: [{ required: true, message: '请选择平台' }],
+    defaultValue: '微信'
+  },
+  adType: {
+    type: 'radio',
+    label: '广告类型',
+    options: ['信息流', '搜索', '开屏'],
+    rules: [{ required: true }],
+    // 联动规则：依赖 platform
+    visible: (formData) => formData.platform === '微信',
+    disabled: (formData) => formData.platform === '抖音'
+  },
+  budget: {
+    type: 'number',
+    label: '预算',
+    rules: [
+      { required: true },
+      { min: 100, message: '最低 100 元' }
+    ],
+    // 联动规则：根据广告类型动态校验
+    rules: (formData) => {
+      const min = formData.adType === '开屏' ? 1000 : 100
+      return [{ min, message: `最低 ${min} 元` }]
+    }
+  },
+  targetAudience: {
+    type: 'checkbox',
+    label: '目标人群',
+    options: ['男', '女', '18-25岁', '25-35岁'],
+    // 联动规则：开屏广告不显示
+    visible: (formData) => formData.adType !== '开屏'
+  }
+}
+```
+
+**Schema 设计要点**：
+- 统一字段配置：类型、标签、校验、默认值
+- 联动规则声明：visible、disabled、rules 支持函数
+- 平台差异配置：不同平台加载不同 Schema
+
+**2. 状态管理（Hooks + Store）**：
+
+**Hooks 方案**（推荐）：
+```ts
+// useForm Hook
+function useForm(schema: FormSchema) {
+  // 1. 字段状态
+  const [formData, setFormData] = useState(getDefaultValues(schema))
+  
+  // 2. 校验错误
+  const [errors, setErrors] = useState({})
+  
+  // 3. 提交状态
+  const [submitting, setSubmitting] = useState(false)
+  
+  // 4. 草稿缓存（自动保存）
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      localStorage.setItem('form-draft', JSON.stringify(formData))
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [formData])
+  
+  // 5. 字段更新
+  const updateField = (name: string, value: any) => {
+    setFormData(prev => ({ ...prev, [name]: value }))
+    // 触发联动规则
+    recomputeVisibility()
+  }
+  
+  // 6. 校验
+  const validate = async () => {
+    const errors = await validateBySchema(formData, schema)
+    setErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+  
+  // 7. 提交
+  const submit = async () => {
+    if (!(await validate())) return
+    
+    setSubmitting(true)
+    try {
+      // 参数拼装
+      const params = transformBySchema(formData, schema)
+      await submitAPI(params)
+      localStorage.removeItem('form-draft')  // 清除草稿
+    } catch (error) {
+      // 错误回显
+      setErrors(mapServerErrors(error))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+  
+  return { formData, errors, submitting, updateField, submit }
+}
+```
+
+**Store 方案**（Pinia/Zustand）：
+```ts
+// 适合跨组件共享表单状态
+const useFormStore = defineStore('form', {
+  state: () => ({
+    formData: {},
+    errors: {},
+    submitting: false,
+    draft: null
+  }),
+  actions: {
+    updateField(name, value) { /* ... */ },
+    saveDraft() { /* ... */ },
+    loadDraft() { /* ... */ },
+    submit() { /* ... */ }
+  }
+})
+```
+
+**3. 联动规则引擎**：
+
+```ts
+// 计算字段可见性
+function computeVisibility(formData: any, schema: FormSchema) {
+  const visibility = {}
+  
+  Object.keys(schema).forEach(key => {
+    const field = schema[key]
+    if (typeof field.visible === 'function') {
+      visibility[key] = field.visible(formData)
+    } else {
+      visibility[key] = field.visible ?? true
+    }
+  })
+  
+  return visibility
+}
+
+// 计算字段禁用状态
+function computeDisabled(formData: any, schema: FormSchema) {
+  // 类似 visibility
+}
+
+// 动态校验规则
+function getDynamicRules(formData: any, schema: FormSchema, fieldName: string) {
+  const field = schema[fieldName]
+  if (typeof field.rules === 'function') {
+    return field.rules(formData)
+  }
+  return field.rules
+}
+```
+
+**4. 草稿缓存机制**：
+
+```ts
+// 自动保存草稿（防抖）
+const saveDraft = debounce((formData) => {
+  const draft = {
+    data: formData,
+    timestamp: Date.now(),
+    version: '1.0'
+  }
+  localStorage.setItem('form-draft', JSON.stringify(draft))
+}, 1000)
+
+// 恢复草稿
+function loadDraft() {
+  const draft = JSON.parse(localStorage.getItem('form-draft') || '{}')
+  if (draft.timestamp && Date.now() - draft.timestamp < 7 * 24 * 60 * 60 * 1000) {
+    return draft.data  // 7 天内有效
+  }
+  return null
+}
+
+// 提示恢复
+if (loadDraft()) {
+  Modal.confirm({
+    title: '发现未完成的表单',
+    content: '是否恢复？',
+    onOk: () => setFormData(loadDraft())
+  })
+}
+```
+
+**5. 参数拼装与转换**：
+
+```ts
+// Schema 定义转换规则
+const formSchema = {
+  startDate: {
+    type: 'date',
+    // 前端 Date 对象 → 后端时间戳
+    transform: (value: Date) => value.getTime()
+  },
+  targetAudience: {
+    type: 'checkbox',
+    // 前端数组 → 后端逗号分隔字符串
+    transform: (value: string[]) => value.join(',')
+  }
+}
+
+// 统一转换
+function transformBySchema(formData: any, schema: FormSchema) {
+  const params = {}
+  Object.keys(formData).forEach(key => {
+    const field = schema[key]
+    const value = formData[key]
+    params[key] = field.transform ? field.transform(value) : value
+  })
+  return params
+}
+```
+
+**6. 错误回显**：
+
+```ts
+// 后端错误映射
+function mapServerErrors(error: any) {
+  // 后端返回 { field: 'budget', message: '预算不足' }
+  const serverErrors = error.response.data.errors || []
+  
+  const errors = {}
+  serverErrors.forEach(err => {
+    errors[err.field] = err.message
+  })
+  
+  return errors
+}
+
+// 组件中显示错误
+<Input
+  name="budget"
+  value={formData.budget}
+  error={errors.budget}  // 显示错误信息
+  onChange={(v) => updateField('budget', v)}
+/>
+```
+
+**7. 动态表单生成**：
+
+```vue
+<template>
+  <Form>
+    <FormItem
+      v-for="(field, name) in visibleFields"
+      :key="name"
+      :label="field.label"
+      :error="errors[name]"
+    >
+      <!-- 根据 type 动态渲染组件 -->
+      <component
+        :is="getComponent(field.type)"
+        :value="formData[name]"
+        :options="field.options"
+        :disabled="isDisabled(name)"
+        @change="updateField(name, $event)"
+      />
+    </FormItem>
+    
+    <Button :loading="submitting" @click="submit">
+      提交
+    </Button>
+  </Form>
+</template>
+
+<script setup>
+const { formData, errors, submitting, updateField, submit } = useForm(formSchema)
+
+// 根据 type 映射组件
+const getComponent = (type) => ({
+  'input': Input,
+  'select': Select,
+  'radio': Radio,
+  'checkbox': Checkbox,
+  'date': DatePicker
+}[type])
+
+// 只渲染可见字段
+const visibleFields = computed(() => {
+  return Object.keys(formSchema).filter(key => {
+    const field = formSchema[key]
+    return typeof field.visible === 'function' 
+      ? field.visible(formData) 
+      : field.visible !== false
+  })
+})
+</script>
+```
+
+**架构分层**：
+
+```
+┌─────────────────────────────────────┐
+│   UI 层（动态表单组件）              │
+├─────────────────────────────────────┤
+│   逻辑层（useForm Hook / Store）    │
+│   - 状态管理                        │
+│   - 联动引擎                        │
+│   - 校验引擎                        │
+│   - 提交流程                        │
+├─────────────────────────────────────┤
+│   Schema 层（配置驱动）              │
+│   - 字段定义                        │
+│   - 联动规则                        │
+│   - 转换规则                        │
+└─────────────────────────────────────┘
+```
+
+**技术栈**：
+- 状态管理：React Hooks / Pinia
+- 校验：async-validator / yup / zod
+- 表单库：Ant Design / Element Plus（可选）
+- 类型安全：TypeScript + 泛型推导
+
+**优势总结**：
+- **解耦清晰**：状态、联动、校验、提交分层管理
+- **配置驱动**：Schema 配置，无需硬编码
+- **可复用**：useForm Hook 跨项目复用
+- **易维护**：联动规则集中管理，修改一处生效
+- **类型安全**：TypeScript 全链路类型推导
+- **用户体验**：草稿保存、断点续填、实时校验
+
+**业务价值**：
+- 支持 4+ 平台动态表单生成
+- 开发效率提升 50%（新增平台只需配置 Schema）
+- 用户体验提升：草稿不丢失、错误提示准确
+
+---
+
+### 电子签名与签章系统（Canvas + PDF.js）
+
+基于 Canvas 和 PDF.js 实现电子签名采集与文档签章，支持签名绘制、签章拖拽、缩放、删除与回显，完成前端签章数据收集与后端文件合成。
+
+**业务背景**：
+- 电子合同签署、文档审批场景
+- 需要在 PDF 文档上添加手写签名和电子印章
+- 支持多页文档、多个签章、移动端签名
+- 前端收集签章坐标，后端合成最终文件
+
+**核心功能**：
+
+**1. 手写签名采集**（Canvas）：
+- 鼠标/触摸绘制签名笔迹
+- 导出签名图片（PNG/JPEG）
+- 重绘、清空、撤销功能
+
+**2. PDF 文档预览**（PDF.js）：
+- 渲染 PDF 到 Canvas
+- 支持翻页、缩放、旋转
+- 适配不同屏幕尺寸
+
+**3. 签章交互**：
+- 拖拽：将签名/印章拖到文档任意位置
+- 缩放：调整签章大小
+- 删除：移除签章
+- 回显：回显已保存的签章
+
+**4. 坐标换算**：
+- 屏幕坐标 → PDF 原始坐标
+- 适配缩放比例、页面尺寸
+- 生成后端所需的结构化数据
+
+**技术实现**：
+
+**1. Canvas 手写签名采集**：
+
+```ts
+// 签名板组件
+class SignaturePad {
+  private canvas: HTMLCanvasElement
+  private ctx: CanvasRenderingContext2D
+  private isDrawing = false
+  private points: Point[] = []
+
+  constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas
+    this.ctx = canvas.getContext('2d')!
+    this.initCanvas()
+    this.bindEvents()
+  }
+
+  private initCanvas() {
+    // 设置画布尺寸（适配设备像素比）
+    const dpr = window.devicePixelRatio || 1
+    const rect = this.canvas.getBoundingClientRect()
+    this.canvas.width = rect.width * dpr
+    this.canvas.height = rect.height * dpr
+    this.ctx.scale(dpr, dpr)
+    
+    // 设置笔触样式
+    this.ctx.strokeStyle = '#000'
+    this.ctx.lineWidth = 2
+    this.ctx.lineCap = 'round'
+    this.ctx.lineJoin = 'round'
+  }
+
+  private bindEvents() {
+    // 支持鼠标和触摸
+    this.canvas.addEventListener('mousedown', this.startDrawing)
+    this.canvas.addEventListener('mousemove', this.draw)
+    this.canvas.addEventListener('mouseup', this.stopDrawing)
+    
+    this.canvas.addEventListener('touchstart', this.startDrawing)
+    this.canvas.addEventListener('touchmove', this.draw)
+    this.canvas.addEventListener('touchend', this.stopDrawing)
+  }
+
+  private startDrawing = (e: MouseEvent | TouchEvent) => {
+    this.isDrawing = true
+    const point = this.getPoint(e)
+    this.points.push(point)
+    this.ctx.beginPath()
+    this.ctx.moveTo(point.x, point.y)
+  }
+
+  private draw = (e: MouseEvent | TouchEvent) => {
+    if (!this.isDrawing) return
+    e.preventDefault()
+    
+    const point = this.getPoint(e)
+    this.points.push(point)
+    this.ctx.lineTo(point.x, point.y)
+    this.ctx.stroke()
+  }
+
+  private stopDrawing = () => {
+    this.isDrawing = false
+  }
+
+  private getPoint(e: MouseEvent | TouchEvent): Point {
+    const rect = this.canvas.getBoundingClientRect()
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
+    
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top
+    }
+  }
+
+  // 导出签名图片
+  toDataURL(type = 'image/png'): string {
+    return this.canvas.toDataURL(type)
+  }
+
+  // 清空画布
+  clear() {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+    this.points = []
+  }
+
+  // 判断是否为空
+  isEmpty(): boolean {
+    return this.points.length === 0
+  }
+}
+```
+
+**2. PDF.js 文档预览与签章层叠加**：
+
+```ts
+import * as pdfjsLib from 'pdfjs-dist'
+
+class PDFViewer {
+  private pdfDoc: any
+  private scale = 1.0
+  private currentPage = 1
+
+  async loadPDF(url: string) {
+    this.pdfDoc = await pdfjsLib.getDocument(url).promise
+    await this.renderPage(1)
+  }
+
+  async renderPage(pageNum: number) {
+    const page = await this.pdfDoc.getPage(pageNum)
+    
+    // 获取页面尺寸
+    const viewport = page.getViewport({ scale: this.scale })
+    
+    // 渲染 PDF 到 Canvas
+    const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    
+    const ctx = canvas.getContext('2d')!
+    await page.render({ canvasContext: ctx, viewport }).promise
+    
+    this.currentPage = pageNum
+  }
+
+  // 缩放
+  setScale(scale: number) {
+    this.scale = scale
+    this.renderPage(this.currentPage)
+  }
+
+  // 获取页面原始尺寸
+  async getPageSize(pageNum: number) {
+    const page = await this.pdfDoc.getPage(pageNum)
+    return {
+      width: page.view[2],
+      height: page.view[3]
+    }
+  }
+}
+```
+
+**3. 签章拖拽、缩放、删除**：
+
+```ts
+// 签章元素数据结构
+interface SignatureItem {
+  id: string
+  type: 'signature' | 'seal'  // 签名 / 印章
+  pageNum: number              // 页码
+  x: number                    // 屏幕坐标 X
+  y: number                    // 屏幕坐标 Y
+  width: number                // 宽度
+  height: number               // 高度
+  imageUrl: string             // 签名/印章图片
+  rotate?: number              // 旋转角度
+}
+
+class SignatureManager {
+  private items: SignatureItem[] = []
+  private selectedId: string | null = null
+  private container: HTMLElement
+
+  constructor(container: HTMLElement) {
+    this.container = container
+  }
+
+  // 添加签章
+  addSignature(item: Omit<SignatureItem, 'id'>) {
+    const id = `sig-${Date.now()}`
+    const signature: SignatureItem = { ...item, id }
+    this.items.push(signature)
+    this.renderSignature(signature)
+    return id
+  }
+
+  // 渲染签章元素
+  private renderSignature(item: SignatureItem) {
+    const el = document.createElement('div')
+    el.id = item.id
+    el.className = 'signature-item'
+    el.style.cssText = `
+      position: absolute;
+      left: ${item.x}px;
+      top: ${item.y}px;
+      width: ${item.width}px;
+      height: ${item.height}px;
+      cursor: move;
+      border: 2px dashed transparent;
+    `
+
+    // 签章图片
+    const img = document.createElement('img')
+    img.src = item.imageUrl
+    img.style.width = '100%'
+    img.style.height = '100%'
+    el.appendChild(img)
+
+    // 删除按钮
+    const deleteBtn = document.createElement('button')
+    deleteBtn.textContent = '×'
+    deleteBtn.className = 'delete-btn'
+    deleteBtn.onclick = () => this.deleteSignature(item.id)
+    el.appendChild(deleteBtn)
+
+    // 缩放手柄
+    const resizeHandle = document.createElement('div')
+    resizeHandle.className = 'resize-handle'
+    el.appendChild(resizeHandle)
+
+    // 绑定拖拽事件
+    this.bindDragEvents(el, item)
+    
+    // 绑定缩放事件
+    this.bindResizeEvents(resizeHandle, item)
+
+    this.container.appendChild(el)
+  }
+
+  // 拖拽
+  private bindDragEvents(el: HTMLElement, item: SignatureItem) {
+    let startX = 0, startY = 0, offsetX = 0, offsetY = 0
+
+    el.onmousedown = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).className === 'resize-handle') return
+      
+      startX = e.clientX
+      startY = e.clientY
+      offsetX = item.x
+      offsetY = item.y
+
+      const onMove = (e: MouseEvent) => {
+        item.x = offsetX + (e.clientX - startX)
+        item.y = offsetY + (e.clientY - startY)
+        el.style.left = item.x + 'px'
+        el.style.top = item.y + 'px'
+      }
+
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    }
+  }
+
+  // 缩放
+  private bindResizeEvents(handle: HTMLElement, item: SignatureItem) {
+    handle.onmousedown = (e: MouseEvent) => {
+      e.stopPropagation()
+      const startX = e.clientX
+      const startY = e.clientY
+      const startWidth = item.width
+      const startHeight = item.height
+
+      const onMove = (e: MouseEvent) => {
+        const deltaX = e.clientX - startX
+        const deltaY = e.clientY - startY
+        item.width = Math.max(50, startWidth + deltaX)
+        item.height = Math.max(50, startHeight + deltaY)
+        
+        const el = document.getElementById(item.id)!
+        el.style.width = item.width + 'px'
+        el.style.height = item.height + 'px'
+      }
+
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    }
+  }
+
+  // 删除
+  deleteSignature(id: string) {
+    this.items = this.items.filter(item => item.id !== id)
+    document.getElementById(id)?.remove()
+  }
+
+  // 获取所有签章
+  getSignatures() {
+    return this.items
+  }
+}
+```
+
+**4. 坐标换算（核心难点）**：
+
+```ts
+// 坐标换算工具
+class CoordinateTransformer {
+  /**
+   * 屏幕坐标 → PDF 原始坐标
+   * @param screenX 屏幕 X 坐标
+   * @param screenY 屏幕 Y 坐标
+   * @param screenWidth 屏幕显示宽度
+   * @param screenHeight 屏幕显示高度
+   * @param pdfWidth PDF 原始宽度（pt）
+   * @param pdfHeight PDF 原始高度（pt）
+   * @param scale 当前缩放比例
+   */
+  static screenToPDF(
+    screenX: number,
+    screenY: number,
+    screenWidth: number,
+    screenHeight: number,
+    pdfWidth: number,
+    pdfHeight: number,
+    scale: number
+  ) {
+    // 计算实际缩放比例（考虑容器缩放）
+    const scaleX = (pdfWidth * scale) / screenWidth
+    const scaleY = (pdfHeight * scale) / screenHeight
+
+    // PDF 坐标系原点在左下角，需要翻转 Y 轴
+    return {
+      x: screenX * scaleX,
+      y: pdfHeight - (screenY * scaleY)  // Y 轴翻转
+    }
+  }
+
+  /**
+   * 生成后端所需的签章参数
+   */
+  static generateSignatureParams(
+    items: SignatureItem[],
+    pdfViewer: PDFViewer
+  ): SignatureParams[] {
+    return items.map(item => {
+      // 获取页面原始尺寸
+      const pageSize = await pdfViewer.getPageSize(item.pageNum)
+      
+      // 获取屏幕显示尺寸
+      const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement
+      const screenWidth = canvas.clientWidth
+      const screenHeight = canvas.clientHeight
+
+      // 转换坐标
+      const pdfCoords = this.screenToPDF(
+        item.x,
+        item.y,
+        screenWidth,
+        screenHeight,
+        pageSize.width,
+        pageSize.height,
+        pdfViewer.scale
+      )
+
+      // 转换尺寸
+      const pdfWidth = (item.width / screenWidth) * pageSize.width
+      const pdfHeight = (item.height / screenHeight) * pageSize.height
+
+      return {
+        pageNum: item.pageNum,
+        x: pdfCoords.x,
+        y: pdfCoords.y,
+        width: pdfWidth,
+        height: pdfHeight,
+        imageUrl: item.imageUrl,
+        type: item.type
+      }
+    })
+  }
+}
+```
+
+**5. 完整流程整合**：
+
+```ts
+// 签章系统主控制器
+class SignatureSystem {
+  private pdfViewer: PDFViewer
+  private signaturePad: SignaturePad
+  private signatureManager: SignatureManager
+
+  async init() {
+    // 1. 加载 PDF
+    this.pdfViewer = new PDFViewer()
+    await this.pdfViewer.loadPDF('/contract.pdf')
+
+    // 2. 初始化签名板
+    const canvas = document.getElementById('signature-canvas') as HTMLCanvasElement
+    this.signaturePad = new SignaturePad(canvas)
+
+    // 3. 初始化签章管理器
+    const container = document.getElementById('signature-container')!
+    this.signatureManager = new SignatureManager(container)
+  }
+
+  // 保存签名并添加到文档
+  async saveSignature() {
+    if (this.signaturePad.isEmpty()) {
+      alert('请先签名')
+      return
+    }
+
+    // 导出签名图片
+    const imageUrl = this.signaturePad.toDataURL()
+
+    // 上传到服务器（获取永久 URL）
+    const uploadedUrl = await this.uploadSignature(imageUrl)
+
+    // 添加到文档中心位置
+    this.signatureManager.addSignature({
+      type: 'signature',
+      pageNum: this.pdfViewer.currentPage,
+      x: 200,
+      y: 300,
+      width: 150,
+      height: 80,
+      imageUrl: uploadedUrl
+    })
+
+    // 清空签名板
+    this.signaturePad.clear()
+  }
+
+  // 提交签章数据
+  async submit() {
+    const items = this.signatureManager.getSignatures()
+    
+    if (items.length === 0) {
+      alert('请至少添加一个签章')
+      return
+    }
+
+    // 生成后端所需参数
+    const params = await CoordinateTransformer.generateSignatureParams(
+      items,
+      this.pdfViewer
+    )
+
+    // 提交到后端
+    await fetch('/api/contract/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contractId: '12345',
+        signatures: params
+      })
+    })
+
+    alert('签署成功')
+  }
+
+  // 回显已保存的签章
+  async loadSignatures(signatures: SignatureParams[]) {
+    for (const sig of signatures) {
+      // PDF 坐标 → 屏幕坐标（换算的逆过程）
+      const screenCoords = this.pdfToScreen(sig)
+      
+      this.signatureManager.addSignature({
+        type: sig.type,
+        pageNum: sig.pageNum,
+        x: screenCoords.x,
+        y: screenCoords.y,
+        width: screenCoords.width,
+        height: screenCoords.height,
+        imageUrl: sig.imageUrl
+      })
+    }
+  }
+}
+```
+
+**技术难点与解决方案**：
+
+**1. 坐标系差异**：
+- **问题**：Canvas 坐标原点在左上角，PDF 坐标原点在左下角
+- **方案**：Y 轴翻转公式 `pdfY = pdfHeight - screenY`
+
+**2. 缩放比例换算**：
+- **问题**：用户可缩放 PDF，屏幕坐标与 PDF 原始坐标不一致
+- **方案**：记录 scale，换算时 `pdfX = screenX * (pdfWidth / screenWidth) / scale`
+
+**3. 高 DPI 屏幕适配**：
+- **问题**：Canvas 在 Retina 屏幕模糊
+- **方案**：`canvas.width = displayWidth * devicePixelRatio`，同时 `ctx.scale(dpr, dpr)`
+
+**4. 移动端触摸绘制**：
+- **问题**：触摸事件与鼠标事件不同
+- **方案**：统一封装 `getPoint` 方法，兼容 `MouseEvent` 和 `TouchEvent`
+
+**5. 签名图片上传**：
+- **问题**：Base64 体积大，不适合直接存储
+- **方案**：Canvas 导出 Blob，用 FormData 上传，后端返回 CDN URL
+
+**性能优化**：
+- **Canvas 离屏渲染**：签名板用离屏 Canvas，减少重绘
+- **PDF 分页加载**：只渲染当前页，翻页时再加载
+- **图片压缩**：签名图片压缩后上传（如 quality: 0.8）
+- **防抖**：拖拽/缩放时防抖更新坐标，减少计算
+
+**业务价值**：
+- 支持电子合同无纸化签署
+- 手写签名采集，保留笔迹真实性
+- 多页文档、多签章支持
+- 移动端签名适配
+- 前后端坐标精准换算，合成文件准确
+
+
+### 跨平台和设备兼容
+
+核心分三层：布局适配、交互适配、功能兼容。
+
+**布局适配**：
+- 设置 viewport meta 标签禁用缩放
+- 响应式布局：Flexbox/Grid + 媒体查询
+- 使用相对单位：rem/vw
+- 移动端安全区：safe-area-inset
+- 1px 边框问题：transform: scale 或 0.5px + 媒体查询
+
+**交互适配**：
+- 移动端用 touch 事件代替 click（避免 300ms 延迟）
+- 或使用 touch-action: manipulation
+- 点击区域至少 44px
+- 处理横竖屏切换
+- 处理软键盘顶起页面
+
+**功能兼容**：
+- CSS：autoprefixer 自动加前缀
+- JS：Babel + core-js polyfill 填平 API 差异
+- 特性检测：@supports 或 Modernizr
+- 测试覆盖主流机型（iOS Safari、Android Chrome）和浏览器内核差异
+
+**移动端重点**：
+- 禁用页面缩放
+- 处理安全区
+- 优化触摸响应
+- 注意软键盘影响
+- 测试不同屏幕密度和尺寸
+
+---
